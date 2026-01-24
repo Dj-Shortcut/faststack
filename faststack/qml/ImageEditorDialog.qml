@@ -8,7 +8,7 @@ Window {
     id: imageEditorDialog
     width: 800
     height: 750
-    title: "Image Editor"
+    title: uiState && uiState.editorFilename ? "Image Editor - " + uiState.editorFilename + " (" + uiState.editorBitDepth + "-bit)" : "Image Editor"
     visible: uiState ? uiState.isEditorOpen : false
     flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
     property int updatePulse: 0
@@ -213,10 +213,41 @@ Window {
                 Layout.alignment: Qt.AlignTop
                 spacing: 15
 
-                // --- Color Group ---
+                // --- Source Group ---
                 Loader { 
                     sourceComponent: sectionHeader 
                     Layout.topMargin: 0 // Remove top margin for the very first item
+                    onLoaded: item.text = "📸 Source"
+                    visible: uiState ? uiState.hasRaw : false
+                }
+                Button {
+                    text: (uiState && uiState.isRawActive) ? "RAW Loaded" : "Load RAW"
+                    Layout.fillWidth: true
+                    visible: uiState ? uiState.hasRaw : false
+                    enabled: uiState ? !uiState.isRawActive : false
+                    onClicked: {
+                        if (uiState) uiState.enableRawEditing()
+                        imageEditorDialog.updatePulse++
+                    }
+                }
+                Label {
+                    text: uiState ? uiState.saveBehaviorMessage : ""
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 11
+                    color: imageEditorDialog.textColor
+                    opacity: 0.7
+                    font.italic: true
+                }
+                Loader { 
+                    sourceComponent: sectionSeparator 
+                    visible: uiState ? uiState.hasRaw : false
+                }
+
+                // --- Color Group ---
+                Loader { 
+                    sourceComponent: sectionHeader 
+                    Layout.topMargin: (uiState && uiState.hasRaw) ? 5 : 0 // Adjust logic if needed
                     onLoaded: item.text = "🎨 Color"
                 }
                 ListModel {
@@ -436,6 +467,7 @@ Window {
                 
                 property double lastPressTime: 0
                 property double lastPressValue: 0
+                property bool isResetting: false
                 
                 onPressedChanged: {
                     if (pressed) {
@@ -446,12 +478,22 @@ Window {
                         // Double click detection: <500ms time diff AND <5% value diff
                         // This prevents false positives when dragging quickly
                         if (now - lastPressTime < 500 && diff < (range * 0.05)) { 
+                             isResetting = true
                              controller.set_edit_parameter(model.key, 0.0)
-                             imageEditorDialog.updatePulse++
-                             value = 0.0
+                             
+                             // CRITICAL FIX: Force the slider to release 'pressed' state 
+                             // to stop tracking the mouse position.
+                             // We must wait a tick to ensure the internal state clears.
+                             slider.enabled = false
+                             resetTimer.start()
+                             
                              _pendingValue = 0.0
                              slider._lastSentValue = 0.0
+                             imageEditorDialog.updatePulse++
+                             isResetting = false
+                             return
                         }
+                        
                         lastPressTime = now
                         lastPressValue = value
                         
@@ -459,6 +501,9 @@ Window {
                         _pendingValue = value
                         if (!sendTimer.running) sendTimer.start()
                     } else {
+                        // Guard: If we are resetting, don't process the release logic
+                        if (isResetting) return
+
                         imageEditorDialog.slidersPressedCount--
                         
                         // Stop repeating sends, then send final value immediately
@@ -466,19 +511,31 @@ Window {
                         var sendValue = isReversed ? -value : value
                         controller.set_edit_parameter(model.key, sendValue / maxVal)
                         
+                        // Don't update histogram here if we are just starting to drag? 
+                        // Actually release is end of drag.
                         if (controller) controller.update_histogram()
                     }
                 }
                 
+                Timer {
+                    id: resetTimer
+                    interval: 50
+                    onTriggered: {
+                        slider.enabled = true
+                        // Ensure value is synced
+                        slider.value = slider.backendValue
+                    }
+                }
+                
                 onBackendValueChanged: {
-                    if (!pressed) {
+                    if (!pressed && !isResetting) {
                         value = backendValue
                     }
                 }
 
                 // Smooth transition for value changes from backend
                 Behavior on value {
-                    enabled: !slider.pressed
+                    enabled: !slider.pressed && !slider.isResetting
                     NumberAnimation { duration: 200; easing.type: Easing.OutQuad }
                 }
                 

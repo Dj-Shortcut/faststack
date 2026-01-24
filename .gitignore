@@ -1,6 +1,8 @@
 # Virtual environments
 .venv/
 venv/
+verify_venv/
+env/
 
 # Python cache
 __pycache__/
@@ -11,6 +13,8 @@ dist/
 build/
 *.spec
 faststack.egg-info/
+*.egg-info/
+
 
 # Logs
 *.log
@@ -36,3 +40,17 @@ faststack/.mypy_cache/
 
 # Runtime/Data
 var/
+
+# Test outputs and temp files
+*.txt
+test_*.txt
+output*.txt
+debug*.*
+repro*.py
+smoke_test_output.txt
+verify_result.txt
+
+# IDE/editor temp files
+*.swp
+*.swo
+

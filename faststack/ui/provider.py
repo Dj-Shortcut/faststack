@@ -130,7 +130,9 @@ class UIState(QObject):
     autoLevelStrengthAutoChanged = Signal(bool)
     # Image Editor Signals
     is_editor_open_changed = Signal(bool)
+    editorImageChanged = Signal() # New signal for when the image loaded in editor changes
     is_cropping_changed = Signal(bool)
+
     is_histogram_visible_changed = Signal(bool)
     histogram_data_changed = Signal()
     brightness_changed = Signal(float)
@@ -153,6 +155,7 @@ class UIState(QObject):
     blacks_changed = Signal(float)
     whites_changed = Signal(float)
     clarity_changed = Signal(float)
+    texture_changed = Signal(float)
     
     # Debug Cache Signals
     debugCacheChanged = Signal(bool)
@@ -160,6 +163,8 @@ class UIState(QObject):
     isDecodingChanged = Signal(bool)
     debugModeChanged = Signal(bool) # General debug mode signal
     isDialogOpenChanged = Signal(bool) # New signal for dialog state
+    editSourceModeChanged = Signal(str) # Notify when JPEG/RAW mode changes
+    saveBehaviorMessageChanged = Signal() # Signal for save behavior message updates
 
     def __init__(self, app_controller):
         super().__init__()
@@ -202,6 +207,7 @@ class UIState(QObject):
         self._blacks = 0.0
         self._whites = 0.0
         self._clarity = 0.0
+        self._texture = 0.0
         
         # Debug Cache State
         self._debug_cache = False
@@ -211,6 +217,13 @@ class UIState(QObject):
         
         # Connect to controller's dialog state signal
         self.app_controller.dialogStateChanged.connect(self._on_dialog_state_changed)
+        
+        # Connect to controller's mode change signal
+        # We need to ensure the signal exists on controller first (it does, I added it)
+        if hasattr(self.app_controller, 'editSourceModeChanged'):
+            self.app_controller.editSourceModeChanged.connect(self.editSourceModeChanged)
+            self.app_controller.editSourceModeChanged.connect(lambda _: self.saveBehaviorMessageChanged.emit())
+            self.app_controller.editSourceModeChanged.connect(lambda _: self.metadataChanged.emit()) # Also update metadata binding if needed
 
     def _on_dialog_state_changed(self, is_open: bool):
         self.isDialogOpen = is_open
@@ -342,6 +355,44 @@ class UIState(QObject):
             return ""
         return self.app_controller.get_current_metadata().get("restacked_date", "")
 
+    # --- RAW / True Headroom Support ---
+
+    @Property(bool, notify=metadataChanged)
+    def hasRaw(self):
+        if not self.app_controller.image_files or self.app_controller.current_index >= len(self.app_controller.image_files):
+            return False
+        return self.app_controller.image_files[self.app_controller.current_index].has_raw
+
+    @Property(bool, notify=metadataChanged)
+    def hasWorkingTif(self):
+        if not self.app_controller.image_files or self.app_controller.current_index >= len(self.app_controller.image_files):
+            return False
+        return self.app_controller.image_files[self.app_controller.current_index].has_working_tif
+
+    @Slot()
+    def enableRawEditing(self):
+        """Switches to RAW editing mode."""
+        if hasattr(self.app_controller, 'enable_raw_editing'):
+            self.app_controller.enable_raw_editing()
+
+    @Property(bool, notify=editSourceModeChanged)
+    def isRawActive(self):
+        """Returns True if the editor is in RAW source mode."""
+        if hasattr(self.app_controller, 'current_edit_source_mode'):
+            return self.app_controller.current_edit_source_mode == "raw"
+        return False
+        
+    @Slot(result=bool)
+    def load_image_for_editing(self):
+        """Loads the currently viewed image into the editor."""
+        return self.app_controller.load_image_for_editing()
+
+    @Slot()
+    def developRaw(self):
+        # Legacy support
+        self.app_controller.develop_raw_for_current_image()
+
+
     @Property(str, notify=stackSummaryChanged)
     def stackSummary(self):
         if not self.app_controller.stacks:
@@ -351,6 +402,17 @@ class UIState(QObject):
             count = end - start + 1
             summary += f"Stack {i+1}: {count} photos (indices {start}-{end})\n"
         return summary
+
+    @Property(str, notify=saveBehaviorMessageChanged)
+    def saveBehaviorMessage(self):
+        """Returns a string describing what files will be affected by saving."""
+        if not hasattr(self.app_controller, 'current_edit_source_mode'):
+            return ""
+            
+        if self.app_controller.current_edit_source_mode == "raw":
+            return "Editing: RAW (writes working .tif + creates -developed.jpg; original JPG untouched)"
+        else:
+            return "Editing: JPEG (will overwrite JPG)"
 
     @Property(str, notify=statusMessageChanged)
     def statusMessage(self):
@@ -629,6 +691,22 @@ class UIState(QObject):
             self._is_editor_open = new_value
             self.is_editor_open_changed.emit(new_value)
 
+    @Property(str, notify=editorImageChanged)
+    def editorFilename(self) -> str:
+        """Returns the filename of the image currently being edited (may be .tif for developed RAW)."""
+        editor = self.app_controller.image_editor
+        if editor and editor.current_filepath:
+            return editor.current_filepath.name
+        return ""
+
+    @Property(int, notify=editorImageChanged)
+    def editorBitDepth(self) -> int:
+        """Returns the bit depth (8 or 16) of the image currently being edited."""
+        editor = self.app_controller.image_editor
+        if editor:
+            return editor.bit_depth
+        return 8
+
     @Property(bool, notify=isDialogOpenChanged)
     def isDialogOpen(self) -> bool:
         return self._is_dialog_open
@@ -697,9 +775,11 @@ class UIState(QObject):
         self.blacks = 0.0
         self.whites = 0.0
         self.clarity = 0.0
+        self.texture = 0.0
         self.cropRotation = 0.0
         self.currentCropBox = (0, 0, 1000, 1000)
-        self.currentAspectRatioIndex = 0    
+        self.currentAspectRatioIndex = 0
+    
     @Property('QVariant', notify=histogram_data_changed)
     def histogramData(self):
         """Returns histogram data as a dict with 'r', 'g', 'b' keys, each containing a list of 256 values."""
@@ -955,6 +1035,16 @@ class UIState(QObject):
             self._clarity = new_value
             self.clarity_changed.emit(new_value)
 
+    @Property(float, notify=texture_changed)
+    def texture(self) -> float:
+        return self._texture
+    
+    @texture.setter
+    def texture(self, new_value: float):
+        if self._texture != new_value:
+            self._texture = new_value
+            self.texture_changed.emit(new_value)
+
     # --- Debug Cache Properties ---
 
     @Property(bool, notify=debugCacheChanged)
@@ -996,3 +1086,7 @@ class UIState(QObject):
         if self._debug_mode != value:
             self._debug_mode = value
             self.debugModeChanged.emit(value)
+
+    # --- RAW / Editor Source Logic ---
+
+

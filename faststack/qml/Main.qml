@@ -417,6 +417,27 @@ ApplicationWindow {
         contentItem: Column {
             id: actionsMenuColumn
 
+            // Develop RAW (True Headroom)
+            ItemDelegate {
+                width: 220
+                height: 36
+                text: (uiState && uiState.hasWorkingTif) ? "Re-develop RAW" : "Develop RAW"
+                enabled: uiState ? uiState.hasRaw : false
+                onClicked: {
+                    if (uiState) uiState.developRaw()
+                    actionsMenu.close()
+                }
+                background: Rectangle {
+                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: enabled ? root.currentTextColor : (root.isDarkTheme ? "#666666" : "#999999")
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 10
+                }
+            }
+
             // Edit Image (from old Main.qml)
             ItemDelegate {
                 width: 220

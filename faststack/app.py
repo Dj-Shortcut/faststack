@@ -12,6 +12,8 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import date
 import os
 import shutil
+import uuid
+import functools
 # Must set before importing PySide6
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.mime.warning=false"
 
@@ -98,6 +100,8 @@ class AppController(QObject):
         progress_updated = Signal(int)
         finished = Signal()
 
+    editSourceModeChanged = Signal(str) # Notify when JPEG/RAW mode changes
+
     def __init__(self, image_dir: Path, engine: QQmlApplicationEngine, debug_cache: bool = False):
         super().__init__()
         # Histogram Offloading Setup
@@ -140,6 +144,10 @@ class AppController(QObject):
         self._eviction_timestamps = [] # List of eviction timestamps for rate detection
         self.display_ready = False  # Track if display size has been reported
         self.pending_prefetch_index: Optional[int] = None  # Deferred prefetch index
+        
+        # Edit Source Mode State
+        # "jpeg" (default) or "raw"
+        self.current_edit_source_mode: str = "jpeg"
 
         # -- Backend Components --
         self.watcher = Watcher(self.image_dir, self.refresh_image_list)
@@ -229,6 +237,74 @@ class AppController(QObject):
         self.auto_level_strength = config.getfloat('core', 'auto_level_strength', 1.0)
         self.auto_level_strength_auto = config.getboolean('core', 'auto_level_strength_auto', False)
 
+        # Connect editor open/close signal for memory cleanup
+        self.ui_state.is_editor_open_changed.connect(self._on_editor_open_changed)
+
+    @Slot(bool)
+    def _on_editor_open_changed(self, is_open: bool):
+        """Handle necessary setup/cleanup when editor opens or closes."""
+        if not is_open:
+            # Cleanup large memory buffers when editor closes
+            if self.image_editor:
+                log.debug("Editor closed, clearing editor memory buffers")
+                self.image_editor.clear()
+            
+            # Also clear the cached preview rendering
+            with self._preview_lock:
+                self._last_rendered_preview = None
+
+
+    def is_valid_working_tif(self, path: Path) -> bool:
+        """Checks if a working TIFF path is valid for editing."""
+        try:
+            return path.exists() and path.stat().st_size > 0
+        except OSError:
+            return False
+
+    def get_active_edit_path(self, index: int) -> Path:
+        """
+        Determines the correct file path to use for editing/exporting based on current mode.
+        
+        Rules:
+        1. If index invalid, raise IndexError or return None (caller handles).
+        2. If image is RAW-only (no paired JPEG and path is RAW ext), force "raw" mode functionality.
+           (Note: ImageFile.path is usually the JPEG if it exists. If it's a RAW file, it means orphaned RAW).
+        3. If mode is "jpeg": return jpg_path (visual/original).
+        4. If mode is "raw":
+           - Check for valid developed TIFF. If yes, return it.
+           - If no TIFF, return the RAW path itself (RawTherapee will need to develop it, 
+             or we load it if we support direct RAW - here we likely return raw_path so 
+             load_image_for_editing can decide to develop it).
+        """
+        if index < 0 or index >= len(self.image_files):
+            raise IndexError("Invalid image index")
+
+        img = self.image_files[index]
+        
+        # Check if we are strictly RAW-only (orphaned RAW or just RAW opened)
+        # ImageFile.path is the main file. ImageFile.raw_pair is the sidecar RAW.
+        # If raw_pair is None but path is a RAW extension, it's RAW-only.
+        is_raw_only = False
+        from faststack.io.indexer import RAW_EXTENSIONS
+        if img.raw_pair is None and img.path.suffix.lower() in RAW_EXTENSIONS:
+            is_raw_only = True
+
+        mode = self.current_edit_source_mode
+        if is_raw_only:
+            mode = "raw"
+        
+        if mode == "jpeg":
+            return img.path
+        
+        # Mode is RAW
+        if img.has_working_tif and self.is_valid_working_tif(img.working_tif_path):
+            return img.working_tif_path
+        
+        if img.raw_pair:
+            return img.raw_pair
+             
+        # Fallback for RAW-only case where path is the RAW
+        return img.path
 
     @Slot(str)
     def apply_filter(self, filter_string: str):
@@ -654,27 +730,143 @@ class AppController(QObject):
         )
 
 
+
+    # --- Image Editor Integration ---
+
+
+    @Slot()
+    def rotate_image_cw(self):
+        if self.image_editor:
+            self.image_editor.rotate_image_cw()
+            self.ui_refresh_generation += 1
+            self.ui_state.currentImageSourceChanged.emit()
+            self.update_histogram()
+
+    @Slot()
+    def rotate_image_ccw(self):
+        if self.image_editor:
+            self.image_editor.rotate_image_ccw()
+            self.ui_refresh_generation += 1
+            self.ui_state.currentImageSourceChanged.emit()
+            self.update_histogram()
+
+    @Slot()
+    def reset_edit_parameters(self):
+        if self.image_editor:
+            self.image_editor.reset_edits()
+            self.ui_refresh_generation += 1
+            self.ui_state.currentImageSourceChanged.emit()
+            self.update_histogram()
+            self.update_status_message("Edits reset")
+
+    @Slot()
+    def save_edited_image(self):
+        """Saves functionality delegating to ImageEditor."""
+        if not self.image_editor.original_image:
+            return
+
+        # Only write developed sidecar when editing from RAW source
+        write_sidecar = self.current_edit_source_mode == "raw"
+        dev_path = None
+        if write_sidecar and 0 <= self.current_index < len(self.image_files):
+            dev_path = self.image_files[self.current_index].developed_jpg_path
+
+        result = self.image_editor.save_image(write_developed_jpg=write_sidecar, developed_path=dev_path)
+        if result:
+            saved_path, backup_path = result
+            
+            # If we overwrote the current file, we need to refresh checks
+            # But usually we save as a new file or overwrite.
+            # Use get_active_edit_path logic? ImageEditor handles correct path logic? 
+            # ImageEditor.save_image saves to self.current_filepath
+            
+            # Invalidate cache for this file
+            self.display_generation += 1
+            self.image_cache.clear() # Brute force clear to ensure fresh load
+            self.prefetcher.cancel_all()
+            self.prefetcher.update_prefetch(self.current_index)
+            
+            self.sync_ui_state()
+            self.update_status_message(f"Image saved")
+        else:
+            self.update_status_message("Failed to save image")
+
+    @Slot()
+    def auto_levels(self):
+        if not self.image_editor.original_image:
+            return
+            
+        blacks, whites, p_low, p_high = self.image_editor.auto_levels(self.auto_level_threshold)
+        
+        # Apply strength if needed (editor auto_levels returns values, doesn't apply them automatically to params?)
+        # Wait, ImageEditor.auto_levels just CALCULATES. We need to APPLY.
+        # Let's check ImageEditor.auto_levels signature in editor.py...
+        # It returns (blacks, whites, p_low, p_high).
+        
+        # We need to set them:
+        range_ = whites - blacks
+        if range_ < 0.001: range_ = 0.001
+        
+        # Apply strict auto-levels (ignoring strength for now as per simple impl, or use strength?)
+        # The QML just calls auto_levels() and increments updatePulse.
+        
+        # Setup parameters
+        # Note: 'blacks' and 'whites' in editor params usually map to exposure/contrast or specific black/white point?
+        # Standard Lightroom-style:
+        # Blacks: shifts black point. Whites: shifts white point.
+        # But our ImageEditor might use specific params.
+        # Looking at ImageEditor... it has 'blacks', 'whites' in _apply_edits.
+        
+        # We just set the params:
+        self.image_editor.set_edit_param("blacks", blacks * self.auto_level_strength)
+        self.image_editor.set_edit_param("whites", whites * self.auto_level_strength)
+        
+        self.ui_refresh_generation += 1
+        self.ui_state.currentImageSourceChanged.emit()
+        self.update_histogram()
+        self.update_status_message("Auto levels applied")
+
+
+
     # --- Actions --- 
+
+    def _set_current_index(self, index: int, direction: int = 0, is_navigation: bool = True):
+        """Centralized method to change current image index and reset state."""
+        if index < 0 or index >= len(self.image_files):
+            return
+
+        # Reset source mode to JPEG unless new image is strictly RAW-only
+        # (This implements the "Default state on navigation" requirement)
+        img = self.image_files[index]
+        is_raw_only = False
+        from faststack.io.indexer import RAW_EXTENSIONS, JPG_EXTENSIONS
+        # Robust RAW-only check: Main path is RAW and it's not a JPEG
+        is_jpeg_main = img.path.suffix.lower() in JPG_EXTENSIONS
+        is_raw_main = img.path.suffix.lower() in RAW_EXTENSIONS
+        is_raw_only = is_raw_main and not is_jpeg_main
+        
+        new_mode = "raw" if is_raw_only else "jpeg"
+        if self.current_edit_source_mode != new_mode:
+            self.current_edit_source_mode = new_mode
+            self.editSourceModeChanged.emit(new_mode)
+        
+        self.current_index = index # Set index first so signals pick up correct image
+
+        self._reset_crop_settings()
+        self._do_prefetch(self.current_index, is_navigation=is_navigation, direction=direction)
+        self.sync_ui_state()
+        
+        # Update histogram if visible
+        if self.ui_state.isHistogramVisible:
+            self.update_histogram()
 
     def next_image(self):
         if self.current_index < len(self.image_files) - 1:
-            self.current_index += 1
-            self._reset_crop_settings()
-            self._do_prefetch(self.current_index, is_navigation=True, direction=1)
-            self.sync_ui_state()
-            # Update histogram if visible
-            if self.ui_state.isHistogramVisible:
-                self.update_histogram()
+            self._set_current_index(self.current_index + 1, direction=1)
 
     def prev_image(self):
         if self.current_index > 0:
-            self.current_index -= 1
-            self._reset_crop_settings()
-            self._do_prefetch(self.current_index, is_navigation=True, direction=-1)
-            self.sync_ui_state()
-            # Update histogram if visible
-            if self.ui_state.isHistogramVisible:
-                self.update_histogram()
+            self._set_current_index(self.current_index - 1, direction=-1)
 
     @Slot(int)
     def jump_to_image(self, index: int):
@@ -684,13 +876,7 @@ class AppController(QObject):
                 self.update_status_message(f"Already at image {index + 1}")
                 return
             direction = 1 if index > self.current_index else -1
-            self.current_index = index
-            self._reset_crop_settings()
-            self._do_prefetch(self.current_index, is_navigation=True, direction=direction)
-            self.sync_ui_state()
-            # Update histogram if visible
-            if self.ui_state.isHistogramVisible:
-                self.update_histogram()
+            self._set_current_index(index, direction=direction)
             self.update_status_message(f"Jumped to image {index + 1}")
         else:
             log.warning("Invalid image index: %d", index)
@@ -1649,6 +1835,42 @@ class AppController(QObject):
             if self.current_index >= 0 and self.current_index < len(self.image_files):
                 self.ui_state.currentImageSourceChanged.emit()
         
+    @Slot(result=float)
+    def get_auto_level_clipping_threshold(self):
+        return self.auto_level_threshold
+
+    @Slot(float)
+    def set_auto_level_clipping_threshold(self, value):
+        # Clamp to 0-1 range for safety
+        value = max(0.0, min(1.0, value))
+        self.auto_level_threshold = value
+        # Store as formatted string to avoid scientific notation weirdness or precision issues
+        config.set('core', 'auto_level_threshold', f"{value:.6g}")
+        config.save()
+
+    @Slot(result=float)
+    def get_auto_level_strength(self):
+        return self.auto_level_strength
+
+    @Slot(float)
+    def set_auto_level_strength(self, value):
+        # Clamp to 0-1 range
+        value = max(0.0, min(1.0, value))
+        self.auto_level_strength = value
+        config.set('core', 'auto_level_strength', f"{value:.6g}")
+        config.save()
+
+    @Slot(result=bool)
+    def get_auto_level_strength_auto(self):
+        return self.auto_level_strength_auto
+
+    @Slot(bool)
+    def set_auto_level_strength_auto(self, value):
+        self.auto_level_strength_auto = value
+        # Store as canonical lowercase string
+        config.set('core', 'auto_level_strength_auto', "true" if value else "false")
+        config.save()
+        
     def open_directory_dialog(self):
         dialog = QFileDialog()
         dialog.setFileMode(QFileDialog.FileMode.Directory)
@@ -1856,7 +2078,6 @@ class AppController(QObject):
         
         # Handle collisions with timestamp loop
         if dest.exists():
-            import time
             timestamp = int(time.time())
             base_name = f"{src.stem}.{timestamp}"
             dest = self.recycle_bin_dir / f"{base_name}{src.suffix}"
@@ -2037,6 +2258,85 @@ class AppController(QObject):
         else:
             self.update_status_message("No images were deleted.")
 
+    def _restore_backup_safe(self, saved_path_str: str, backup_path_str: str) -> bool:
+        """
+        Robustly restores a backup file to its original location, handling
+        locking and permission errors using a unique temporary file strategy.
+        Verifies success.
+        """
+        saved_path = Path(saved_path_str)
+        backup_path = Path(backup_path_str)
+
+        if not backup_path.exists():
+            if saved_path.exists():
+                self.update_status_message("Already restored (backup missing)")
+                log.warning("Backup %s missing but original exists.", backup_path)
+            else:
+                self.update_status_message("Backup not found")
+                log.warning("Backup %s disappeared before it could be restored.", backup_path)
+            return False
+
+        # Generate a unique temporary path to avoid collisions
+        temp_path = saved_path.with_suffix(f'.{uuid.uuid4().hex}.tmp_restore')
+        
+        try:
+            # 1. If the target exists, we need to move the backup to the temp location first,
+            #    then try to swap. If target is locked, we can't delete it directly.
+            if saved_path.exists():
+                try:
+                    saved_path.unlink() # Try the easy way first
+                except PermissionError as pe:
+                    log.warning("File %s locked, attempting safe restore strategy: %s", saved_path, pe)
+                    
+                    # Move backup to temp
+                    try: 
+                        shutil.move(str(backup_path), str(temp_path))
+                    except OSError as e:
+                         log.error("Failed to move backup to temp: %s", e)
+                         raise
+
+                    if not temp_path.exists():
+                         log.error("Temp file %s not found after move!", temp_path)
+                         raise OSError(f"Failed to create temp file {temp_path}")
+
+                    # Try to force-move the temp file over the target (replace)
+                    try:
+                        os.replace(str(temp_path), str(saved_path))
+                    except OSError:
+                        # If replace fails, try to move back
+                        log.error("Could not overwrite locked file %s", saved_path)
+                        shutil.move(str(temp_path), str(backup_path))
+                        raise
+            
+            # 2. If target doesn't exist (successfully unlinked or didn't exist), move backup to target
+            if not saved_path.exists():
+                # If we moved to temp, move temp -> target
+                source = temp_path if temp_path.exists() else backup_path
+                shutil.move(str(source), str(saved_path))
+            
+            # Verify restoration
+            if not saved_path.exists():
+                raise OSError(f"Restoration failed: {saved_path} does not exist after move.")
+            
+            if saved_path.stat().st_size == 0:
+                 log.warning("Restored file %s is 0 bytes!", saved_path)
+
+            log.info("Successfully restored %s from %s", saved_path, backup_path_str)
+            return True
+
+        except Exception as e:
+            # Attempt cleanup
+            if temp_path.exists():
+                try:
+                    if backup_path.exists():
+                         temp_path.unlink() # Backup still there, just kill temp
+                    else:
+                         shutil.move(str(temp_path), str(backup_path)) # Put it back
+                except OSError:
+                    pass
+            log.exception("Detailed error in _restore_backup_safe")
+            raise e
+
     @Slot()
     def undo_delete(self):
         """Unified undo that handles both delete and auto white balance operations."""
@@ -2110,108 +2410,68 @@ class AppController(QObject):
         
         elif action_type == "auto_white_balance":
             saved_path, backup_path = action_data
-            filepath_obj = Path(saved_path)
-
             try:
-                backup_path_obj = Path(backup_path)
-                if backup_path_obj.exists():
-                    # Restore the backup
-                    filepath_obj.unlink()  # Remove the edited version
-                    backup_path_obj.rename(filepath_obj)  # Restore backup
-                    log.info("Restored backup %s for %s", backup_path_obj.name, saved_path)
-                    
-                    # Refresh the view
+                if self._restore_backup_safe(saved_path, backup_path):
+                    # Refresh
                     self.refresh_image_list()
-                    
-                    # Find the restored image
+                    # Find
+                    saved_path_obj = Path(saved_path)
                     for i, img_file in enumerate(self.image_files):
-                        if img_file.path == filepath_obj:
+                        if img_file.path == saved_path_obj:
                             self.current_index = i
                             break
-                    
                     self.display_generation += 1
                     self.image_cache.clear()
                     self.prefetcher.cancel_all()
                     self.prefetcher.update_prefetch(self.current_index)
                     self.sync_ui_state()
-                    
                     if self.ui_state.isHistogramVisible:
                         self.update_histogram()
-                    
+                        
                     self.update_status_message("Undid auto white balance")
-                else:
-                    # This case should not be reached if glob finds files
-                    self.update_status_message("Backup not found")
-                    log.warning("Backup %s disappeared before it could be restored.", backup_path)
-                    self.undo_history.append(("auto_white_balance", (saved_path, backup_path), timestamp))
-            except OSError as e:
+            except Exception as e:
                 self.update_status_message(f"Undo failed: {e}")
-                log.exception("Failed to undo auto white balance")
-                # Put it back in history if it failed
-                self.undo_history.append(("auto_white_balance", (saved_path, backup_path), timestamp))
+                if Path(backup_path).exists():
+                     self.undo_history.append(("auto_white_balance", action_data, timestamp))
 
         elif action_type == "auto_levels":
             saved_path, backup_path = action_data
-            filepath_obj = Path(saved_path)
-
             try:
-                backup_path_obj = Path(backup_path)
-                if backup_path_obj.exists():
-                    # Restore the backup
-                    filepath_obj.unlink()  # Remove the edited version
-                    backup_path_obj.rename(filepath_obj)  # Restore backup
-                    log.info("Restored backup %s for %s", backup_path_obj.name, saved_path)
-                    
-                    # Refresh the view
+                if self._restore_backup_safe(saved_path, backup_path):
+                    # Refresh
                     self.refresh_image_list()
-                    
-                    # Find the restored image
+                    # Find
+                    saved_path_obj = Path(saved_path)
                     for i, img_file in enumerate(self.image_files):
-                        if img_file.path == filepath_obj:
+                        if img_file.path == saved_path_obj:
                             self.current_index = i
                             break
-                    
                     self.display_generation += 1
                     self.image_cache.clear()
                     self.prefetcher.cancel_all()
                     self.prefetcher.update_prefetch(self.current_index)
                     self.sync_ui_state()
-                    
                     if self.ui_state.isHistogramVisible:
                         self.update_histogram()
                         
                     self.update_status_message("Undid auto levels")
-                else:
-                    self.update_status_message("Backup not found")
-                    log.warning("Backup %s disappeared before it could be restored.", backup_path)
-                    self.undo_history.append(("auto_levels", (saved_path, backup_path), timestamp))
-            except OSError as e:
+            except Exception as e:
                 self.update_status_message(f"Undo failed: {e}")
-                log.exception("Failed to undo auto levels")
-                # Put it back in history if it failed
-                self.undo_history.append(("auto_levels", (saved_path, backup_path), timestamp))
-        
+                if Path(backup_path).exists():
+                     self.undo_history.append(("auto_levels", action_data, timestamp))
+
         elif action_type == "crop":
             saved_path, backup_path = action_data
-            filepath_obj = Path(saved_path)
-
             try:
-                backup_path_obj = Path(backup_path)
-                if backup_path_obj.exists():
-                    # Restore the backup
-                    filepath_obj.unlink()  # Remove the cropped version
-                    backup_path_obj.rename(filepath_obj)  # Restore backup
-                    log.info("Restored backup %s for %s", backup_path_obj.name, saved_path)
-                    
-                    # Refresh the view
+                if self._restore_backup_safe(saved_path, backup_path):
+                    # Refresh
                     self.refresh_image_list()
-                    
-                    # Find the restored image
+                    # Find
+                    saved_path_obj = Path(saved_path)
                     for i, img_file in enumerate(self.image_files):
-                        if img_file.path == filepath_obj:
+                        if img_file.path == saved_path_obj:
                             self.current_index = i
                             break
-                    
                     self.display_generation += 1
                     self.image_cache.clear()
                     self.prefetcher.cancel_all()
@@ -2219,15 +2479,10 @@ class AppController(QObject):
                     self.sync_ui_state()
                     
                     self.update_status_message("Undid crop")
-                else:
-                    self.update_status_message("Backup not found")
-                    log.warning("Backup %s disappeared before it could be restored.", backup_path)
-                    self.undo_history.append(("crop", (saved_path, backup_path), timestamp))
-            except OSError as e:
+            except Exception as e:
                 self.update_status_message(f"Undo failed: {e}")
-                log.exception("Failed to undo crop")
-                # Put it back in history if it failed
-                self.undo_history.append(("crop", (saved_path, backup_path), timestamp))
+                if Path(backup_path).exists():
+                     self.undo_history.append(("crop", action_data, timestamp))
 
     def shutdown(self):
         log.info("Application shutting down.")
@@ -2510,7 +2765,22 @@ class AppController(QObject):
         # Convert to sorted list and get only existing paths
         file_indices = sorted(files_to_drag)
         existing_indices = [idx for idx in file_indices if self.image_files[idx].path.exists()]
-        file_paths = [self.image_files[idx].path for idx in existing_indices]
+        
+        # Prefer dragging the developed JPG if it exists (for external export), 
+        # but only when RAW mode is active or we are dragging a developed file itself.
+        file_paths = []
+        for idx in existing_indices:
+            img = self.image_files[idx]
+            
+            # Suggestion: only prefer -developed.jpg when RAW mode is active 
+            # or when the current entry is itself the working/developed artifact.
+            is_developed_artifact = img.path.stem.lower().endswith("-developed")
+            in_raw_mode = (getattr(self, 'current_edit_source_mode', 'jpeg') == "raw")
+            
+            if (in_raw_mode or is_developed_artifact) and img.developed_jpg_path.exists():
+                file_paths.append(img.developed_jpg_path)
+            else:
+                file_paths.append(img.path)
         
         if not file_paths:
             log.error("No valid files to drag")
@@ -2567,39 +2837,226 @@ class AppController(QObject):
             self.sync_ui_state()
             log.info("Marked %d file(s) as uploaded on %s. Cleared all batches.", len(existing_indices), today)
 
-    # --- Image Editor Logic ---
 
-    @Slot(result=bool)
+
+    @Slot()
+    def enable_raw_editing(self):
+        """Switches the current image to RAW mode (using developed TIFF)."""
+        if not self.image_files:
+            return
+            
+        # 1. Update State
+        # 1. Update State
+        if self.current_edit_source_mode != "raw":
+            self.current_edit_source_mode = "raw"
+            self.editSourceModeChanged.emit("raw")
+        self.sync_ui_state()
+
+        # 2. Check if we have a valid TIFF ready
+        path = self.get_active_edit_path(self.current_index)
+        
+        # If the path returned IS the working TIFF (and it exists), we can just load it.
+        # Check specific condition:
+        image_file = self.image_files[self.current_index]
+        if path == image_file.working_tif_path and self.is_valid_working_tif(path):
+            log.info("Valid working TIFF exists, switching to RAW mode immediately.")
+            self.load_image_for_editing() # This will now pick up the TIFF via get_active_edit_path
+            return
+
+        # 3. If not ready, trigger development
+        # (Pass through to existing backend logic)
+        self._develop_raw_backend()
+
+    def _develop_raw_backend(self):
+        """Internal: Triggers the actual RawTherapee process."""
+        if not self.image_files:
+            return
+
+        image_file = self.image_files[self.current_index]
+        if not image_file.has_raw:
+            self.update_status_message("No RAW file available.")
+            return
+
+        raw_path = image_file.raw_path
+        tif_path = image_file.working_tif_path
+
+        # Resolve RawTherapee Executable
+        from faststack.config import config
+        rt_exe = config.get("rawtherapee", "exe")
+        if not rt_exe or not os.path.exists(rt_exe):
+            self.update_status_message("RawTherapee not found. Check settings.")
+            log.error("RawTherapee executable not configured or missing: %s", rt_exe)
+            return
+        self.update_status_message("Developing RAW... please wait.")
+        log.info("Starting RAW development: %s -> %s", raw_path, tif_path)
+
+        def worker():
+            # Check for optional args in config
+            rt_args = config.get("rawtherapee", "args")
+            
+            # Build command: rawtherapee-cli -t -Y -o <out.tif> -c <in.raw>
+            # -t: TIFF output
+            # -b16: 16-bit depth (Critical! Default is often 8-bit)
+            # -Y: Overwrite existing
+            # -o: Output file
+            # -c: Input file (must be last)
+            cmd = [rt_exe, "-t", "-b16", "-Y", "-o", str(tif_path)]
+            
+            if rt_args:
+                try:
+                    # Use shlex to properly parse arguments with quotes/escapes
+                    # On Windows, use posix=False to handle Windows-style paths
+                    parsed_args = shlex.split(rt_args, posix=(os.name != 'nt'))
+                    cmd.extend(parsed_args)
+                except ValueError as e:
+                    log.error("Invalid rawtherapee args format: %s", e)
+            
+            cmd.extend(["-c", str(raw_path)])
+            cmd_str = " ".join(cmd)  # For logging
+
+            # Run process
+            run_kwargs = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 60 # 60 second timeout
+            }
+            if sys.platform == "win32":
+                run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            try:
+                result = subprocess.run(cmd, **run_kwargs)
+
+                if result.returncode == 0:
+                    if tif_path.exists() and tif_path.stat().st_size > 0:
+                        log.info("RAW development successful.")
+                        # Use partial to bind variable deeply
+                        QTimer.singleShot(0, functools.partial(self._on_develop_finished, True, None))
+                        return # Success path
+                    else:
+                        msg = f"RawTherapee exited successfully but output file is missing or empty.\nCommand: {cmd_str}"
+                        log.error(msg)
+                        QTimer.singleShot(0, functools.partial(self._on_develop_finished, False, msg))
+                else:
+                    stderr = result.stderr.strip() if result.stderr else "(no stderr)"
+                    stdout = result.stdout.strip() if result.stdout else "(no stdout)"
+                    err_msg = f"RawTherapee failed (exit code {result.returncode}):\nCommand: {cmd_str}\nstderr: {stderr}\nstdout: {stdout}"
+                    log.error(err_msg)
+                    QTimer.singleShot(0, functools.partial(self._on_develop_finished, False, err_msg))
+
+            except subprocess.TimeoutExpired:
+                err_msg = f"RawTherapee timed out after 60 seconds.\nCommand: {cmd_str}"
+                log.error(err_msg)
+                QTimer.singleShot(0, functools.partial(self._on_develop_finished, False, err_msg))
+            except Exception as e:
+                err_msg = f"Unexpected error running RawTherapee: {str(e)}"
+                log.exception(err_msg)
+                QTimer.singleShot(0, functools.partial(self._on_develop_finished, False, err_msg))
+            finally:
+                # Cleanup if we failed and left a bad file or 0-byte file (unless success logic already returned)
+                # Note: success logic returns early. If we are here, we likely failed or fell through (e.g. 0 byte file case did not return)
+                # Actually, the 0-byte case calls on_finished but doesn't return, so it falls here.
+                # Let's check specifically if we need to cleanup.
+                # If we succeeded, we returned.
+                if tif_path.exists() and 'result' in locals():
+                     # Only cleanup if result was assigned (subprocess ran)
+                     # If it's 0 bytes or we are in an error state (which implies we didn't return early)
+                     try:
+                        if tif_path.stat().st_size == 0:
+                             tif_path.unlink()
+                        elif result.returncode != 0:
+                             # If we crashed but left a file, delete it
+                             tif_path.unlink()
+                     except (OSError, AttributeError):
+                         # AttributeError if result is None
+                         pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # Preserving legacy slot name for compatibility if QML calls it directly, 
+    # but QML should call enable_raw_editing now. 
+    # Actually provider.py calls this. I will update provider.py to call enable_raw_editing.
+    # But I'll keep this as a proxy to the new method just in case.
+    @Slot()
+    def develop_raw_for_current_image(self):
+        self.enable_raw_editing()
+
+
+    @Slot()
     def load_image_for_editing(self):
-        """Loads the currently viewed image into the editor."""
-        if self.image_files and self.current_index < len(self.image_files):
-            filepath = str(self.image_files[self.current_index].path)
-            # Only load if the editor is not already open for this file
-            if str(self.image_editor.current_filepath) == filepath and self.image_editor.original_image is not None:
-                 # Already loaded, just reset UI state for a fresh start
-                 self.reset_edit_parameters()
-                 return True
-
-            # Get the cached, display-sized image to use for fast previews
+        """
+        Loads the currently viewed image into the editor using active path logic.
+        This provides a centralized entry point for loading the editor correctly.
+        """
+        try:
+            active_path = self.get_active_edit_path(self.current_index)
+            filepath = str(active_path)
+            
+            # Fetch cached preview if available for faster initial display
             cached_preview = self.get_decoded_image(self.current_index)
 
-            if self.image_editor.load_image(filepath, cached_preview=cached_preview):
-                # Pass initial edits to uiState
-                initial_edits = self.image_editor._initial_edits()
-                for key, value in initial_edits.items():
-                    if hasattr(self.ui_state, key):
-                        setattr(self.ui_state, key, value)
+            # Determine if we should capture source EXIF (e.g., for RAW mode)
+            source_exif = None
+            if self.current_edit_source_mode == "raw":
+                # Capture EXIF from the original JPEG to preserve in developed JPG
+                image_file = self.image_files[self.current_index]
+                jpeg_path = image_file.path
+                # Only if the main path isn't itself a TIFF (avoid recursion)
+                if jpeg_path.suffix.lower() not in ('.tif', '.tiff') and jpeg_path.exists():
+                    try:
+                        with Image.open(jpeg_path) as src_im:
+                            source_exif = src_im.info.get('exif')
+                    except Exception as e:
+                        log.warning(f"Failed to capture source EXIF from {jpeg_path}: {e}")
 
-                # Set aspect ratios for QML dropdown
-                self.ui_state.aspectRatioNames = [r['name'] for r in ASPECT_RATIOS]
-                self.ui_state.currentAspectRatioIndex = 0
-                self.ui_state.currentCropBox = (0, 0, 1000, 1000) # Reset crop box visually
-                
-                # Kick off initial background preview render
-                self._kick_preview_worker()
+            # Load into editor
+            if self.image_editor.load_image(filepath, cached_preview=cached_preview, source_exif=source_exif):
+                # Notify UIState to update bindings
+                # We do this via signals or by calling the update function on UIState if available
+                # But UIState listens to editor signals?
+                # Actually, the previous implementation in UIState pushed edits to itself.
+                # We need to preserve that behavior.
+                # For now, simpler to emit a signal that UIState listens to, 
+                # OR just manually update UIState here if we have reference.
+                if self.ui_state:
+                     self._sync_editor_state_to_ui()
                 
                 return True
+        except Exception as e:
+            log.exception("Failed to load image for editing: %s", e)
+            self.update_status_message(f"Error loading editor: {e}")
+        
         return False
+
+    def _sync_editor_state_to_ui(self):
+        """Helper to push editor state (initial edits) to UIState."""
+        initial_edits = self.image_editor._initial_edits()
+        for key, value in initial_edits.items():
+            if hasattr(self.ui_state, key):
+                setattr(self.ui_state, key, value)
+        
+        # Reset visual components
+        if hasattr(self.ui_state, 'aspectRatioNames'):
+            # This requires IMPORTs? No, just pass list.
+            from faststack.imaging.editor import ASPECT_RATIOS
+            self.ui_state.aspectRatioNames = [r['name'] for r in ASPECT_RATIOS]
+            self.ui_state.currentAspectRatioIndex = 0
+            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+
+        # Kick off background render
+        self._kick_preview_worker()
+        # Notify UI
+        self.ui_state.editorImageChanged.emit()
+
+    def _on_develop_finished(self, success: bool, error_msg: Optional[str]):
+        """Callback on main thread after RAW development."""
+        if success:
+            self.update_status_message("RAW Development complete.")
+            # Load active path (which should now be the developed TIFF)
+            self.load_image_for_editing()
+        else:
+            self.update_status_message(f"Development failed: {error_msg}")
+            # Ensure UI reflects failure (maybe revert mode? or just show error)
+            # Staying in RAW mode but failing to load allows user to try again or see error.
 
     @Slot(result=DecodedImage)
     def get_preview_data(self) -> Optional[DecodedImage]:
@@ -2609,15 +3066,24 @@ class AppController(QObject):
     def _do_preview_refresh(self):
         self._preview_refresh_pending = False
         self._kick_preview_worker()
+                 
+
 
     @Slot(str, "QVariant")
     def set_edit_parameter(self, key: str, value: Any):
         """Sets an edit parameter and updates the UIState for the slider visual."""
+        # Robust guard: only allow edits if the editor is actually holding an image.
+        if not self.image_editor: 
+            return
+        if self.image_editor.current_filepath is None: 
+            return
+        # Must have either a float image (working copy) or original loaded
+        if self.image_editor.float_image is None and self.image_editor.original_image is None: 
+            return
+
         try:
             # Update actual edit state (this bumps _edits_rev and invalidates preview cache)
-            changed = False
-            if self.ui_state.isEditorOpen:
-                changed = self.image_editor.set_edit_param(key, value)
+            changed = self.image_editor.set_edit_param(key, value)
             
             # Sync UI state with backend (e.g., rotation might be rounded)
             final_value = value
@@ -2730,28 +3196,34 @@ class AppController(QObject):
         """
         # Early guard: don't even schedule if nothing is showing the histogram
         if not (self.ui_state.isHistogramVisible or self.ui_state.isEditorOpen):
-            self._hist_pending = None
+            with self._hist_lock:
+                self._hist_pending = None
             return
 
-        self._hist_pending = (zoom, pan_x, pan_y, image_scale)
-        if not self.histogram_timer.isActive() and not self._hist_inflight:
+        with self._hist_lock:
+            self._hist_pending = (zoom, pan_x, pan_y, image_scale)
+            inflight = self._hist_inflight
+        
+        if not self.histogram_timer.isActive() and not inflight:
             self.histogram_timer.start()
 
     def _kick_histogram_worker(self):
         if getattr(self, "_shutting_down", False):
             return
-        if self._hist_inflight:
-            return
-        if self._hist_pending is None:
-            return
-
-        args = self._hist_pending
-        self._hist_pending = None
 
         with self._hist_lock:
+            if self._hist_inflight:
+                return
+            if self._hist_pending is None:
+                return
+
+            args = self._hist_pending
+            self._hist_pending = None
+
             self._hist_token += 1
             token = self._hist_token
-        self._hist_inflight = True
+            # Mark as inflight while holding the lock to prevent others from entering
+            self._hist_inflight = True
 
         # Snap the currently known preview data to avoid racing with the editor
         preview_data = self._last_rendered_preview
@@ -2770,11 +3242,17 @@ class AppController(QObject):
         
         # If no preview data AND no valid index, we can't compute.
         if not preview_data and target_index == -1:
-            self._hist_inflight = False
-            # Restore pending args so the next timer tick (or preview completion) retries
-            self._hist_pending = args
-            # Make sure timer is running to retry
-            if not self.histogram_timer.isActive():
+            # We must clear inflight if we abort, otherwise we deadlock future updates
+            # Keep lock held while modifying shared state AND checking timer to prevent race
+            with self._hist_lock:
+                self._hist_inflight = False
+                # Restore pending args so the next timer tick (or preview completion) retries
+                if self._hist_pending is None:
+                     self._hist_pending = args
+                # Make sure timer is running to retry (check under lock to avoid race)
+                should_start_timer = not self.histogram_timer.isActive()
+            
+            if should_start_timer:
                 self.histogram_timer.start()
             return
 
@@ -2782,9 +3260,10 @@ class AppController(QObject):
             # Pass simple data + controller reference + target_index
             fut = self._hist_executor.submit(self._compute_histogram_worker, token, args, preview_data, self, target_index)
             fut.add_done_callback(self._on_histogram_done)
-        except RuntimeError:
-            log.warning("Histogram executor failed (shutting down?)")
-            self._hist_inflight = False
+        except Exception as e:
+            log.error(f"Histogram executor failed to submit task: {e}")
+            with self._hist_lock:
+                self._hist_inflight = False
 
     @staticmethod
     def _compute_histogram_worker(token, args, decoded, controller=None, target_index=-1):
@@ -2874,15 +3353,18 @@ class AppController(QObject):
             return
 
         token, hist = payload
-        self._hist_inflight = False
-
-        if hist is not None:
-            with self._hist_lock:
+        
+        with self._hist_lock:
+            self._hist_inflight = False
+            
+            if hist is not None:
                 if token == self._hist_token:
                     self.ui_state.histogramData = hist
 
-        # If more updates arrived while we computed, run again soon
-        if self._hist_pending is not None:
+            # If more updates arrived while we computed, run again soon
+            pending = self._hist_pending is not None
+        
+        if pending:
             self.histogram_timer.start()
 
     def _kick_preview_worker(self):
@@ -2906,7 +3388,8 @@ class AppController(QObject):
             fut.add_done_callback(self._on_preview_done)
         except RuntimeError:
             log.warning("Preview executor failed (shutting down?)")
-            self._preview_inflight = False
+            with self._preview_lock:
+                self._preview_inflight = False
 
     @staticmethod
     def _render_preview_worker(token, image_editor):
@@ -3401,15 +3884,25 @@ class AppController(QObject):
             self.image_editor.clear()
             
             # Refresh list/cache/UI (standard save pattern)
-            image_file = self.image_files[self.current_index]
-            original_path = image_file.path
+            # Note: We must locate the saved_path again because the list order 
+            # might have changed (e.g., if a backup file was inserted before it).
             self.refresh_image_list()
             
-            # Find image again
+            # Find image again using robust path matching
+            new_index = -1
+            target_name = Path(saved_path).name
+            
             for i, img_file in enumerate(self.image_files):
-                if img_file.path == original_path:
-                    self.current_index = i
+                # Match by filename alone - safest for flat directory structures
+                # avoiding drive letter/symlink/casing issues with full paths
+                if img_file.path.name == target_name:
+                    new_index = i
                     break
+            
+            if new_index != -1:
+                self.current_index = new_index
+            else:
+                log.warning("Auto levels: Could not find saved image %s (name: %s) in refreshed list", saved_path, target_name)
             
             self.display_generation += 1
             self.image_cache.clear()
@@ -3421,43 +3914,11 @@ class AppController(QObject):
                 self.update_histogram()
             
             self.update_status_message("Auto levels applied and saved")
-            log.info("Quick auto levels saved for %s", original_path)
+            log.info("Quick auto levels saved for %s. New index: %d", saved_path, self.current_index)
         else:
             self.update_status_message("Failed to save image")
 
-    @Slot(result=float)
-    def get_auto_level_clipping_threshold(self):
-        return self.auto_level_threshold
 
-    @Slot(float)
-    def set_auto_level_clipping_threshold(self, value):
-        if self.auto_level_threshold != value:
-            self.auto_level_threshold = value
-            config.set('core', 'auto_level_threshold', value)
-            config.save()
-
-    @Slot(result=float)
-    def get_auto_level_strength(self):
-        return self.auto_level_strength
-
-    @Slot(float)
-    def set_auto_level_strength(self, value: float):
-        value = max(0.0, min(1.0, value))
-        if self.auto_level_strength != value:
-            self.auto_level_strength = value
-            config.set('core', 'auto_level_strength', str(value))
-            config.save()
-
-    @Slot(result=bool)
-    def get_auto_level_strength_auto(self):
-        return self.auto_level_strength_auto
-
-    @Slot(bool)
-    def set_auto_level_strength_auto(self, value: bool):
-        if self.auto_level_strength_auto != value:
-            self.auto_level_strength_auto = value
-            config.set('core', 'auto_level_strength_auto', str(value))
-            config.save()
 
     @Slot()
     def quick_auto_white_balance(self):
