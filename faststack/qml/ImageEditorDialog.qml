@@ -147,7 +147,7 @@ Window {
                     ListElement { name: "Texture"; key: "texture" }
                     ListElement { name: "Sharpness"; key: "sharpness" }
                 }
-                Repeater { model: detailModel; delegate: editSlider }
+                Repeater { model: effectsModel; delegate: editSlider }
 
                 // --- Histogram Group ---
                 RowLayout {
@@ -316,7 +316,7 @@ Window {
                     id: effectsModel
                     ListElement { name: "Vignette"; key: "vignette"; min: 0; max: 100 }
                 }
-                Repeater { model: effectsModel; delegate: editSlider }
+                Repeater { model: detailModel; delegate: editSlider }
 
                 Loader { sourceComponent: sectionSeparator }
 
@@ -486,26 +486,24 @@ Window {
                 property bool isResetting: false
                 property double _lastPressTime: 0
                 
+                // Timer to handle reset state duration
+                Timer {
+                    id: resetTimer
+                    interval: 100 // Lock for 100ms to prevent accidental drags during reset
+                    repeat: false
+                    onTriggered: {
+                        slider.isResetting = false
+                    }
+                }
+                
                 function triggerReset() {
-                    isResetting = true
+                    slider.isResetting = true
                     controller.set_edit_parameter(model.key, 0.0)
                     slider.value = 0.0
                     _pendingValue = 0.0
                     slider._lastSentValue = 0.0
                     imageEditorDialog.updatePulse++
-                }
-                
-                // Failsafe timer to prevent sticky isResetting state
-                Timer {
-                    id: resetFailsafe
-                    interval: 200
-                    repeat: false
-                    onTriggered: {
-                        if (slider.isResetting) {
-                            console.warn("Slider reset stuck, forcing release")
-                            slider.isResetting = false
-                        }
-                    }
+                    resetTimer.restart()
                 }
 
                 onPressedChanged: {
@@ -520,7 +518,6 @@ Window {
                         if (timeDiff < 600 && valDiff < (range * 0.05)) { 
                              triggerReset()
                              _lastPressTime = 0
-                             resetFailsafe.start() // Start failsafe
                         } else {
                              _lastPressTime = now
                         }
@@ -528,16 +525,15 @@ Window {
                         imageEditorDialog.slidersPressedCount++
                         
                         // Initialize drag logic only if not resetting
-                        if (!isResetting) {
+                        if (!slider.isResetting) {
                             _pendingValue = value
                             if (!sendTimer.running) sendTimer.start()
                         }
                     } else {
                         imageEditorDialog.slidersPressedCount--
                         
-                        if (isResetting) {
-                             isResetting = false
-                             // Force backend to 0 on release
+                        if (slider.isResetting) {
+                             // Force backend to 0 on release (redundant but safe)
                              controller.set_edit_parameter(model.key, 0.0)
                         } else {
                              // Stop repeating sends, then send final value immediately
@@ -559,13 +555,13 @@ Window {
                 }
                 
                 onMoved: {
-                    if (isResetting) return
+                    if (slider.isResetting) return
                     _pendingValue = value
                     if (!sendTimer.running) sendTimer.start()
                 }
                 
                 onBackendValueChanged: {
-                    if (!pressed && !isResetting) {
+                    if (!pressed && !slider.isResetting) {
                         value = backendValue
                     }
                 }

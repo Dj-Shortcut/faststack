@@ -60,62 +60,12 @@ class TestRawPipeline(unittest.TestCase):
         # Expect file to be DELETED because it was 0 bytes
         self.assertFalse(tif_path.exists(), "Zombie 0-byte file should be cleaned up")
 
-    @patch('faststack.app.os.path.exists')
-    @patch('faststack.app.subprocess.run')
-    @patch('faststack.config.config.get')
-    @patch('faststack.app.threading.Thread')
-    def test_develop_raw_timeout(self, mock_thread, mock_config_get, mock_run, mock_exists):
-        """Test handling of subprocess timeout."""
-        mock_config_get.return_value = "c:\\path\\to\\rawtherapee-cli.exe"
-        mock_exists.return_value = True
-
-        def side_effect_start(*args, **kwargs):
-            _, thread_kwargs = mock_thread.call_args
-            target = thread_kwargs.get('target')
-            if target:
-                target()
-        mock_thread.return_value.start.side_effect = side_effect_start
-
-        # Mock timeout
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="rawtherapee-cli", timeout=60)
-
-        app = MagicMock()
-        app._on_develop_finished = MagicMock()
-        app.image_files = [self.image_file]
-        app.current_index = 0
-        app.update_status_message = MagicMock()
-        
-        # We need a real _develop_raw_backend attached to our mock app to test logic inside it,
-        # OR we can just use AppController.develop_raw_for_current_image(app) which calls it.
-        # But wait, develop_raw_for_current_image calls self._develop_raw_backend().
-        # Since we are essentially testing AppController logic, we should probably mock the class methods partials?
-        # Actually simplest is to just use the class method as a function bound to our mock self.
-        
-        # But _develop_raw_backend is methods on AppController. Let's bind checking:
-        # We want to test logic inside _develop_raw_backend.
-        
-        # Let's bind the real method to our mock object
-        app._develop_raw_backend = AppController._develop_raw_backend.__get__(app, AppController)
-        
-        # Run
-        app._develop_raw_backend()
-        
-        # Verify
-        mock_run.assert_called()
-        self.assertIn("timeout", mock_run.call_args[1])
-        self.assertEqual(mock_run.call_args[1]["timeout"], 60)
-        
-        # Verify _on_develop_finished called with False (failure)
-        # Note: We use QTimer.singleShot(0, partial(...))
-        # We need to mock QTimer to execute the partial immediately or check if it was called.
-        pass # See QTimer mock below handled implicitly? No, I need to patch QTimer.
-
     @patch('faststack.app.QTimer.singleShot')
     @patch('faststack.app.os.path.exists')
     @patch('faststack.app.subprocess.run')
     @patch('faststack.config.config.get')
     @patch('faststack.app.threading.Thread')
-    def test_develop_raw_timeout_with_qtimer(self, mock_thread, mock_config_get, mock_run, mock_exists, mock_single_shot):
+    def test_develop_raw_timeout(self, mock_thread, mock_config_get, mock_run, mock_exists, mock_single_shot):
         mock_config_get.return_value = "c:\\path\\to\\rawtherapee-cli.exe"
         mock_exists.return_value = True
 
@@ -249,19 +199,14 @@ class TestRawPipeline(unittest.TestCase):
         app.current_index = 0
         app.update_status_message = MagicMock()
         app.load_image_for_editing = MagicMock()
+        app.enable_raw_editing = MagicMock()
         
-        # Mock run
-        mock_run.return_value.returncode = 0
+        # Bind real method
+        func = AppController.develop_raw_for_current_image.__get__(app, AppController)
+        func()
         
-        # Call Slot - we mock the backend to avoid threading issues in this specific test? 
-        # No, the original test mocked Popen. We changed to run.
-        # Let's adjust this test to match the new code structure if needed.
-        # But wait, we are patching subprocess.run now.
-        
-        # We call the unbound method with our mock self
-        # Actually, AppController.develop_raw_for_current_image just checks raw and calls _develop_raw_backend
-        # So we probably want to test _develop_raw_backend logic mainly.
-        pass
+        # Verify delegation
+        app.enable_raw_editing.assert_called_once()
 
     def test_editor_float_pipeline_io(self):
         """Test that editor saves 16-bit TIFF and Developed JPG."""
