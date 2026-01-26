@@ -196,9 +196,6 @@ class Prefetcher:
         # Navigation just shifts which indices to prefetch.
         
         # OLD GENERATION CLEANUP MOVED TO INSIDE LOCK BELOW
-        # old_generations = [g for g in self._scheduled if g < self.generation]
-        # for g in old_generations:
-        #     del self._scheduled[g]
         
         # Track navigation direction
         if direction is not None:
@@ -468,19 +465,7 @@ class Prefetcher:
                         t_after_fallback_decode = time.perf_counter()
                         
                         # EXIF orientation correction
-                        # In fallback path, we opened 'f' (file handle) and mmap.
-                        # We didn't keep a PIL image open suitable for EXIF extraction except inside the try block (line 456).
-                        # But line 456 `with PILImage.fromarray(buffer)` creates a new image from buffer, NO EXIF.
-                        # Wait, line 377 `with PILImage.open(image_file.path) as img:` IS handling non-JPEG logic if TurboJPEG fails?
-                        # No, this is inside `if is_jpeg`.
-                        
-                        # So inside ICC mode, failure fallback:
-                        # We use decode_jpeg_rgb/resized (TurboJPEG) OR generic Pillow.
-                        # If generic pillow (lines 373-383), it was `with PILImage.open... as img`.
-                        # But that loop closed.
-                        
-                        # Optimization: we can't easily reuse the object unless we restructure.
-                        # BUT, for the "Unified" block at the end, we can pass `exif_obj` if we have it.
+
                         pass
                         
                         # Memory Optimization: Avoid explicit copy
@@ -520,33 +505,6 @@ class Prefetcher:
                     t_after_decode = time.perf_counter()
                     
                     # EXIF orientation application
-                    # We have 'img' (PIL Image) open if we used the fallback path, but wait -
-                    # in this block (lines 482-501) we MIGHT use decode_jpeg_resized which doesn't give us a PIL Image.
-                    # Or we used Generic Pillow open (lines 494-496) where 'img' was capable.
-                    # Actually, if we used decode_jpeg_XXX, we don't have a PIL object handy unless we open one.
-                    # But optimization: if we used Pillow fallback, we might have it?
-                    # This block is "Standard decode path (Option A or no color management) FOR JPEG FALLBACK"
-                    
-                    # BUT WAIT: logic above: if TurboJPEG worked on JPEG, it returned buffer.
-                    # If TurboJPEG failed, it fell back to Pillow.
-                    
-                    # Actually, looking at the logic:
-                    # 1. ICC Mode -> TurboJPEG (if success, we have buffer) -> applyTransform -> buffer
-                    # 2. ICC Mode -> Fallback Pillow (if success, we have buffer)
-                    
-                    # The `apply_saturation_compensation` and `apply_exif_orientation` are effectively "Post Processing".
-                    # In previous code "Unified EXIF Orientation Application" was doing a fresh open.
-                    
-                    # We should move the EXIF application UP into the scopes where we might have the PIL object.
-                    
-                    # For this specific block (ICC Fallback or TurboJPEG):
-                    # In TurboJPEG case: we have 'img' (PIL Image from buffer). Does it have EXIF? No, it was created from raw bytes.
-                    # We did open 'orig' to get ICC profile. We could have gotten EXIF combined?
-                    # The TurboJPEG path opens 'orig' on line 397 (with PILImage.open(image_file.path) as orig).
-                    # We should get EXIF there!
-                    
-                    # Let's fix the TurboJPEG path first (Lines 345+):
-                    # We open 'orig' to read ICC (line 397). We should ALSO read EXIF there.
                     
                     # Memory Optimization: Avoid explicit copy
                     buffer = np.ascontiguousarray(buffer)

@@ -29,6 +29,7 @@ faststack.egg-info/
 # Logs
 # ----------------------------
 *.log
+error_log.txt
 
 # ----------------------------
 # OS cruft
