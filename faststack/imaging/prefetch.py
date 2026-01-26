@@ -334,26 +334,51 @@ class Prefetcher:
             # Determine if we should resize
             should_resize = (display_width > 0 and display_height > 0)
 
+            # Determine file type
+            is_jpeg = image_file.path.suffix.lower() in {'.jpg', '.jpeg', '.jpe'}
+
             # Option C: Full ICC pipeline - Use TurboJPEG for decode, Pillow only for ICC conversion
             if color_mode == "icc":
                 monitor_profile = get_monitor_profile()
                 monitor_icc_path = config.get('color', 'monitor_icc_path', fallback="").strip()
                 
                 if monitor_profile is not None:
-                    # FAST: Use TurboJPEG for decode + resize
+                    # FAST: Use TurboJPEG for decode + resize (ONLY for JPEGs)
+                    buffer = None
                     t_before_read = time.perf_counter()
-                    with open(image_file.path, "rb") as f:
-                        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped:
-                            # Pass mmap directly - no copy! Decoders accept bytes-like objects
-                            if use_resized and should_resize:
-                                buffer = decode_jpeg_resized(mmapped, display_width, display_height, fast_dct=fast_dct)
-                            else:
-                                # Quality mode or Full Res: decode full image then resize with high quality
-                                buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
-                                if buffer is not None and should_resize:
-                                    img = PILImage.fromarray(buffer)
-                                    img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
-                                    buffer = np.array(img)
+                    
+                    if is_jpeg:
+                         try:
+                            with open(image_file.path, "rb") as f:
+                                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped:
+                                    # Pass mmap directly - no copy! Decoders accept bytes-like objects
+                                    if use_resized and should_resize:
+                                        buffer = decode_jpeg_resized(mmapped, display_width, display_height, fast_dct=fast_dct)
+                                    else:
+                                        # Quality mode or Full Res: decode full image then resize with high quality
+                                        buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
+                                        if buffer is not None and should_resize:
+                                            img = PILImage.fromarray(buffer)
+                                            img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
+                                            buffer = np.array(img)
+                         except Exception:
+                             log.debug("TurboJPEG failed on JPEG %s, falling back", image_file.path)
+                             buffer = None
+                    
+                    # If not JPEG or TurboJPEG failed, try generic Pillow load
+                    if buffer is None:
+                        try:
+                             # We can't use mmap for Generic Pillow open widely (some formats need seek/tell on file)
+                             # So we open nominally.
+                             with PILImage.open(image_file.path) as img:
+                                 img = img.convert("RGB")
+                                 if should_resize:
+                                      img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
+                                 buffer = np.array(img)
+                        except Exception as e:
+                             log.warning("Failed to decode image %s: %s", image_file.path, e)
+                             return None
+
                     t_after_read = time.perf_counter()
                     if buffer is None:
                         return None
@@ -490,18 +515,33 @@ class Prefetcher:
             else:
                 # Standard decode path (Option A or no color management)
                 t_before_read = time.perf_counter()
-                with open(image_file.path, "rb") as f:
-                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped:
-                        # Pass mmap directly - no copy! Decoders accept bytes-like objects
-                        if use_resized and should_resize:
-                            buffer = decode_jpeg_resized(mmapped, display_width, display_height, fast_dct=fast_dct)
-                        else:
-                            # Quality mode or Full Res: decode full image then resize with high quality
-                            buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
-                            if buffer is not None and should_resize:
-                                img = PILImage.fromarray(buffer)
-                                img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
-                                buffer = np.array(img)
+                
+                buffer = None
+                if is_jpeg:
+                    try:
+                        with open(image_file.path, "rb") as f:
+                            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped:
+                                if use_resized and should_resize:
+                                    buffer = decode_jpeg_resized(mmapped, display_width, display_height, fast_dct=fast_dct)
+                                else:
+                                    buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
+                                    if buffer is not None and should_resize:
+                                        img = PILImage.fromarray(buffer)
+                                        img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
+                                        buffer = np.array(img)
+                    except Exception:
+                        buffer = None
+                
+                if buffer is None:
+                    try:
+                         with PILImage.open(image_file.path) as img:
+                             img = img.convert("RGB")
+                             if should_resize:
+                                  img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
+                             buffer = np.array(img)
+                    except Exception as e:
+                         log.warning("Failed to decode image %s: %s", image_file.path, e)
+                         return None
                 t_after_read = time.perf_counter()
                 if buffer is None:
                     return None

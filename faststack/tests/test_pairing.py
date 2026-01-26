@@ -37,7 +37,7 @@ def test_find_images(mock_image_dir: Path):
     """Tests the main find_images function."""
     images = find_images(mock_image_dir)
 
-    assert len(images) == 3
+    assert len(images) == 4
     assert images[0].path.name == "IMG_0001.JPG"
     assert images[0].raw_pair is not None
     assert images[0].raw_pair.name == "IMG_0001.CR3"

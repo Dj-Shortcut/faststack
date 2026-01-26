@@ -2,27 +2,28 @@
 
 import configparser
 import logging
+import sys
+import glob
+import os
+import re
 from pathlib import Path
 
 from faststack.logging_setup import get_app_data_dir
 
 log = logging.getLogger(__name__)
 
-import sys
-import glob
-import os
-import re
 
 def detect_rawtherapee_path():
     """Attempts to find the RawTherapee executable on Windows."""
     if sys.platform != "win32":
         return None
 
-    # Pattern to match RawTherapee installations in Program Files (both x64 and x86)
-    # Finds paths like C:\Program Files\RawTherapee\5.9\rawtherapee.exe
+    # Pattern to match RawTherapee CLI installations in Program Files (both x64 and x86)
+    # The CLI version (rawtherapee-cli.exe) is required for batch processing with -t -Y -o -c flags
+    # Finds paths like C:\Program Files\RawTherapee\5.9\rawtherapee-cli.exe
     base_patterns = [
-        r"C:\Program Files\RawTherapee*\**\rawtherapee.exe",
-        r"C:\Program Files (x86)\RawTherapee*\**\rawtherapee.exe"
+        r"C:\Program Files\RawTherapee*\**\rawtherapee-cli.exe",
+        r"C:\Program Files (x86)\RawTherapee*\**\rawtherapee-cli.exe"
     ]
     
     try:
@@ -47,13 +48,14 @@ def detect_rawtherapee_path():
         return None
 
 
-# Determine default RawTherapee path based on OS
+# Determine default RawTherapee CLI path based on OS
+# The CLI version is required for batch processing with command-line flags
 if sys.platform == "win32":
-    DEFAULT_RT_PATH = r"C:\Program Files\RawTherapee\5.12\rawtherapee.exe"
+    DEFAULT_RT_PATH = r"C:\Program Files\RawTherapee\5.12\rawtherapee-cli.exe"
 elif sys.platform == "darwin":
-    DEFAULT_RT_PATH = "/Applications/RawTherapee.app/Contents/MacOS/rawtherapee"
+    DEFAULT_RT_PATH = "/Applications/RawTherapee.app/Contents/MacOS/rawtherapee-cli"
 else:
-    DEFAULT_RT_PATH = "/usr/bin/rawtherapee"
+    DEFAULT_RT_PATH = "/usr/bin/rawtherapee-cli"
 
 DEFAULT_CONFIG = {
     "core": {

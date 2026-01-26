@@ -27,17 +27,42 @@ This tool is optimized for speed, using `libjpeg-turbo` for decoding, aggressive
 - **Accurate Colors:** Uses monitor ICC profile to display colors correctly.
 - **RGB Histogram:** Pressing H brings up a RGB histogram which is designed to show even a little bit of highlight clipping and updates as you zoom in.
 
-## Installation & Usage
+## Installation
 
-1.  **Install Dependencies:**
+### macOS (Recommended)
+FastStack performs best on Python 3.12 due to PySide6 compatibility.
+
+1.  **Install Python 3.12 (via Homebrew):**
     ```bash
-    pip install -r requirements.txt
+    brew install python@3.12
     ```
 
-2.  **Run the App:**
+2.  **Create and Activate a Virtual Environment:**
     ```bash
-    python -m faststack.app "C:\path\to\your\images"
+    python3.12 -m venv venv
+    source venv/bin/activate
     ```
+
+3.  **Install FastStack:**
+    ```bash
+    # From source directory
+    python -m pip install -U pip
+    python -m pip install .
+    ```
+    *Note: If you encounter issues with `opencv-python` or `PySide6` on newer Python versions (3.13+), please stick to Python 3.12.*
+
+4.  **Run:**
+    ```bash
+    faststack
+    ```
+
+### Windows / Linux
+```bash
+python -m venv venv
+# Activate venv (Windows: venv\Scripts\activate, Linux: source venv/bin/activate)
+pip install .
+faststack
+```
 
 ## Keyboard Shortcuts
 

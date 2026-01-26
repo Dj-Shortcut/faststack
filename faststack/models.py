@@ -11,6 +11,42 @@ class ImageFile:
     raw_pair: Optional[Path] = None
     timestamp: float = 0.0
 
+    @property
+    def raw_path(self) -> Optional[Path]:
+        """Returns the path to the RAW file if it exists, otherwise None."""
+        if self.raw_pair:
+            return self.raw_pair
+        # If the main path itself is a RAW file (orphaned RAW case)
+        # We need a way to check if 'path' is a raw extension.
+        # Ideally we check against known extensions, but for now let's assume
+        # if raw_pair is None but we are treating it as RAW, we might need logic here.
+        # However, the indexer will set raw_pair = path for orphaned RAWs likely.
+        return None
+
+    @property
+    def has_raw(self) -> bool:
+        return self.raw_pair is not None
+
+    @property
+    def working_tif_path(self) -> Path:
+        """Canonical path for the working 16-bit TIFF: stem + -working.tif"""
+        return self.path.parent / f"{self.path.stem}-working.tif"
+
+    @property
+    def has_working_tif(self) -> bool:
+        try:
+            return self.working_tif_path.exists() and self.working_tif_path.stat().st_size > 0
+        except OSError:
+            return False
+
+    @property
+    def developed_jpg_path(self) -> Path:
+        """Canonical path for the developed JPG: stem + -developed.jpg"""
+        # If the original path is 'photo.jpg', we want 'photo-developed.jpg'.
+        # If 'photo.CR2', we want 'photo-developed.jpg'.
+        return self.path.with_name(f"{self.path.stem}-developed.jpg")
+
+
 @dataclasses.dataclass
 class EntryMetadata:
     """Sidecar metadata for a single image entry."""
