@@ -121,6 +121,7 @@ class AppController(QObject):
         self._preview_lock = threading.Lock()
         self._last_rendered_preview = None # Store latest valid render
         self._shutting_down = False # Flag to gate async callbacks during shutdown
+        self._opencv_warning_shown = False  # Only show OpenCV warning once per session
 
         self.image_dir = image_dir
         self.image_files: List[ImageFile] = []  # Filtered list for display
@@ -223,12 +224,12 @@ class AppController(QObject):
         self.histogram_timer.setInterval(50)  # 50ms throttle (max 20fps)
         self.histogram_timer.timeout.connect(self._kick_histogram_worker)
 
-        # Preview Refresh Timer (Coalescing)
-        self._preview_refresh_pending = False
-        self.preview_timer = QTimer(self)
-        self.preview_timer.setSingleShot(True)
-        self.preview_timer.setInterval(16) # ~60fps cap for smoother dragging
-        self.preview_timer.timeout.connect(self._do_preview_refresh)
+        # Preview refresh uses a gate pattern instead of a timer:
+        # - _kick_preview_worker() runs immediately if not inflight
+        # - If inflight, it sets _preview_pending and returns
+        # - When render completes, _apply_preview_result chains immediately if pending
+        # This removes the extra 16ms delay in the fast-render case by chaining
+        # immediately on completion. QML's 16ms slider timer remains the fps cap.
 
         # Track if any dialog is open to disable keybindings
         self._dialog_open = False
@@ -243,12 +244,23 @@ class AppController(QObject):
     @Slot(bool)
     def _on_editor_open_changed(self, is_open: bool):
         """Handle necessary setup/cleanup when editor opens or closes."""
-        if not is_open:
+        if is_open:
+            # Warn once if OpenCV is not available (detail sliders will be slower)
+            if not self._opencv_warning_shown:
+                from faststack.imaging.optional_deps import HAS_OPENCV
+                if not HAS_OPENCV:
+                    self._opencv_warning_shown = True
+                    log.warning("OpenCV not available - detail sliders (clarity/texture/sharpness) will be slower")
+                    self.update_status_message(
+                        "OpenCV not installed - editor performance reduced. Install opencv-python for faster editing.",
+                        timeout=8000
+                    )
+        else:
             # Cleanup large memory buffers when editor closes
             if self.image_editor:
                 log.debug("Editor closed, clearing editor memory buffers")
                 self.image_editor.clear()
-            
+
             # Also clear the cached preview rendering
             with self._preview_lock:
                 self._last_rendered_preview = None
@@ -3055,12 +3067,6 @@ class AppController(QObject):
         """Gets the preview data of the currently edited image as a DecodedImage."""
         return self.image_editor.get_preview_data()
 
-    def _do_preview_refresh(self):
-        self._preview_refresh_pending = False
-        self._kick_preview_worker()
-                 
-
-
     @Slot(str, "QVariant")
     def set_edit_parameter(self, key: str, value: Any):
         """Sets an edit parameter and updates the UIState for the slider visual."""
@@ -3089,11 +3095,10 @@ class AppController(QObject):
             if hasattr(self.ui_state, key):
                 setattr(self.ui_state, key, final_value)
 
-            # Trigger a refresh of the image to show the edit (throttled), ONLY if something changed
+            # Trigger a refresh of the image to show the edit, ONLY if something changed
+            # Uses gate pattern: runs immediately if not inflight, else queues for next
             if changed:
-                if not self._preview_refresh_pending:
-                    self._preview_refresh_pending = True
-                    self.preview_timer.start()
+                self._kick_preview_worker()
         except Exception as e:
             log.error("Error setting edit parameter %s=%s: %s", key, value, e)
 
@@ -3388,30 +3393,39 @@ class AppController(QObject):
             return
 
         token, decoded = payload
-        
+        should_kick = False
+        should_accept = False
+
         with self._preview_lock:
             self._preview_inflight = False
-            
-            if decoded is not None:
-                # Only accept if it matches the latest requested token
-                if token == self._preview_token:
-                    self._last_rendered_preview = decoded
-                    # Ensure QML/provider URL changes so we don't get a cached frame
-                    self.ui_refresh_generation += 1
-                    
-                    # Track exactly what generation/index this preview corresponds to
-                    self._last_rendered_preview_index = self.current_index
-                    self._last_rendered_preview_gen = self.ui_refresh_generation
-                    
-                    self.ui_state.currentImageSourceChanged.emit()
-                    self.ui_state.highlightStateChanged.emit()
-                    
-                    # Trigger histogram update (always call, let update_histogram handle visibility guards)
-                    self.update_histogram()
-            
-            # If new requests arrived while we were rendering, start the next one immediately
+
+            # Accept result only if:
+            # 1. We got valid decoded data
+            # 2. Token matches (not stale from an old request)
+            # 3. No pending request waiting (avoid "snap back" stale frame flash)
+            if decoded is not None and token == self._preview_token and not self._preview_pending:
+                self._last_rendered_preview = decoded
+                self.ui_refresh_generation += 1
+                self._last_rendered_preview_index = self.current_index
+                self._last_rendered_preview_gen = self.ui_refresh_generation
+                should_accept = True
+
+            # Consume pending flag atomically before scheduling
             if self._preview_pending:
-                QTimer.singleShot(0, self._kick_preview_worker)
+                self._preview_pending = False
+                should_kick = True
+
+        # Emit outside lock to avoid holding lock during UI work
+        if should_accept:
+            self.ui_state.currentImageSourceChanged.emit()
+            self.ui_state.highlightStateChanged.emit()
+            self.update_histogram()
+
+        # Call directly (not via singleShot) since we're on the UI thread.
+        # This prevents race where a new slider event could interleave between
+        # scheduling and execution, causing a spurious extra render.
+        if should_kick:
+            self._kick_preview_worker()
     
 
 
