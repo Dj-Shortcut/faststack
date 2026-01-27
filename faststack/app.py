@@ -227,7 +227,7 @@ class AppController(QObject):
         self._preview_refresh_pending = False
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
-        self.preview_timer.setInterval(33) # ~30fps cap for smoother dragging
+        self.preview_timer.setInterval(16) # ~60fps cap for smoother dragging
         self.preview_timer.timeout.connect(self._do_preview_refresh)
 
         # Track if any dialog is open to disable keybindings

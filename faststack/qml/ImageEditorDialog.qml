@@ -463,7 +463,7 @@ Window {
                 property real _lastSentValue: 0
                 Timer {
                     id: sendTimer
-                    interval: 32 // ~30fps throttle
+                    interval: 16 // ~60fps throttle
                     repeat: true
                     onTriggered: {
                         if (Math.abs(slider._pendingValue - slider._lastSentValue) > 0.001) {

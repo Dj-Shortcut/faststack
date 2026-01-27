@@ -339,6 +339,10 @@ class ImageEditor:
         self._cached_max_brightness_state: Optional[Dict[str, Any]] = None
         self._cached_highlight_analysis: Optional[Dict[str, Any]] = None
 
+        # Cache for luma detail bands (pyramid blur decomposition)
+        # Stores: {'hash': int, 'Y20': ndarray, 'Y3': ndarray, 'Y1': ndarray}
+        self._cached_detail_bands: Optional[Dict[str, Any]] = None
+
     def clear(self):
         """Clear all editor state so the next edit starts from a clean slate."""
         with self._lock:
@@ -353,6 +357,7 @@ class ImageEditor:
             self._source_exif_bytes = None
             self._last_highlight_state = None  # Explicit reset
             self._cached_highlight_analysis = None
+            self._cached_detail_bands = None
         # Optionally also reset edits if that matches your mental model:
         # self.current_edits = self._initial_edits()
 
@@ -811,36 +816,159 @@ class ImageEditor:
                 edits=edits,
             )
 
-        # 8. Clarity (Local Contrast)
+        # 8-10. Clarity / Texture / Sharpness (Unified Pyramid Detail Bands)
+        #
+        # Uses a hierarchical luma-only pyramid decomposition to avoid:
+        # - Triple-amplifying the same edges (halo stacking)
+        # - Chroma artifacts from RGB high-pass
+        # - Incorrect midtone mask on HDR/linear values >1.0
+        #
+        # Bands:
+        #   D_clarity = Y - Y20    (coarse local contrast)
+        #   D_texture = Y3 - Y20   (mid-frequency detail)
+        #   D_sharp   = Y1 - Y3    (fine detail)
+        #
         clarity = edits.get("clarity", 0.0)
-        if abs(clarity) > 0.001:
-            # Apply in linear space, preservation of highlights
-            blurred_arr = _gaussian_blur_float(arr, radius=20.0)
-
-            # Apply: (original - blurred) is high pass.
-            # mask = midtones
-            # mean = axis 2
-            gray = arr.mean(axis=2, keepdims=True)
-            midtone_mask = 1.0 - np.abs(np.clip(gray, 0, 1) - 0.5) * 2.0
-
-            local_contrast = (arr - blurred_arr) * clarity * midtone_mask
-            arr += local_contrast
-
-        # 9. Texture (Fine Detail)
         texture = edits.get("texture", 0.0)
-        if abs(texture) > 0.001:
-            # Small radius for texture/fine detail
-            blurred_arr = _gaussian_blur_float(arr, radius=3.0)
-            high_pass = arr - blurred_arr
-            arr += high_pass * texture
-
-        # 10. Sharpness
         sharpness = edits.get("sharpness", 0.0)
-        if abs(sharpness) > 0.001:
-            # Unsharp mask with radius ~1.0
-            blurred_arr = _gaussian_blur_float(arr, radius=1.0)
-            high_pass = arr - blurred_arr
-            arr += high_pass * sharpness
+
+        if abs(clarity) > 0.001 or abs(texture) > 0.001 or abs(sharpness) > 0.001:
+            # Ensure float32 to avoid memory bloat from float64 upcast
+            arr = arr.astype(np.float32, copy=False)
+
+            # Current exposure gain (for scaling cached blurs)
+            current_exp_gain = 2.0 ** edits.get("exposure", 0.0)
+
+            # Compute linear luminance (Rec.709 coefficients)
+            Y = arr @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+            # Determine which blurs we need based on active sliders
+            need_Y20 = abs(clarity) > 0.001 or abs(texture) > 0.001
+            need_Y3 = abs(texture) > 0.001 or abs(sharpness) > 0.001
+            need_Y1 = abs(sharpness) > 0.001
+
+            # Check cache for detail bands (hash + frozen tuple verification)
+            detail_hash, detail_frozen = self._get_detail_upstream_hash(edits)
+            Y20_cached = Y3_cached = Y1_cached = None
+            cache_hit = False
+            cached_exp_gain = 1.0
+
+            with self._lock:
+                cached = self._cached_detail_bands
+                # Verify both hash AND frozen values to avoid collisions
+                if cached and cached.get("hash") == detail_hash and cached.get("frozen") == detail_frozen:
+                    Y20_cached = cached.get("Y20")
+                    Y3_cached = cached.get("Y3")
+                    Y1_cached = cached.get("Y1")
+                    cached_exp_gain = cached.get("exp_gain", 1.0)
+                    cache_hit = True
+
+            # Compute exposure scale factor for reusing cached blurs
+            # blur(k*Y) = k*blur(Y) is exact only if Y scales linearly with exposure.
+            # Since highlights/shadows recovery (step 7) is non-linear and sits between
+            # exposure and detail bands, this scaling is APPROXIMATE when h/s is active.
+            # The approximation is good enough for smooth 60fps dragging; exact render
+            # happens when upstream params (WB/crop/rotate) change and cache invalidates.
+            exp_scale = current_exp_gain / cached_exp_gain if cache_hit and abs(cached_exp_gain) > 1e-9 else 1.0
+
+            # Safe extraction: use [..., 0] if 3D, else keep as-is (avoids squeeze() collapsing H/W)
+            def _extract_2d(blur_result):
+                return blur_result[..., 0] if blur_result.ndim == 3 else blur_result
+
+            # Get or compute each blur, tracking what we freshly computed
+            Y_3d = Y[..., None]  # (H, W, 1) for blur function
+            Y20 = Y3 = Y1 = None
+            newly_computed = {"Y20": None, "Y3": None, "Y1": None}
+
+            if need_Y20:
+                if Y20_cached is not None:
+                    Y20 = Y20_cached * exp_scale
+                else:
+                    Y20 = _extract_2d(_gaussian_blur_float(Y_3d, radius=20.0))
+                    newly_computed["Y20"] = Y20
+
+            if need_Y3:
+                if Y3_cached is not None:
+                    Y3 = Y3_cached * exp_scale
+                else:
+                    Y3 = _extract_2d(_gaussian_blur_float(Y_3d, radius=3.0))
+                    newly_computed["Y3"] = Y3
+
+            if need_Y1:
+                if Y1_cached is not None:
+                    Y1 = Y1_cached * exp_scale
+                else:
+                    Y1 = _extract_2d(_gaussian_blur_float(Y_3d, radius=1.0))
+                    newly_computed["Y1"] = Y1
+
+            # Update cache if we computed any new blurs
+            # Merge newly computed blurs with existing cached blurs (unscaled)
+            if any(v is not None for v in newly_computed.values()):
+                with self._lock:
+                    # Start with existing cached values (unscaled) or empty
+                    if cache_hit:
+                        new_cache = {
+                            "hash": detail_hash,
+                            "frozen": detail_frozen,
+                            "exp_gain": cached_exp_gain,  # Keep original exp_gain for existing blurs
+                            "Y20": Y20_cached,
+                            "Y3": Y3_cached,
+                            "Y1": Y1_cached,
+                        }
+                        # Add newly computed blurs (they're at current_exp_gain, need to rescale to cached_exp_gain)
+                        rescale_to_cached = cached_exp_gain / current_exp_gain if abs(current_exp_gain) > 1e-9 else 1.0
+                        for key, val in newly_computed.items():
+                            if val is not None:
+                                new_cache[key] = val * rescale_to_cached
+                    else:
+                        # Fresh cache at current exposure
+                        new_cache = {
+                            "hash": detail_hash,
+                            "frozen": detail_frozen,
+                            "exp_gain": current_exp_gain,
+                            "Y20": newly_computed["Y20"],
+                            "Y3": newly_computed["Y3"],
+                            "Y1": newly_computed["Y1"],
+                        }
+                    self._cached_detail_bands = new_cache
+
+            # Build hierarchical pyramid bands (non-overlapping frequency ranges)
+            detail = np.zeros_like(Y)
+
+            if abs(clarity) > 0.001:
+                # D_clarity = Y - Y20 (coarse local contrast)
+                D_clarity = Y - Y20
+                detail += clarity * D_clarity
+
+            if abs(texture) > 0.001:
+                # D_texture = Y3 - Y20 (mid-frequency detail)
+                # Y3 has more high-frequency than Y20, so this isolates mid-band
+                D_texture = Y3 - Y20
+                detail += texture * D_texture
+
+            if abs(sharpness) > 0.001:
+                # D_sharp = Y1 - Y3 (fine detail)
+                # Scale factor to match perceived strength of old Y - Y1 unsharp mask
+                k_sharp = 2.0
+                D_sharp = Y1 - Y3
+                detail += sharpness * k_sharp * D_sharp
+
+            # Compute bounded midtone mask from perceptual luminance
+            # Use sqrt for perceptual curve (approximates gamma)
+            Y_mask = np.clip(Y, 0.0, 1.0)
+            Y_mask = np.sqrt(Y_mask)
+            midtone_mask = np.clip(1.0 - np.abs(Y_mask - 0.5) * 2.0, 0.0, 1.0)
+
+            # Apply detail via luma-ratio gain (preserves hue/saturation)
+            # Only apply ratio where Y > eps; leave gain at 1.0 for dark/negative regions
+            eps = 1e-7
+            valid_mask = Y > eps
+            den = np.where(valid_mask, Y, 1.0)
+            gain = 1.0 + midtone_mask * detail / den
+            gain = np.where(valid_mask, gain, 1.0)
+            # Soft clamp to prevent extreme values (hard clamp for v1, can soften later)
+            gain = np.clip(gain, 0.5, 2.0)
+            arr *= gain[..., None]
 
         # 11. Global Headroom Shoulder (safety net for values > 1.0)
         # This ONLY affects values above 1.0, compressing headroom smoothly.
@@ -1053,6 +1181,46 @@ class ImageEditor:
         # Include float_image ID to catch reload-in-place or content changes (e.g. forced reload)
         values.append(self.current_mtime)
         return hash(tuple(values))
+
+    def _get_detail_upstream_hash(self, edits: Dict[str, Any]) -> tuple:
+        """Returns a frozen tuple of edit parameters that affect the input to detail bands.
+
+        NOTE: We intentionally EXCLUDE exposure, highlights, and shadows from this hash.
+
+        Rationale for exclusions (performance vs accuracy tradeoff):
+        - Exposure: We scale cached blurs by exp_gain ratio. This is exact only when
+          highlights/shadows recovery is inactive (step 7 is non-linear).
+        - Highlights/Shadows: Non-linear, so cached blurs are approximate after changes.
+
+        The approximation is acceptable for smooth 60fps dragging. Exact blurs are
+        recomputed when geometry (crop/rotate) or WB changes, which invalidates cache.
+
+        Returns a tuple (hash, frozen_values) for collision-safe verification.
+        """
+        keys = [
+            "crop_box",
+            "rotation",
+            "straighten_angle",
+            "white_balance_by",
+            "white_balance_mg",
+        ]
+
+        def _freeze(v):
+            # Recursively freeze and quantize floats
+            if isinstance(v, (list, tuple)):
+                return tuple(_freeze(x) for x in v)
+            if isinstance(v, dict):
+                return tuple(sorted((_freeze(k), _freeze(val)) for k, val in v.items()))
+            if isinstance(v, np.ndarray):
+                return v.tobytes()
+            # Quantize floats to avoid hash churn from tiny slider noise
+            if isinstance(v, float):
+                return round(v, 4)
+            return v
+
+        frozen = tuple(_freeze(edits.get(k)) for k in keys)
+        frozen += (str(self.current_filepath), self.current_mtime)
+        return (hash(frozen), frozen)
 
     def get_preview_data_cached(
         self, allow_compute: bool = True
