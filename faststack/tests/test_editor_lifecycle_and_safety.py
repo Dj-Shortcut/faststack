@@ -72,7 +72,7 @@ class TestEditorLifecycleAndSafety(unittest.TestCase):
         
         # 4. Verify preview cache was cleared
         with self.controller._preview_lock:
-             self.assertIsNone(self.controller._last_rendered_preview)
+            self.assertIsNone(self.controller._last_rendered_preview)
 
     def test_histogram_worker_submission_safety(self):
         """Verify that histogram inflight flag is reset if submission fails."""

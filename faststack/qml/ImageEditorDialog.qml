@@ -147,12 +147,12 @@ Window {
                     ListElement { name: "Texture"; key: "texture" }
                     ListElement { name: "Sharpness"; key: "sharpness" }
                 }
-                Repeater { model: detailModel; delegate: editSlider }
+                Repeater { model: effectsModel; delegate: editSlider }
 
                 // --- Histogram Group ---
                 RowLayout {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 120
+                    Layout.preferredHeight: 140
                     Layout.topMargin: 5
                     spacing: 5
                     
@@ -160,12 +160,12 @@ Window {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         
-                        channelName: "R"
+                        channelName: "Red"
                         channelColor: "#e15050"
                         gridLineColor: imageEditorDialog.controlBorder
                         dangerColor: "#40ff0000"
                         textColor: imageEditorDialog.textColor
-                        minimal: true
+                        minimal: false
                         
                         histogramData: uiState && uiState.histogramData ? (uiState.histogramData["r"] || []) : []
                         clipCount: uiState && uiState.histogramData ? (uiState.histogramData["r_clip"] || 0) : 0
@@ -176,12 +176,12 @@ Window {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         
-                        channelName: "G"
+                        channelName: "Green"
                         channelColor: "#50e150"
                         gridLineColor: imageEditorDialog.controlBorder
                         dangerColor: "#40ff0000"
                         textColor: imageEditorDialog.textColor
-                        minimal: true
+                        minimal: false
                         
                         histogramData: uiState && uiState.histogramData ? (uiState.histogramData["g"] || []) : []
                         clipCount: uiState && uiState.histogramData ? (uiState.histogramData["g_clip"] || 0) : 0
@@ -192,17 +192,40 @@ Window {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         
-                        channelName: "B"
+                        channelName: "Blue"
                         channelColor: "#5050e1"
                         gridLineColor: imageEditorDialog.controlBorder
                         dangerColor: "#40ff0000"
                         textColor: imageEditorDialog.textColor
-                        minimal: true
+                        minimal: false
                         
                         histogramData: uiState && uiState.histogramData ? (uiState.histogramData["b"] || []) : []
                         clipCount: uiState && uiState.histogramData ? (uiState.histogramData["b_clip"] || 0) : 0
                         preClipCount: uiState && uiState.histogramData ? (uiState.histogramData["b_preclip"] || 0) : 0
                     }
+                }
+
+                // Highlight State Indicators
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 2
+                    spacing: 15
+                    
+                    Label {
+                        visible: (uiState && uiState.highlightState && uiState.highlightState.headroom_pct > 0.001)
+                        text: "📈 Headroom: " + (uiState && uiState.highlightState ? (uiState.highlightState.headroom_pct * 100).toFixed(1) : "0.0") + "%"
+                        font.pixelSize: 10
+                        color: "#50e150"  // Green - good, recoverable
+                        opacity: 0.8
+                    }
+                    Label {
+                        visible: (uiState && uiState.highlightState && uiState.highlightState.source_clipped_pct > 0.01)
+                        text: "⚠ Clipped: " + (uiState && uiState.highlightState ? (uiState.highlightState.source_clipped_pct * 100).toFixed(1) : "0.0") + "%"
+                        font.pixelSize: 10
+                        color: uiState && uiState.highlightState && uiState.highlightState.source_clipped_pct > 0.05 ? "#e15050" : "#e1a050"  // Red if severe, orange if mild
+                        opacity: 0.8
+                    }
+                    Item { Layout.fillWidth: true }  // Spacer
                 }
             }
 
@@ -293,7 +316,7 @@ Window {
                     id: effectsModel
                     ListElement { name: "Vignette"; key: "vignette"; min: 0; max: 100 }
                 }
-                Repeater { model: effectsModel; delegate: editSlider }
+                Repeater { model: detailModel; delegate: editSlider }
 
                 Loader { sourceComponent: sectionSeparator }
 
@@ -433,104 +456,88 @@ Window {
                     target: slider
                     property: "value"
                     value: slider.backendValue
-                    when: !slider.pressed
+                    when: !slider.pressed && !slider.isResetting
                 }
 
                 property real _pendingValue: 0
                 property real _lastSentValue: 0
                 Timer {
                     id: sendTimer
-                    interval: 32 // ~30fps throttle
+                    interval: 16 // ~60fps throttle
                     repeat: true
                     onTriggered: {
                         if (Math.abs(slider._pendingValue - slider._lastSentValue) > 0.001) {
-                            var sendValue = slider.isReversed ? -slider._pendingValue : slider._pendingValue
+                            var sendValue = isReversed ? -slider._pendingValue : slider._pendingValue
                             controller.set_edit_parameter(model.key, sendValue / maxVal)
                             slider._lastSentValue = slider._pendingValue
                         }
                     }
                 }
                 
-                Connections {
-                    target: imageEditorDialog
-                    function onUpdatePulseChanged() {
-                        if (!slider.pressed) {
-                            slider.value = slider.backendValue
-                        }
+                // Double-click reset using TapHandler (coexists with Slider drag)
+                TapHandler {
+                    acceptedButtons: Qt.LeftButton
+                    gesturePolicy: TapHandler.DragThreshold
+                    onDoubleTapped: {
+                        if (!slider.isResetting)
+                            slider.triggerReset()
+                    }
+                }
+
+                property bool isResetting: false
+                
+                // Timer to handle reset state duration
+                Timer {
+                    id: resetTimer
+                    interval: 100 // Lock for 100ms to prevent accidental drags during reset
+                    repeat: false
+                    onTriggered: {
+                        slider.isResetting = false
                     }
                 }
                 
-                onMoved: {
-                    _pendingValue = value
-                    if (!sendTimer.running) sendTimer.start()
+                function triggerReset() {
+                    slider.isResetting = true
+                    sendTimer.stop()
+                    controller.set_edit_parameter(model.key, 0.0)
+                    slider.value = 0.0
+                    _pendingValue = 0.0
+                    slider._lastSentValue = 0.0
+                    imageEditorDialog.updatePulse++
+                    resetTimer.restart()
                 }
-                
-                property double lastPressTime: 0
-                property double lastPressValue: 0
-                property bool isResetting: false
-                
+
                 onPressedChanged: {
                     if (pressed) {
-                        var now = Date.now()
-                        var range = slider.to - slider.from
-                        var diff = Math.abs(value - lastPressValue)
+                        imageEditorDialog.slidersPressedCount++
                         
-                        // Double click detection: <500ms time diff AND <5% value diff
-                        // This prevents false positives when dragging quickly
-                        if (now - lastPressTime < 500 && diff < (range * 0.05)) { 
-                             isResetting = true
+                        // Initialize drag logic only if not resetting
+                        if (!slider.isResetting) {
+                            _pendingValue = value
+                            slider._lastSentValue = value
+                            if (!sendTimer.running) sendTimer.start()
+                        }
+                    } else {
+                        imageEditorDialog.slidersPressedCount--
+                        sendTimer.stop()
+                        
+                        if (slider.isResetting) {
+                             // Force backend to 0 on release (redundant but safe)
                              controller.set_edit_parameter(model.key, 0.0)
-                             
-                             // CRITICAL FIX: Force the slider to release 'pressed' state 
-                             // to stop tracking the mouse position.
-                             // We must wait a tick to ensure the internal state clears.
-                             slider.enabled = false
-                             resetTimer.start()
-                             
-                             _pendingValue = 0.0
-                             slider._lastSentValue = 0.0
-                             imageEditorDialog.updatePulse++
-                             isResetting = false
-                             return
+                        } else {
+                             // Send final value immediately
+                             var sendValue = isReversed ? -value : value
+                             controller.set_edit_parameter(model.key, sendValue / maxVal)
                         }
                         
-                        lastPressTime = now
-                        lastPressValue = value
-                        
-                        imageEditorDialog.slidersPressedCount++
-                        _pendingValue = value
-                        if (!sendTimer.running) sendTimer.start()
-                    } else {
-                        // Guard: If we are resetting, don't process the release logic
-                        if (isResetting) return
-
-                        imageEditorDialog.slidersPressedCount--
-                        
-                        // Stop repeating sends, then send final value immediately
-                        sendTimer.stop()
-                        var sendValue = isReversed ? -value : value
-                        controller.set_edit_parameter(model.key, sendValue / maxVal)
-                        
-                        // Don't update histogram here if we are just starting to drag? 
-                        // Actually release is end of drag.
                         if (controller) controller.update_histogram()
                     }
                 }
                 
-                Timer {
-                    id: resetTimer
-                    interval: 50
-                    onTriggered: {
-                        slider.enabled = true
-                        // Ensure value is synced
-                        slider.value = slider.backendValue
-                    }
-                }
-                
-                onBackendValueChanged: {
-                    if (!pressed && !isResetting) {
-                        value = backendValue
-                    }
+                onMoved: {
+                    if (slider.isResetting) return
+                    _pendingValue = value
+                    if (!sendTimer.running) sendTimer.start()
                 }
 
                 // Smooth transition for value changes from backend
@@ -590,7 +597,7 @@ Window {
                      Behavior on color { ColorAnimation { duration: 150 } }
 
                      HoverHandler {
-                         id: hoverHandler
+                          id: hoverHandler
                      }
                 }
             }

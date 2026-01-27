@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 # Ensure we can import faststack
-sys.path.append(str(Path(__file__).parents[1]))
+sys.path.append(str(Path(__file__).parents[2]))
 
 from faststack.app import AppController
 
@@ -85,7 +85,7 @@ class TestEditorIntegration(unittest.TestCase):
         # 7. update_histogram
         # This one might be complex to mock fully due to threading, but we check existence
         if not hasattr(self.controller, 'update_histogram'):
-             self.fail("AppController is missing method 'update_histogram'")
+            self.fail("AppController is missing method 'update_histogram'")
 
 
     def test_set_edit_parameter_gating(self):

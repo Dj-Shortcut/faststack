@@ -121,6 +121,7 @@ class AppController(QObject):
         self._preview_lock = threading.Lock()
         self._last_rendered_preview = None # Store latest valid render
         self._shutting_down = False # Flag to gate async callbacks during shutdown
+        self._opencv_warning_shown = False  # Only show OpenCV warning once per session
 
         self.image_dir = image_dir
         self.image_files: List[ImageFile] = []  # Filtered list for display
@@ -223,12 +224,12 @@ class AppController(QObject):
         self.histogram_timer.setInterval(50)  # 50ms throttle (max 20fps)
         self.histogram_timer.timeout.connect(self._kick_histogram_worker)
 
-        # Preview Refresh Timer (Coalescing)
-        self._preview_refresh_pending = False
-        self.preview_timer = QTimer(self)
-        self.preview_timer.setSingleShot(True)
-        self.preview_timer.setInterval(33) # ~30fps cap for smoother dragging
-        self.preview_timer.timeout.connect(self._do_preview_refresh)
+        # Preview refresh uses a gate pattern instead of a timer:
+        # - _kick_preview_worker() runs immediately if not inflight
+        # - If inflight, it sets _preview_pending and returns
+        # - When render completes, _apply_preview_result chains immediately if pending
+        # This removes the extra 16ms delay in the fast-render case by chaining
+        # immediately on completion. QML's 16ms slider timer remains the fps cap.
 
         # Track if any dialog is open to disable keybindings
         self._dialog_open = False
@@ -243,12 +244,23 @@ class AppController(QObject):
     @Slot(bool)
     def _on_editor_open_changed(self, is_open: bool):
         """Handle necessary setup/cleanup when editor opens or closes."""
-        if not is_open:
+        if is_open:
+            # Warn once if OpenCV is not available (detail sliders will be slower)
+            if not self._opencv_warning_shown:
+                from faststack.imaging.optional_deps import HAS_OPENCV
+                if not HAS_OPENCV:
+                    self._opencv_warning_shown = True
+                    log.warning("OpenCV not available - detail sliders (clarity/texture/sharpness) will be slower")
+                    self.update_status_message(
+                        "OpenCV not installed - editor performance reduced. Install opencv-python for faster editing.",
+                        timeout=8000
+                    )
+        else:
             # Cleanup large memory buffers when editor closes
             if self.image_editor:
                 log.debug("Editor closed, clearing editor memory buffers")
                 self.image_editor.clear()
-            
+
             # Also clear the cached preview rendering
             with self._preview_lock:
                 self._last_rendered_preview = None
@@ -712,6 +724,7 @@ class AppController(QObject):
         # tell QML that index and image changed
         self.ui_state.currentIndexChanged.emit()
         self.ui_state.currentImageSourceChanged.emit()
+        self.ui_state.highlightStateChanged.emit() # Notify UI of new highlight stats
 
         # this is the one your footer needs
         self.ui_state.metadataChanged.emit()
@@ -734,34 +747,19 @@ class AppController(QObject):
     # --- Image Editor Integration ---
 
 
-    @Slot()
-    def rotate_image_cw(self):
-        if self.image_editor:
-            self.image_editor.rotate_image_cw()
-            self.ui_refresh_generation += 1
-            self.ui_state.currentImageSourceChanged.emit()
-            self.update_histogram()
 
-    @Slot()
-    def rotate_image_ccw(self):
-        if self.image_editor:
-            self.image_editor.rotate_image_ccw()
-            self.ui_refresh_generation += 1
-            self.ui_state.currentImageSourceChanged.emit()
-            self.update_histogram()
-
-    @Slot()
-    def reset_edit_parameters(self):
-        if self.image_editor:
-            self.image_editor.reset_edits()
-            self.ui_refresh_generation += 1
-            self.ui_state.currentImageSourceChanged.emit()
-            self.update_histogram()
-            self.update_status_message("Edits reset")
 
     @Slot()
     def save_edited_image(self):
-        """Saves functionality delegating to ImageEditor."""
+        """Saves functionality delegating to ImageEditor.
+        
+        Restores "Old" behavior:
+        - Save image
+        - Close Editor
+        - Clear Editor State
+        - Refresh List
+        - Re-select saved image
+        """
         if not self.image_editor.original_image:
             return
 
@@ -771,60 +769,67 @@ class AppController(QObject):
         if write_sidecar and 0 <= self.current_index < len(self.image_files):
             dev_path = self.image_files[self.current_index].developed_jpg_path
 
-        result = self.image_editor.save_image(write_developed_jpg=write_sidecar, developed_path=dev_path)
+        try:
+            result = self.image_editor.save_image(write_developed_jpg=write_sidecar, developed_path=dev_path)
+        except RuntimeError as e:
+            self.update_status_message(str(e))
+            return
+        except Exception as e:
+            log.exception(f"Unexpected error during save: {e}")
+            self.update_status_message("Failed to save image")
+            return
+
         if result:
             saved_path, backup_path = result
             
-            # If we overwrote the current file, we need to refresh checks
-            # But usually we save as a new file or overwrite.
-            # Use get_active_edit_path logic? ImageEditor handles correct path logic? 
-            # ImageEditor.save_image saves to self.current_filepath
+            # --- Restore Old Behavior ---
             
-            # Invalidate cache for this file
-            self.display_generation += 1
-            self.image_cache.clear() # Brute force clear to ensure fresh load
+            # 1. Close Editor UI
+            self.ui_state.isEditorOpen = False
+            
+            # 2. Clear Editor State (release memory)
+            self.image_editor.clear()
+            
+            # 3. Refresh List (to see new file or updated timestamp)
+            self.refresh_image_list()
+            
+            # 4. Find and Select the saved image
+            new_index = self.current_index # Default to keeping selection if not found
+            
+            # Try to find by exact path match
+            found_index = -1
+            if saved_path:
+                try:
+                    target_resolve = saved_path.resolve()
+                    for i, img in enumerate(self.image_files):
+                        try:
+                            # Robust path comparison
+                            if img.path.resolve() == target_resolve:
+                                new_index = i
+                                found_index = i
+                                break
+                        except (OSError, RuntimeError):
+                            # Fallback to string compare
+                            if str(img.path) == str(saved_path):
+                                new_index = i
+                                found_index = i
+                                break
+                except (OSError, RuntimeError):
+                    pass # Keep current selection if resolution fails
+            
+            self.current_index = new_index
+            
+            # 5. Force UI Sync / Prefetch
+            self.image_cache.clear() # Clear cache to ensure we reload valid image
             self.prefetcher.cancel_all()
             self.prefetcher.update_prefetch(self.current_index)
-            
             self.sync_ui_state()
+            
             self.update_status_message(f"Image saved")
         else:
             self.update_status_message("Failed to save image")
 
-    @Slot()
-    def auto_levels(self):
-        if not self.image_editor.original_image:
-            return
-            
-        blacks, whites, p_low, p_high = self.image_editor.auto_levels(self.auto_level_threshold)
-        
-        # Apply strength if needed (editor auto_levels returns values, doesn't apply them automatically to params?)
-        # Wait, ImageEditor.auto_levels just CALCULATES. We need to APPLY.
-        # Let's check ImageEditor.auto_levels signature in editor.py...
-        # It returns (blacks, whites, p_low, p_high).
-        
-        # We need to set them:
-        range_ = whites - blacks
-        if range_ < 0.001: range_ = 0.001
-        
-        # Apply strict auto-levels (ignoring strength for now as per simple impl, or use strength?)
-        # The QML just calls auto_levels() and increments updatePulse.
-        
-        # Setup parameters
-        # Note: 'blacks' and 'whites' in editor params usually map to exposure/contrast or specific black/white point?
-        # Standard Lightroom-style:
-        # Blacks: shifts black point. Whites: shifts white point.
-        # But our ImageEditor might use specific params.
-        # Looking at ImageEditor... it has 'blacks', 'whites' in _apply_edits.
-        
-        # We just set the params:
-        self.image_editor.set_edit_param("blacks", blacks * self.auto_level_strength)
-        self.image_editor.set_edit_param("whites", whites * self.auto_level_strength)
-        
-        self.ui_refresh_generation += 1
-        self.ui_state.currentImageSourceChanged.emit()
-        self.update_histogram()
-        self.update_status_message("Auto levels applied")
+
 
 
 
@@ -1746,10 +1751,9 @@ class AppController(QObject):
                     self.image_editor.set_crop_box((left, top, right, bottom))
 
         log.debug(f"AppController.set_straighten_angle: {angle}")
-        # Invert angle because QML rotation is CW but PIL rotation (used in editor) handles direction logic internally 
-        # (ImageEditor._apply_edits uses negative angle for PIL).
-        # We pass the raw angle from QML (degrees CW for UI rotation) to the editor.
-        # Editor takes care of sign.
+        # Pass the angle as-is (degrees CW).
+        # QML rotation is CW-positive.
+        # ImageEditor expects CW-positive and handles the inversion for PIL internally.
         self.image_editor.set_edit_param("straighten_angle", angle)
         
         # Trigger refresh. Since we are editing, we are viewing the preview.
@@ -3063,12 +3067,6 @@ class AppController(QObject):
         """Gets the preview data of the currently edited image as a DecodedImage."""
         return self.image_editor.get_preview_data()
 
-    def _do_preview_refresh(self):
-        self._preview_refresh_pending = False
-        self._kick_preview_worker()
-                 
-
-
     @Slot(str, "QVariant")
     def set_edit_parameter(self, key: str, value: Any):
         """Sets an edit parameter and updates the UIState for the slider visual."""
@@ -3097,11 +3095,10 @@ class AppController(QObject):
             if hasattr(self.ui_state, key):
                 setattr(self.ui_state, key, final_value)
 
-            # Trigger a refresh of the image to show the edit (throttled), ONLY if something changed
+            # Trigger a refresh of the image to show the edit, ONLY if something changed
+            # Uses gate pattern: runs immediately if not inflight, else queues for next
             if changed:
-                if not self._preview_refresh_pending:
-                    self._preview_refresh_pending = True
-                    self.preview_timer.start()
+                self._kick_preview_worker()
         except Exception as e:
             log.error("Error setting edit parameter %s=%s: %s", key, value, e)
 
@@ -3119,44 +3116,15 @@ class AppController(QObject):
         self.image_editor.reset_edits()
         if hasattr(self.ui_state, 'reset_editor_state'):
             self.ui_state.reset_editor_state()
+        
+        self.update_status_message("Edits reset")
 
         # Trigger a refresh to show the reset image
         self.ui_refresh_generation += 1
         self._kick_preview_worker()
-
-    @Slot()
-    def save_edited_image(self):
-        """Saves the edited image."""
-        save_result = self.image_editor.save_image()
-        if not save_result:
-            self.update_status_message("Failed to save image")
-            log.error("Failed to save edited image")
-            return
-
-        saved_path, _ = save_result
-        self.update_status_message(f"Edits saved to {saved_path.name}")
-        # Clear the image editor state so it will reload fresh next time
-        self.image_editor.clear()
-            
-        # Reset all edit parameters in the controller/UI
-        self.reset_edit_parameters()
-
-        # Refresh the view - need to refresh image list since backup file was created
-        original_path = saved_path
-        self.refresh_image_list()
         
-        # Find the edited image (not the backup) in the refreshed list
-        for i, img_file in enumerate(self.image_files):
-            if img_file.path == original_path:
-                self.current_index = i
-                break
-        
-        # Invalidate cache and refresh display
-        self.display_generation += 1
-        self.image_cache.clear()
-        self.prefetcher.cancel_all()
-        self.prefetcher.update_prefetch(self.current_index)
-        self.sync_ui_state()
+        if self.ui_state.isHistogramVisible:
+            self.update_histogram()
 
     
     @Slot()
@@ -3165,6 +3133,8 @@ class AppController(QObject):
         current = self.image_editor.current_edits.get('rotation', 0)
         new_rotation = (current - 90) % 360
         self.set_edit_parameter('rotation', new_rotation)
+        if self.ui_state.isHistogramVisible:
+            self.update_histogram()
 
     @Slot()
     def rotate_image_ccw(self):
@@ -3172,6 +3142,8 @@ class AppController(QObject):
         current = self.image_editor.current_edits.get('rotation', 0)
         new_rotation = (current + 90) % 360
         self.set_edit_parameter('rotation', new_rotation)
+        if self.ui_state.isHistogramVisible:
+            self.update_histogram()
     
     @Slot()
     def toggle_histogram(self):
@@ -3360,6 +3332,7 @@ class AppController(QObject):
             if hist is not None:
                 if token == self._hist_token:
                     self.ui_state.histogramData = hist
+                    self.ui_state.highlightStateChanged.emit()
 
             # If more updates arrived while we computed, run again soon
             pending = self._hist_pending is not None
@@ -3420,24 +3393,39 @@ class AppController(QObject):
             return
 
         token, decoded = payload
-        
+        should_kick = False
+        should_accept = False
+
         with self._preview_lock:
             self._preview_inflight = False
-            
-            if decoded is not None:
-                # Only accept if it matches the latest requested token
-                if token == self._preview_token:
-                    self._last_rendered_preview = decoded
-                    # Ensure QML/provider URL changes so we don't get a cached frame
-                    self.ui_refresh_generation += 1
-                    self.ui_state.currentImageSourceChanged.emit()
-                    
-                    # Trigger histogram update (always call, let update_histogram handle visibility guards)
-                    self.update_histogram()
-            
-            # If new requests arrived while we were rendering, start the next one immediately
+
+            # Accept result only if:
+            # 1. We got valid decoded data
+            # 2. Token matches (not stale from an old request)
+            # 3. No pending request waiting (avoid "snap back" stale frame flash)
+            if decoded is not None and token == self._preview_token and not self._preview_pending:
+                self._last_rendered_preview = decoded
+                self.ui_refresh_generation += 1
+                self._last_rendered_preview_index = self.current_index
+                self._last_rendered_preview_gen = self.ui_refresh_generation
+                should_accept = True
+
+            # Consume pending flag atomically before scheduling
             if self._preview_pending:
-                QTimer.singleShot(0, self._kick_preview_worker)
+                self._preview_pending = False
+                should_kick = True
+
+        # Emit outside lock to avoid holding lock during UI work
+        if should_accept:
+            self.ui_state.currentImageSourceChanged.emit()
+            self.ui_state.highlightStateChanged.emit()
+            self.update_histogram()
+
+        # Call directly (not via singleShot) since we're on the UI thread.
+        # This prevents race where a new slider event could interleave between
+        # scheduling and execution, causing a spurious extra render.
+        if should_kick:
+            self._kick_preview_worker()
     
 
 
@@ -3707,7 +3695,16 @@ class AppController(QObject):
         self.image_editor.set_edit_param('straighten_angle', current_rotation)
         
         # Save via ImageEditor (handles rotation + crop correctly)
-        save_result = self.image_editor.save_image()
+        try:
+            save_result = self.image_editor.save_image()
+        except RuntimeError as e:
+            log.warning(f"execute_crop: Save failed: {e}")
+            self.update_status_message(f"Failed to save cropped image: {e}")
+            return
+        except Exception as e:
+            log.exception(f"execute_crop: Unexpected error during save: {e}")
+            self.update_status_message("Failed to save cropped image")
+            return
         
         if save_result:
             saved_path, backup_path = save_result
@@ -3851,6 +3848,8 @@ class AppController(QObject):
             msg = "Auto levels: highlights already clipped; only adjusting shadows"
         elif p_low <= 0.0:
             msg = "Auto levels: shadows already clipped; only adjusting highlights"
+        
+        self._kick_preview_worker()
 
         self.update_status_message(f"{msg} (preview only)")
         log.info("Auto levels preview applied to %s (clip %.2f%%, str %.2f). Msg: %s", 
@@ -3874,7 +3873,17 @@ class AppController(QObject):
 
         # Save
         import time
-        save_result = self.image_editor.save_image()
+        try:
+            save_result = self.image_editor.save_image()
+        except RuntimeError as e:
+            log.warning(f"quick_auto_levels: Save failed: {e}")
+            self.update_status_message(f"Failed to save image: {e}")
+            return
+        except Exception as e:
+            log.exception(f"quick_auto_levels: Unexpected error during save: {e}")
+            self.update_status_message("Failed to save image")
+            return
+
         if save_result:
             saved_path, backup_path = save_result
             timestamp = time.time()
@@ -3941,7 +3950,17 @@ class AppController(QObject):
         self.auto_white_balance()
         
         # Save the edited image (this creates a backup automatically)
-        save_result = self.image_editor.save_image()
+        try:
+            save_result = self.image_editor.save_image()
+        except RuntimeError as e:
+            log.warning(f"quick_auto_white_balance: Save failed: {e}")
+            self.update_status_message(f"Failed to save image: {e}")
+            return
+        except Exception as e:
+            log.exception(f"quick_auto_white_balance: Unexpected error during save: {e}")
+            self.update_status_message("Failed to save image")
+            return
+
         if save_result:
             saved_path, backup_path = save_result
             # Track this action for undo
