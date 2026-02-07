@@ -159,16 +159,16 @@ def test_analyze_highlight_state():
     # Image with headroom
     headroom_img = np.ones((10, 10, 3), dtype=np.float32) * 1.5
     state = _analyze_highlight_state(headroom_img)
-    assert state["headroom_pct"] > 0.9, (
-        f"Should detect headroom: {state['headroom_pct']}"
-    )
+    assert (
+        state["headroom_pct"] > 0.9
+    ), f"Should detect headroom: {state['headroom_pct']}"
 
     # Normal image
     normal_img = np.ones((10, 10, 3), dtype=np.float32) * 0.5
     state = _analyze_highlight_state(normal_img)
-    assert state["headroom_pct"] < 0.01, (
-        f"Should not detect headroom: {state['headroom_pct']}"
-    )
+    assert (
+        state["headroom_pct"] < 0.01
+    ), f"Should not detect headroom: {state['headroom_pct']}"
 
     print("test_analyze_highlight_state passed")
 
@@ -233,9 +233,9 @@ def test_pivot_behavior():
             low_values.copy(), amount=amount, pivot=0.5
         )
         diff = np.abs(recovered - low_values).max()
-        assert diff < 1e-5, (
-            f"Values below pivot changed with amount={amount}: max_diff={diff}"
-        )
+        assert (
+            diff < 1e-5
+        ), f"Values below pivot changed with amount={amount}: max_diff={diff}"
 
     print("test_pivot_behavior passed")
 
@@ -253,9 +253,9 @@ def test_increasing_amount_increases_compression():
     avg_high = recovered_high.mean()
 
     # avg_high should be lower (more compressed toward 1.0) than avg_low
-    assert avg_high <= avg_low, (
-        f"Higher amount should compress more: avg_low={avg_low:.4f}, avg_high={avg_high:.4f}"
-    )
+    assert (
+        avg_high <= avg_low
+    ), f"Higher amount should compress more: avg_low={avg_low:.4f}, avg_high={avg_high:.4f}"
 
     print("test_increasing_amount_increases_compression passed")
 

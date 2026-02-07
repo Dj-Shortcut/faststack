@@ -280,7 +280,11 @@ def rotate_autocrop_rgb(
     is_exact_90 = abs(angle_deg % 90.0) < 0.01
     actual_inset = 0 if is_exact_90 else inset
 
-    if actual_inset > 0 and (right - left) > 2 * actual_inset and (bottom - top) > 2 * actual_inset:
+    if (
+        actual_inset > 0
+        and (right - left) > 2 * actual_inset
+        and (bottom - top) > 2 * actual_inset
+    ):
         left += actual_inset
         top += actual_inset
         right -= actual_inset
@@ -710,7 +714,7 @@ class ImageEditor:
                 # Skip for exact 90-degree increments to preserve full dimensions.
                 is_exact_90 = abs(straighten_angle % 90.0) < 0.01
                 inset = 0 if is_exact_90 else 2
-                
+
                 if (right - left) > 2 * inset and (bottom - top) > 2 * inset:
                     left += inset
                     top += inset

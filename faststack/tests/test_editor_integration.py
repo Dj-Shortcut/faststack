@@ -36,12 +36,12 @@ class TestEditorIntegration(unittest.TestCase):
         self.controller.image_editor.current_filepath = Path("test.jpg")
         self.controller.image_editor.float_image = MagicMock()
         self.controller.image_editor.original_image = MagicMock()
-        
+
         # Initialize state for delegation tests
         self.controller.image_files = [MagicMock(path=Path("test.jpg"))]
         self.controller.current_index = 0
         self.controller.auto_level_threshold = 0.001
-        
+
         # Mock returns for methods that unpack results
         self.controller.image_editor.auto_levels.return_value = (0, 255, 0, 255)
         self.controller.image_editor.save_image.return_value = (Path("test.jpg"), None)
@@ -66,9 +66,7 @@ class TestEditorIntegration(unittest.TestCase):
         try:
             self.controller.rotate_image_cw()
             # AppController delegates rotation via set_edit_param("rotation", ...)
-            self.controller.image_editor.set_edit_param.assert_any_call(
-                "rotation", 270
-            )
+            self.controller.image_editor.set_edit_param.assert_any_call("rotation", 270)
         except AttributeError:
             self.fail("AppController is missing method 'rotate_image_cw'")
 
@@ -76,9 +74,7 @@ class TestEditorIntegration(unittest.TestCase):
         try:
             self.controller.rotate_image_ccw()
             # AppController delegates rotation via set_edit_param("rotation", ...)
-            self.controller.image_editor.set_edit_param.assert_any_call(
-                "rotation", 90
-            )
+            self.controller.image_editor.set_edit_param.assert_any_call("rotation", 90)
         except AttributeError:
             self.fail("AppController is missing method 'rotate_image_ccw'")
 

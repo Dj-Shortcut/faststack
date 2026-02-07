@@ -68,7 +68,7 @@ class ByteLRUCache(LRUCache):
 
     def pop_path(self, path: Union[Path, str]):
         """Targeted invalidation of all generations for a given path.
-        
+
         Hardened to handle both Path objects and string keys, and resolved paths.
         Expected type: Union[Path, str].
         """
@@ -91,12 +91,14 @@ class ByteLRUCache(LRUCache):
                 if key_str == t_str or key_str.startswith(f"{t_str}::"):
                     keys_to_remove.append(key)
                     break
-        
+
         for k in keys_to_remove:
             self.pop(k, None)
-        
+
         if keys_to_remove:
-            log.debug(f"Invalidated {len(keys_to_remove)} cache entries for path: {path}")
+            log.debug(
+                f"Invalidated {len(keys_to_remove)} cache entries for path: {path}"
+            )
 
 
 def get_decoded_image_size(item) -> int:

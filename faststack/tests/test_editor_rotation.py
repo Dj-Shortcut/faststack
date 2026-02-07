@@ -160,7 +160,7 @@ def test_integration_straighten_modes():
     # a precise axis-aligned crop on the *rotated* canvas using the standard parameters.
     # To simulate a "User cropping the rotated image" correctly in this test,
     # we feed the editor a pre-rotated image and set straighten_angle=0.
-    
+
     # 1) Compute the rotated canvas size using PIL
     rot_temp = img.rotate(-angle, expand=True)
     rw, rh = rot_temp.size
