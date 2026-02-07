@@ -228,8 +228,8 @@ def _rotated_rect_with_max_area(w: int, h: int, angle_rad: float) -> tuple[int, 
         wr = (w * cos_a - h * sin_a) / cos_2a
         hr = (h * cos_a - w * sin_a) / cos_2a
 
-    cw = round(abs(wr))
-    ch = round(abs(hr))
+    cw = math.floor(abs(wr))
+    ch = math.floor(abs(hr))
     cw = max(1, min(w, cw))
     ch = max(1, min(h, ch))
     return cw, ch
@@ -270,17 +270,25 @@ def rotate_autocrop_rgb(
     # Center-crop to the inscribed rectangle
     cx = rot.width / 2.0
     cy = rot.height / 2.0
-    left = round(cx - crop_w / 2.0)
-    top = round(cy - crop_h / 2.0)
+    left = math.floor(cx - crop_w / 2.0)
+    top = math.floor(cy - crop_h / 2.0)
     right = left + crop_w
     bottom = top + crop_h
 
     # Small inset to remove any bicubic edge contamination
-    if inset > 0 and (right - left) > 2 * inset and (bottom - top) > 2 * inset:
-        left += inset
-        top += inset
-        right -= inset
-        bottom -= inset
+    # We skip this for exact 90-degree increments as there is no edge contamination.
+    is_exact_90 = abs(angle_deg % 90.0) < 0.01
+    actual_inset = 0 if is_exact_90 else inset
+
+    if (
+        actual_inset > 0
+        and (right - left) > 2 * actual_inset
+        and (bottom - top) > 2 * actual_inset
+    ):
+        left += actual_inset
+        top += actual_inset
+        right -= actual_inset
+        bottom -= actual_inset
 
     # Clamp defensively
     left = max(0, min(rot.width - 1, left))
@@ -615,6 +623,29 @@ class ImageEditor:
         # Alias
         arr = img_arr
 
+        # ENSURE we are working with a float32 numpy array
+        if isinstance(arr, Image.Image):
+            arr = np.array(arr.convert("RGB")).astype(np.float32) / 255.0
+        elif not isinstance(arr, np.ndarray):
+            arr = np.array(arr)
+            if arr.dtype == np.uint8:
+                arr = arr.astype(np.float32) / 255.0
+            elif arr.dtype == np.uint16:
+                arr = arr.astype(np.float32) / 65535.0
+            else:
+                arr = arr.astype(np.float32)
+                # Heuristic: only scan for max if necessary, or use a sample for speed
+                # If the first few thousand pixels are > 1.0, it's likely 8-bit data.
+                if arr.size > 0:
+                    sample = arr.reshape(-1)[:2000]
+                    s_max = sample.max()
+                    if s_max > 1.0 and s_max <= 255.0:
+                        arr /= 255.0
+                    elif s_max <= 1.0:
+                        # Double check full array only if sample was small or ambiguous
+                        # but typically 0.0-1.0 images stay 0.0-1.0.
+                        pass
+
         # NOTE: For UI analysis, we want to capture the state AFTER White Balance and Exposure
         # but BEFORE Highlights/Shadows/ToneMapping, so the indicators reflect the
         # "available headroom" and "current clipping" accurately for the recovery tools.
@@ -643,6 +674,9 @@ class ImageEditor:
         # However, for accurate cropping, we need to rotate.
 
         apply_rotation = abs(straighten_angle) > 0.001 and (for_export or has_crop_box)
+
+        # Capture original dimensions BEFORE rotation for crop coordinate transformation
+        orig_h, orig_w = arr.shape[:2]
 
         if apply_rotation:
             # Use the float rotation helper
@@ -676,8 +710,11 @@ class ImageEditor:
                 right = left + cw
                 bottom = top + ch
 
-                # Apply inset (2px) to match legacy behavior and avoid edge artifacts
-                inset = 2
+                # Apply inset (2px) to match legacy behavior and avoid edge artifacts.
+                # Skip for exact 90-degree increments to preserve full dimensions.
+                is_exact_90 = abs(straighten_angle % 90.0) < 0.01
+                inset = 0 if is_exact_90 else 2
+
                 if (right - left) > 2 * inset and (bottom - top) > 2 * inset:
                     left += inset
                     top += inset
@@ -696,17 +733,70 @@ class ImageEditor:
         if has_crop_box:
             crop_box = edits.get("crop_box", 0.0)
             if len(crop_box) == 4:
-                # 0-1000 relative to current size
-                h, w = arr.shape[:2]
-                left = int(crop_box[0] * w / 1000)
-                t = int(crop_box[1] * h / 1000)
-                r = int(crop_box[2] * w / 1000)
-                b = int(crop_box[3] * h / 1000)
+                # The crop_box is in 0-1000 normalized coordinates relative to the
+                # ORIGINAL (un-rotated) image. After rotation with expand=True,
+                # the original image is centered within a larger canvas.
+                # We need to transform the coordinates from original image space
+                # to the expanded canvas space.
 
-                left = max(0, left)
-                t = max(0, t)
-                r = min(w, r)
-                b = min(h, b)
+                if apply_rotation and abs(straighten_angle) > 0.001:
+                    # Transform crop box through rotation:
+                    # 1. Convert 0-1000 to pixel coords in original image
+                    # 2. Rotate corners around original center
+                    # 3. Translate to expanded canvas
+                    new_h, new_w = arr.shape[:2]
+                    orig_cx, orig_cy = orig_w / 2.0, orig_h / 2.0
+                    canvas_cx, canvas_cy = new_w / 2.0, new_h / 2.0
+
+                    # Get crop corners in original pixel space
+                    c_left = crop_box[0] * orig_w / 1000
+                    c_top = crop_box[1] * orig_h / 1000
+                    c_right = crop_box[2] * orig_w / 1000
+                    c_bottom = crop_box[3] * orig_h / 1000
+
+                    # Define the 4 corners, rotate each around original center
+                    corners = [
+                        (c_left, c_top),
+                        (c_right, c_top),
+                        (c_right, c_bottom),
+                        (c_left, c_bottom),
+                    ]
+                    angle_rad = math.radians(-straighten_angle)
+                    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+
+                    rotated_corners = []
+                    for px, py in corners:
+                        # Rotate around original center
+                        dx, dy = px - orig_cx, py - orig_cy
+                        rx = dx * cos_a - dy * sin_a
+                        ry = dx * sin_a + dy * cos_a
+                        # Translate to canvas center
+                        rotated_corners.append((rx + canvas_cx, ry + canvas_cy))
+
+                    # Get axis-aligned bounding box of rotated corners
+                    xs = [c[0] for c in rotated_corners]
+                    ys = [c[1] for c in rotated_corners]
+                    left = int(min(xs))
+                    t = int(min(ys))
+                    r = int(max(xs))
+                    b = int(max(ys))
+
+                    left = max(0, left)
+                    t = max(0, t)
+                    r = min(new_w, r)
+                    b = min(new_h, b)
+                else:
+                    # No rotation - use current dimensions directly
+                    h, w = arr.shape[:2]
+                    left = int(crop_box[0] * w / 1000)
+                    t = int(crop_box[1] * h / 1000)
+                    r = int(crop_box[2] * w / 1000)
+                    b = int(crop_box[3] * h / 1000)
+
+                    left = max(0, left)
+                    t = max(0, t)
+                    r = min(w, r)
+                    b = min(h, b)
 
                 if r > left and b > t:
                     arr = arr[t:b, left:r, :]
@@ -869,6 +959,16 @@ class ImageEditor:
                     Y1_cached = cached.get("Y1")
                     cached_exp_gain = cached.get("exp_gain", 1.0)
                     cache_hit = True
+
+                    # Validate cached array shapes match current Y dimensions
+                    # This prevents reusing preview-resolution blurs during export
+                    y_shape = Y.shape
+                    for cached_arr in (Y20_cached, Y3_cached, Y1_cached):
+                        if cached_arr is not None and cached_arr.shape != y_shape:
+                            # Shape mismatch - invalidate cache
+                            Y20_cached = Y3_cached = Y1_cached = None
+                            cache_hit = False
+                            break
 
             # Compute exposure scale factor for reusing cached blurs
             # blur(k*Y) = k*blur(Y) is exact only if Y scales linearly with exposure.

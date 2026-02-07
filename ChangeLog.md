@@ -1,6 +1,59 @@
 # ChangeLog
 
-Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   
+Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
+
+# Changelog
+
+## 1.5.5 (2026-02-07)
+
+### Changed
+- Image save behavior in the editor is now navigation-aware:
+  - Only clear editor state / close editor UI when the user is still on the same image.
+  - Only perform a full list refresh + re-select logic when the user is still on the same image.
+  - If the user navigated away, preserve their selection and only invalidate the saved image’s cache entry.
+
+- Recycle/delete of JPG+RAW pairs is now more atomic and robust:
+  - Check RAW existence **before** any moves to avoid post-move existence ambiguity.
+  - Move JPG first; only attempt RAW move if JPG succeeds and RAW existed.
+  - If RAW move fails after JPG succeeds, roll back the JPG move to keep pairs consistent.
+  - Track `raw_moved` based on whether RAW existed and whether it was moved successfully.
+
+- Cache invalidation after edits is now targeted instead of global:
+  - Replace multiple `image_cache.clear()` calls after save/export with `image_cache.pop_path(saved_path)` to invalidate only the edited file.
+
+- Keep internal path→index lookup consistent:
+  - Rebuild the path-to-index map after operations that mutate the image list, including after recycle/rollback flows.
+
+### Fixed
+- Rotation/autocrop and straighten edge handling:
+  - Use `floor()` instead of `round()` in inscribed-rectangle and crop coordinate math to reduce off-by-one drift.
+  - Skip inset trimming for exact 90° rotations to preserve full dimensions and avoid unnecessary cropping.
+
+## 1.5.4 (2026-02-04)
+
+### Fixed
+- Image rotation fixed - no more black wedges on the edges of the image.
+- Prevented “undo delete” from resurrecting files when recycle/rollback fails: if a JPG can’t be restored after a partial delete, it’s marked as deleted (`jpg_moved=True`), a warning is shown, and a `recycled_jpg_path` breadcrumb is stored for potential cleanup.
+- Improved crop behavior when straightening/rotating with `expand=True` by transforming crop coordinates from original image space into the expanded canvas.
+- Prevented exporting with stale preview-resolution blur caches by validating cached array shapes against the current Y channel dimensions.
+- Improved highlight recovery by switching to an adaptive rational compression shoulder (new `k` parameter) and added tests for identity-at-zero, pivot invariance, and increasing compression with higher amount.
+- Fixed QML empty-state message timing by only showing “No images in this folder” after the folder has been scanned at least once.
+- Improved Escape key reliability during crop/rotation by explicitly re-focusing the loupe view.
+
+### Changed
+- Refactored deletion into a unified core deletion engine (`_delete_indices`) shared by loupe, grid cursor, grid selection, and batch deletion paths.
+- Deletion now uses an optimistic UI update for instant feedback, with deferred/coalesced disk refresh to avoid flicker and “deleted items reappear” issues.
+- Grid deletion now supports multi-selection and cursor deletion through a single entry point, rebuilding the path→index mapping for reliable lookup.
+- Image saving is now offloaded to a background thread to keep the UI responsive:
+  - Added an `isSaving` state to disable Save actions and show “Saving…” feedback.
+  - Prevented “surprise close” by only auto-closing the editor if the user is still on the same image when the save completes.
+- Improved recycle-bin cleanup on quit:
+  - Replaced the simple message dialog with a richer dialog showing per-bin counts (JPG/RAW/other) and an optional detailed file list.
+
+### UI
+- Resized the Image Editor dialog to accommodate the saving state/controls.
+- Enhanced recycle bin cleanup dialog layout and interaction (expandable detailed list, clearer button actions).
+
 
 ## 1.5.3 (2026-01-27)
 

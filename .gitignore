@@ -74,6 +74,8 @@ test_report*.log
 test_results.txt
 smoke_test_output.txt
 verify_result.txt
+faststack/*fail*.txt
+faststack/*final*.txt
 
 # Same junk when produced inside the package dir
 faststack/debug_*.txt
