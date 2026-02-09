@@ -2,6 +2,15 @@
 
 Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
 
+## 1.5.7 (2026-02-09)
+
+- Avoid full directory rescan after quick saves by inserting the backup file into the cached list via bisect using indexer sort rules.
+- Speed up AWB (Lab) by subsampling from editor float_image; add no-op thresholds + clearer “direction” labels.
+- Improve auto-levels/AWB UX: detailed status messages and per-stage timing logs (compute/save/list/total).
+- Track last auto-levels detail string for “saved” message reuse; minor import/indexer integration tweaks.
+- Centralize canonical image sort key in indexer; store developed adjacency name on ImageFile.
+
+
 ## 1.5.6 (2026-02-08)
 
 ### Performance

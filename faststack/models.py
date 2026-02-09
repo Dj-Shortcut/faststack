@@ -12,6 +12,10 @@ class ImageFile:
     path: Path
     raw_pair: Optional[Path] = None
     timestamp: float = 0.0
+    # Casefolded name used as the primary sort key.  For developed images this
+    # is the *base* image's name (so the pair sorts adjacently); for everything
+    # else it defaults to None which means "use path.name.casefold()".
+    sort_name_cf: Optional[str] = None
 
     @property
     def raw_path(self) -> Optional[Path]:

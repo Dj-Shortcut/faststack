@@ -51,7 +51,7 @@ Image.MAX_IMAGE_PIXELS = 200_000_000  # 200 megapixels, enough for most photos
 from faststack.config import config
 from faststack.logging_setup import setup_logging
 from faststack.models import ImageFile, DecodedImage
-from faststack.io.indexer import find_images, _parse_developed
+from faststack.io.indexer import find_images, image_sort_key
 from faststack.io.sidecar import SidecarManager
 from faststack.io.watcher import Watcher
 from faststack.io.helicon import launch_helicon_focus
@@ -731,8 +731,8 @@ class AppController(QObject):
     def _insert_backup_into_list(self, backup_path: str, current_path: str) -> bool:
         """Insert a newly-created backup file into the image list without a full rescan.
 
-        Uses bisect.bisect_right with the same sort key as indexer.py to maintain
-        order, then list.insert at the found position.
+        Uses bisect.bisect_right with the canonical image_sort_key() from
+        indexer.py to maintain order, then list.insert at the found position.
         Falls back to refresh_image_list() on any error.
 
         Returns True if the current_path was found in the updated list.
@@ -743,23 +743,10 @@ class AppController(QObject):
             mtime = bp.stat().st_mtime
             img = ImageFile(path=bp, raw_pair=None, timestamp=mtime)
 
-            # Sort key matches indexer.py:70 — (mtime, name_cf, is_developed, name_cf)
-            # Backup files don't match the -developed suffix, so position 2 = 0
-            key = (mtime, bp.name.casefold(), 0, bp.name.casefold())
-
-            # Build parallel key list for bisect — uses _parse_developed from
-            # indexer.py so the is_developed bit stays in sync with the canonical rule.
-            # f.timestamp is st_mtime, set in indexer.py:68 (ImageFile(timestamp=stat.st_mtime)).
+            # Use the canonical sort key for both the new entry and existing list.
             # Rebuilding keys is O(n) but still far cheaper than a full directory scan.
-            keys = [
-                (
-                    f.timestamp,
-                    f.path.name.casefold(),
-                    int(_parse_developed(f.path)[0]),
-                    f.path.name.casefold(),
-                )
-                for f in self._all_images
-            ]
+            key = image_sort_key(img)
+            keys = [image_sort_key(f) for f in self._all_images]
             idx = bisect.bisect_right(keys, key)
             self._all_images.insert(idx, img)
 
@@ -767,7 +754,8 @@ class AppController(QObject):
             self._apply_filter_to_cached_list()
 
             # Re-derive current_index from the updated path-to-index map
-            resolved = cp.resolve()
+            # strict=False avoids exceptions from symlinks / missing intermediates
+            resolved = cp.resolve(strict=False)
             new_idx = self._path_to_index.get(resolved)
             if new_idx is not None:
                 self.current_index = new_idx
@@ -5080,6 +5068,19 @@ class AppController(QObject):
         blacks *= strength
         whites *= strength
 
+        # Detect no-op before applying: flat image or already full range
+        dynamic_range = p_high - p_low
+        if dynamic_range < 1.0:
+            msg = "Auto levels: no change (flat image)"
+            self.update_status_message(f"{msg} (preview only)")
+            self._last_auto_levels_msg = msg
+            return False
+        if p_low <= 0 and p_high >= 255:
+            msg = "Auto levels: no change (already full range)"
+            self.update_status_message(f"{msg} (preview only)")
+            self._last_auto_levels_msg = msg
+            return False
+
         # Apply scaled values
         self.image_editor.set_edit_param("blacks", blacks)
         self.image_editor.set_edit_param("whites", whites)
@@ -5094,18 +5095,13 @@ class AppController(QObject):
         if self.ui_state.isHistogramVisible:
             self.update_histogram()
 
-        # Determine status message with computed details
-        dynamic_range = p_high - p_low
-        if dynamic_range < 1.0:
-            msg = "Auto levels: no change (flat image)"
-        elif p_low <= 0 and p_high >= 255:
-            msg = "Auto levels: no change (already full range)"
-        elif p_high >= 255.0:
+        # Build detail message
+        if p_high >= 255.0:
             msg = f"Auto levels: highlights clipped; shadows only (blacks {blacks:+.1f})"
         elif p_low <= 0.0:
             msg = f"Auto levels: shadows clipped; highlights only (whites {whites:+.1f})"
         else:
-            gain = 255.0 / dynamic_range if dynamic_range > 0 else 1.0
+            gain = 255.0 / dynamic_range
             msg = (
                 f"Auto levels: blacks {blacks:+.1f}, whites {whites:+.1f} "
                 f"(range {p_low:.0f}\u2013{p_high:.0f}, gain {gain:.2f})"
@@ -5189,7 +5185,11 @@ class AppController(QObject):
                 total_ms,
             )
             detail = self._last_auto_levels_msg
-            saved_msg = f"{detail} \u2014 saved ({total_ms} ms)" if detail else f"Auto levels applied and saved ({total_ms} ms)"
+            saved_msg = (
+                f"{detail} \u2014 saved ({total_ms} ms)"
+                if detail
+                else f"Auto levels applied and saved ({total_ms} ms)"
+            )
             self.update_status_message(saved_msg)
             log.info(
                 "Quick auto levels saved for %s. New index: %d",
