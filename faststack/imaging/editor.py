@@ -3,6 +3,7 @@ import os
 import shutil
 import re
 import math
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
@@ -433,6 +434,9 @@ class ImageEditor:
             return False
 
         load_filepath = Path(filepath)
+        _debug = log.isEnabledFor(logging.DEBUG)
+        if _debug:
+            t0 = time.perf_counter()
         try:
             new_mtime = load_filepath.stat().st_mtime
         except OSError:
@@ -448,6 +452,8 @@ class ImageEditor:
             with Image.open(load_filepath) as im:
                 # Keep original PIL for EXIF/Format preservation
                 loaded_original = im.copy()
+            if _debug:
+                t_pil = time.perf_counter()
 
             # --- Convert to Float32 ---
             # Use OpenCV for reliable 16-bit loading as Pillow often downsamples to 8-bit RGB
@@ -504,6 +510,8 @@ class ImageEditor:
                 rgb = loaded_original.convert("RGB")
                 loaded_float_image = np.array(rgb).astype(np.float32) / 255.0
                 log.info(f"Loaded 8-bit image via Pillow: {load_filepath}")
+            if _debug:
+                t_float = time.perf_counter()
 
             # --- Apply EXIF Orientation ---
             # Read orientation from the loaded original image's EXIF
@@ -520,6 +528,8 @@ class ImageEditor:
                     loaded_float_image = apply_orientation_to_np(
                         loaded_float_image, orientation
                     )
+            if _debug:
+                t_orient = time.perf_counter()
 
             # --- Create Float Preview ---
             # Use the cached, display-sized preview if available to speed up
@@ -550,6 +560,9 @@ class ImageEditor:
                 # Thumbnail is derived from loaded_original AFTER exif_transpose,
                 # so orientation is already correct.
 
+            if _debug:
+                t_preview = time.perf_counter()
+
             # Assign all state atomically under lock to prevent race with preview worker
             with self._lock:
                 self.current_filepath = load_filepath
@@ -563,6 +576,17 @@ class ImageEditor:
                 self._cached_preview = None
                 self._cached_rev = -1
 
+            if _debug:
+                t_end = time.perf_counter()
+                log.debug(
+                    "[LOAD_IMAGE] pil_open=%dms float_convert=%dms exif_orient=%dms preview=%dms total=%dms  %s",
+                    int((t_pil - t0) * 1000),
+                    int((t_float - t_pil) * 1000),
+                    int((t_orient - t_float) * 1000),
+                    int((t_preview - t_orient) * 1000),
+                    int((t_end - t0) * 1000),
+                    load_filepath.name,
+                )
             return True
         except Exception as e:
             # We catch specific errors during the process if needed, but for general failure
@@ -1171,6 +1195,9 @@ class ImageEditor:
         Returns (blacks, whites, p_low, p_high).
         p_low/p_high are computed conservatively from RGB to avoid introducing new channel clipping.
         """
+        _debug = log.isEnabledFor(logging.DEBUG)
+        if _debug:
+            t0 = time.perf_counter()
         threshold_percent = max(0.0, min(10.0, threshold_percent))
         # Use preview for speed
         img_arr = (
@@ -1192,10 +1219,14 @@ class ImageEditor:
             else:
                 return 0.0, 0.0, 0.0, 255.0
 
-        # Convert to unit8 (0-255) for histogram analysis
+        # Convert to uint8 (0-255) for histogram analysis
         # This preserves the logic of the original algorithm which was tuned for 0-255 bins
+        if _debug:
+            t_arr = time.perf_counter()
         rgb = (np.clip(img_arr, 0.0, 1.0) * 255).astype(np.uint8)
         # rgb shape: (H, W, 3)
+        if _debug:
+            t_u8 = time.perf_counter()
 
         low_p = threshold_percent
         high_p = 100.0 - threshold_percent
@@ -1264,6 +1295,18 @@ class ImageEditor:
             self.current_edits["whites"] = whites
             self._edits_rev += 1
 
+        if _debug:
+            t_end = time.perf_counter()
+            h, w = rgb.shape[:2]
+            log.debug(
+                "[AUTO_LEVEL] get_array=%dms to_uint8=%dms hist+clip=%dms total=%dms  (%dx%d, %s)",
+                int((t_arr - t0) * 1000),
+                int((t_u8 - t_arr) * 1000),
+                int((t_end - t_u8) * 1000),
+                int((t_end - t0) * 1000),
+                w, h,
+                "preview" if self.float_preview is not None else "full",
+            )
         return blacks, whites, float(p_low), float(p_high)
 
     def _get_upstream_edits_hash(self, edits: Dict[str, Any]) -> int:
@@ -1750,10 +1793,16 @@ class ImageEditor:
         if self.float_image is None or self.current_filepath is None:
             return None
 
+        _debug = log.isEnabledFor(logging.DEBUG)
+        if _debug:
+            t0 = time.perf_counter()
+
         # 1. Apply Edits to Full Resolution
         final_float = self._apply_edits(
             self.float_image.copy(), for_export=True
         )  # (H,W,3) float32
+        if _debug:
+            t_edits = time.perf_counter()
 
         original_path = self.current_filepath
         try:
@@ -1766,6 +1815,8 @@ class ImageEditor:
         backup_path = create_backup_file(original_path)
         if backup_path is None:
             return None
+        if _debug:
+            t_backup = time.perf_counter()
 
         try:
             # 3. Save Main File
@@ -1856,6 +1907,18 @@ class ImageEditor:
                 except Exception:
                     img_u8.save(developed_path)
 
+            if _debug:
+                t_write = time.perf_counter()
+                h, w = self.float_image.shape[:2]
+                log.debug(
+                    "[SAVE_IMAGE] apply_edits=%dms backup=%dms write=%dms total=%dms  (%dx%d, %s)",
+                    int((t_edits - t0) * 1000),
+                    int((t_backup - t_edits) * 1000),
+                    int((t_write - t_backup) * 1000),
+                    int((t_write - t0) * 1000),
+                    w, h,
+                    original_path.name,
+                )
             return original_path, backup_path
 
         except Exception as e:

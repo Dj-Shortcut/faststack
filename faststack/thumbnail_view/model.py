@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Set, Callable
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
+    QThread,
     Qt,
     Signal,
     Slot,
@@ -135,6 +136,7 @@ class ThumbnailModel(QAbstractListModel):
         self._entries: List[ThumbnailEntry] = []
         self._selected_indices: Set[int] = set()
         self._last_selected_index: Optional[int] = None
+        self._active_filter: str = ""  # current filename filter (set by AppController)
 
         # Mapping from thumbnail_id (without query params) to row index
         # id format: "{size}/{path_hash}/{mtime_ns}"
@@ -269,12 +271,22 @@ class ThumbnailModel(QAbstractListModel):
         else:
             return f"image://thumbnail/{self._thumbnail_size}/{path_hash}/{mtime_ns}?r={rev}"
 
-    def refresh(self, filter_string: str = ""):
-        """Refresh the model by rescanning the current directory.
+    def set_filter(self, filter_string: str) -> None:
+        """Set the active filename filter and refresh the model.
 
         Args:
-            filter_string: Optional filter to apply to filenames (case-insensitive)
+            filter_string: Filter to apply (case-insensitive substring match on stem).
+                           Pass empty string to clear the filter.
         """
+        self._active_filter = filter_string
+        self.refresh()
+
+    def refresh(self):
+        """Refresh the model by rescanning the current directory."""
+        cur, own = QThread.currentThread(), self.thread()
+        assert cur == own, (
+            f"ThumbnailModel.refresh() thread mismatch: current={cur}, owner={own}"
+        )
         self.beginResetModel()
         try:
             self._entries.clear()
@@ -334,9 +346,9 @@ class ThumbnailModel(QAbstractListModel):
             # Get images using existing indexer (respects filter rules)
             images = find_images(self._current_directory)
 
-            # Apply filter if specified
-            if filter_string:
-                needle = filter_string.lower()
+            # Apply active filter if set
+            if self._active_filter:
+                needle = self._active_filter.lower()
                 images = [img for img in images if needle in img.path.stem.lower()]
 
             # Convert ImageFile to ThumbnailEntry

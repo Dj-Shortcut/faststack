@@ -452,6 +452,11 @@ class AppController(QObject):
         self.dataChanged.emit()
         self.ui_state.filterStringChanged.emit()  # Notify UI of filter change
 
+        # Sync filter to grid view model;
+        # cancel stale thumbnail jobs so the filtered view's thumbnails load quickly
+        self._thumbnail_prefetcher.cancel_all()
+        self._thumbnail_model.set_filter(filter_string)
+
         # reset to start of filtered list
         self.current_index = 0
         self.sync_ui_state()
@@ -474,6 +479,12 @@ class AppController(QObject):
         )
         self.dataChanged.emit()
         self.ui_state.filterStringChanged.emit()  # Notify UI of filter change
+
+        # Sync filter to grid view model;
+        # cancel stale thumbnail jobs so the new view's thumbnails load quickly
+        self._thumbnail_prefetcher.cancel_all()
+        self._thumbnail_model.set_filter("")
+
         self.current_index = min(self.current_index, max(0, len(self.image_files) - 1))
         self.sync_ui_state()
         self._do_prefetch(self.current_index)
@@ -4998,6 +5009,8 @@ class AppController(QObject):
             self.update_status_message("No image to adjust")
             return False
 
+        t_al_start = time.perf_counter()
+
         image_file = self.image_files[self.current_index]
         filepath = str(image_file.path)
 
@@ -5012,12 +5025,13 @@ class AppController(QObject):
             ):
                 self.update_status_message("Failed to load image")
                 return False
+        t_al_load = time.perf_counter()
 
-        # Calculate auto levels
         # Calculate auto levels - now returns (blacks, whites, p_low, p_high)
         blacks, whites, p_low, p_high = self.image_editor.auto_levels(
             self.auto_level_threshold
         )
+        t_al_calc = time.perf_counter()
 
         # Auto-strength computation using stretch-factor capping
         #
@@ -5117,6 +5131,15 @@ class AppController(QObject):
             strength,
             msg,
         )
+        t_al_end = time.perf_counter()
+        log.debug(
+            "[AUTO_LEVEL] load=%dms calc=%dms apply+ui=%dms total=%dms  %s",
+            int((t_al_load - t_al_start) * 1000),
+            int((t_al_calc - t_al_load) * 1000),
+            int((t_al_end - t_al_calc) * 1000),
+            int((t_al_end - t_al_start) * 1000),
+            filepath,
+        )
         # Store detail message for quick_auto_levels to pick up
         self._last_auto_levels_msg = msg
         return True
@@ -5178,7 +5201,7 @@ class AppController(QObject):
             t_total = time.perf_counter()
             total_ms = int((t_total - t_start) * 1000)
             log.debug(
-                "Auto levels: compute=%dms save=%dms list=%dms total=%dms",
+                "[AUTO_LEVEL] quick: compute=%dms save=%dms list=%dms total=%dms",
                 int((t_compute - t_start) * 1000),
                 int((t_save - t_compute) * 1000),
                 int((t_list - t_save) * 1000),
@@ -5278,7 +5301,7 @@ class AppController(QObject):
             t_total = time.perf_counter()
             total_ms = int((t_total - t_start) * 1000)
             log.debug(
-                "AWB: load=%dms compute=%dms save=%dms list=%dms total=%dms",
+                "[AUTO_COLOR] quick: load=%dms compute=%dms save=%dms list=%dms total=%dms",
                 int((t_load - t_start) * 1000),
                 int((t_compute - t_load) * 1000),
                 int((t_save - t_compute) * 1000),
@@ -5330,6 +5353,7 @@ class AppController(QObject):
             return None
 
         log.info("Applying legacy (RGB Grey World) Auto White Balance")
+        t_awb_start = time.perf_counter()
 
         img = self.image_editor.original_image
         arr = np.array(img, dtype=np.float32)
@@ -5369,6 +5393,11 @@ class AppController(QObject):
         by_dir = _awb_direction(by_value, "warming", "cooling")
         mg_dir = _awb_direction(mg_value, "magenta", "greener")
         msg = f"AWB (Legacy): B/Y {by_value:+.2f} ({by_dir}), M/G {mg_value:+.2f} ({mg_dir})"
+        t_awb_end = time.perf_counter()
+        log.debug(
+            "[AUTO_COLOR] legacy: total=%dms",
+            int((t_awb_end - t_awb_start) * 1000),
+        )
         self.update_status_message(msg)
         return msg
 
@@ -5392,6 +5421,8 @@ class AppController(QObject):
             self.update_status_message("Error: OpenCV not installed")
             return None
 
+        t_awb_start = time.perf_counter()
+
         # Subsample from float_image for speed.  float_image is the authoritative
         # display-referred sRGB float32 buffer (editor.py:504-505 does
         # np.array(rgb) / 255.0 from Pillow sRGB), same colour space as the
@@ -5413,6 +5444,8 @@ class AppController(QObject):
             if img.mode != "RGB":
                 img = img.convert("RGB")
             arr = np.array(img, dtype=np.uint8)
+
+        t_awb_subsample = time.perf_counter()
 
         # --- Tunable Constants for Auto White Balance (from config) ---
         _LOWER_BOUND_RGB = config.getint("awb", "rgb_lower_bound", 5)
@@ -5445,6 +5478,8 @@ class AppController(QObject):
             )
             self.update_status_message("AWB failed: no valid pixels found")
             return None
+
+        t_awb_mask = time.perf_counter()
 
         # --- 2. Work in Lab color space ---
         lab_image = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
@@ -5500,6 +5535,15 @@ class AppController(QObject):
             f"AWB: B/Y {by_value:+.2f} ({by_dir}), M/G {mg_value:+.2f} ({mg_dir})"
             f" \u2014 a*={a_mean:.0f}\u2192{_TARGET_A_LAB:.0f},"
             f" b*={b_mean:.0f}\u2192{_TARGET_B_LAB:.0f}"
+        )
+        t_awb_end = time.perf_counter()
+        log.debug(
+            "[AUTO_COLOR] subsample=%dms mask=%dms lab+calc=%dms total=%dms  (%dx%d)",
+            int((t_awb_subsample - t_awb_start) * 1000),
+            int((t_awb_mask - t_awb_subsample) * 1000),
+            int((t_awb_end - t_awb_mask) * 1000),
+            int((t_awb_end - t_awb_start) * 1000),
+            arr.shape[1], arr.shape[0],
         )
         self.update_status_message(msg)
         return msg
