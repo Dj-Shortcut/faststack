@@ -96,7 +96,7 @@ def create_backup_file(original_path: Path) -> Optional[Path]:
         shutil.copy2(original_path, backup_path)
         return backup_path
     except OSError as e:
-        log.exception(f"Failed to create backup: {e}")
+        log.exception("Failed to create backup: %s", e)
         return None
 
 
@@ -172,7 +172,7 @@ def _gaussian_blur_float(arr: np.ndarray, radius: float) -> np.ndarray:
             return np.stack(blurred_channels, axis=-1)
 
         except Exception as e:
-            log.warning(f"Fallback blur failed: {e}")
+            log.warning("Fallback blur failed: %s", e)
             return arr
 
     # Sigma calculation matching Pillow's radius-to-sigma
@@ -407,6 +407,59 @@ class ImageEditor:
             "straighten_angle": 0.0,
         }
 
+    @staticmethod
+    def _edits_skip_linear(edits: Dict[str, Any]) -> bool:
+        """True when no linear-space edits are active (WB, exposure, highlights,
+        shadows, clarity, texture, sharpness).  When True the sRGB→Linear→sRGB
+        round-trip in ``_apply_edits`` is a mathematical no-op and can be skipped."""
+
+        def _get_f(key: str) -> float:
+            try:
+                return float(edits.get(key, 0.0))
+            except (ValueError, TypeError):
+                return 1.0  # Safe default: treat as "active" to skip optimization
+
+        return (
+            abs(_get_f("white_balance_by")) <= 0.001
+            and abs(_get_f("white_balance_mg")) <= 0.001
+            and abs(_get_f("exposure")) <= 0.001
+            and abs(_get_f("highlights")) <= 0.001
+            and abs(_get_f("shadows")) <= 0.001
+            and abs(_get_f("clarity")) <= 0.001
+            and abs(_get_f("texture")) <= 0.001
+            and abs(_get_f("sharpness")) <= 0.001
+        )
+
+    @staticmethod
+    def _edits_can_share_input(edits: Dict[str, Any]) -> bool:
+        """True when ``_apply_edits(for_export=True)`` will not mutate the input
+        array, meaning the caller can pass ``self.float_image`` directly without
+        ``.copy()``.
+
+        Requirements (all must hold):
+        - No linear-space edits (``_edits_skip_linear``).
+        - No vignette (uses in-place ``arr *=``).
+        - No geometry ops — rotation, straighten, crop create views/slices; later
+          in-place ops on those views would mutate the backing array.
+
+        All remaining sRGB-space ops (brightness, contrast, saturation, vibrance,
+        levels) use reassignment (``arr = arr * factor``), which is safe.
+        """
+
+        def _get_f(key: str) -> float:
+            try:
+                return float(edits.get(key, 0.0))
+            except (ValueError, TypeError):
+                return 1.0  # Safe default: treat as "active" to skip optimization
+
+        return (
+            ImageEditor._edits_skip_linear(edits)
+            and abs(_get_f("vignette")) <= 0.001
+            and edits.get("rotation", 0) == 0
+            and abs(_get_f("straighten_angle")) <= 0.001
+            and not edits.get("crop_box")
+        )
+
     def load_image(
         self,
         filepath: str,
@@ -430,7 +483,7 @@ class ImageEditor:
                 self._edits_rev += 1
                 self._cached_preview = None
                 self._cached_rev = -1
-            log.error(f"Image file not found: {filepath}")
+            log.error("Image file not found: %s", filepath)
             return False
 
         load_filepath = Path(filepath)
@@ -476,6 +529,14 @@ class ImageEditor:
 
             loaded_bit_depth = 8
             loaded_float_image = None
+            float_image_orientation_applied = False
+
+            # Read EXIF orientation early (before float conversion) so we can
+            # apply it to the PIL image on the 8-bit path — rotating uint8 is
+            # ~5x faster than rotating float32.
+            orientation = get_exif_orientation(
+                load_filepath, exif=loaded_original.getexif()
+            )
 
             if cv_img_valid and cv_img.dtype == np.uint16:
                 loaded_bit_depth = 16
@@ -496,38 +557,56 @@ class ImageEditor:
                     # Invalid channel count, fall back to Pillow
                     cv_img_valid = False
                     loaded_bit_depth = 8
+                    # For fallback 8-bit from bad CV2, orient PIL first then convert
+                    if orientation > 1:
+                        loaded_original = ImageOps.exif_transpose(loaded_original)
                     rgb = loaded_original.convert("RGB")
                     arr = np.array(rgb).astype(np.float32) / 255.0
+                    float_image_orientation_applied = orientation > 1
                     log.warning(
-                        f"OpenCV loaded unexpected channel count, falling back to Pillow: {load_filepath}"
+                        "OpenCV loaded unexpected channel count, falling back to Pillow: %s",
+                        load_filepath
                     )
 
                 loaded_float_image = arr
-                log.info(f"Loaded 16-bit image via OpenCV: {load_filepath}")
+                if loaded_bit_depth == 16:
+                    log.info("Loaded 16-bit image via OpenCV: %s", load_filepath)
+                else:
+                    log.info("Loaded 8-bit image via Pillow (OpenCV fallback): %s", load_filepath)
             else:
                 # Fallback to Pillow logic for 8-bit or if OpenCV failed/returned 8-bit
                 loaded_bit_depth = 8
+                # Apply EXIF orientation on PIL image BEFORE float conversion.
+                # Rotating uint8 PIL is ~5x faster than rotating float32 numpy.
+                if orientation > 1:
+                    loaded_original = ImageOps.exif_transpose(loaded_original)
+                    float_image_orientation_applied = True
                 rgb = loaded_original.convert("RGB")
                 loaded_float_image = np.array(rgb).astype(np.float32) / 255.0
-                log.info(f"Loaded 8-bit image via Pillow: {load_filepath}")
+                log.info("Loaded 8-bit image via Pillow: %s", load_filepath)
             if _debug:
                 t_float = time.perf_counter()
 
             # --- Apply EXIF Orientation ---
-            # Read orientation from the loaded original image's EXIF
-            orientation = get_exif_orientation(
-                load_filepath, exif=loaded_original.getexif()
-            )
+            # For 16-bit CV2 path, orientation was not applied during float
+            # conversion, so apply it to the numpy array now.
+            # For 8-bit PIL path, float_image is already oriented.
             if orientation > 1:
-                log.info(f"Applying EXIF orientation {orientation} to {load_filepath}")
-                # 1. Correct the Pillow original (used for metadata/export fallback)
-                loaded_original = ImageOps.exif_transpose(loaded_original)
-
-                # 2. Correct the float master buffer
-                if loaded_float_image is not None:
-                    loaded_float_image = apply_orientation_to_np(
-                        loaded_float_image, orientation
+                if float_image_orientation_applied:
+                    log.debug(
+                        "EXIF orientation %d already applied during PIL load: %s",
+                        orientation, load_filepath,
                     )
+                else:
+                    log.info(
+                        "Applying EXIF orientation %d to float buffer (CV2 path): %s",
+                        orientation, load_filepath,
+                    )
+                    loaded_original = ImageOps.exif_transpose(loaded_original)
+                    if loaded_float_image is not None:
+                        loaded_float_image = apply_orientation_to_np(
+                            loaded_float_image, orientation
+                        )
             if _debug:
                 t_orient = time.perf_counter()
 
@@ -592,7 +671,7 @@ class ImageEditor:
             # We catch specific errors during the process if needed, but for general failure
             # we should cleanup and then RETURN FALSE so the caller (UI) knows what happened.
             # This matches the legacy contract (exceptions for programmer errors, False for runtime/IO failure)
-            log.warning(f"Error loading image for editing: {e}")
+            log.warning("Error loading image for editing: %s", e)
             with self._lock:
                 self.original_image = None
                 self.float_image = None
@@ -831,293 +910,308 @@ class ImageEditor:
         # original sRGB values to detect flat-top clipping correctly.
         # MOVED to after WB/Exposure so indicators reflect current pipeline state.
 
-        # Capture strided view for analysis ONLY if needed
-        # We need analysis if:
-        # 1. We are in preview (not for_export) -> To show UI indicators.
-        # 2. OR if we have highlights/shadows active -> To drive adaptive params.
+        # --- Skip linear round-trip optimization ---
+        # When exporting with only sRGB-space edits active (levels, brightness,
+        # contrast, saturation, vibrance, vignette), the sRGB→Linear→sRGB conversion
+        # is a no-op that costs ~3.5s on large images. Skip it entirely.
+        _skip_linear = for_export and self._edits_skip_linear(edits)
 
-        highlights = float(edits.get("highlights", 0.0))
-        shadows = float(edits.get("shadows", 0.0))
-        should_analyze = (not for_export) or (
-            abs(highlights) > 0.001 or abs(shadows) > 0.001
-        )
+        if for_export:
+            log.debug("_apply_edits for_export: skip_linear=%s", _skip_linear)
 
-        arr_stride = None
-        srgb_u8_stride = None
-        analysis_state = None
+        if not _skip_linear:
+            # Capture strided view for analysis ONLY if needed
+            # We need analysis if:
+            # 1. We are in preview (not for_export) -> To show UI indicators.
+            # 2. OR if we have highlights/shadows active -> To drive adaptive params.
 
-        if should_analyze:
-            # Capture strided view for analysis
-            arr_stride = arr[::4, ::4, :]
-            if cv2 is not None:
-                # cv2.convertScaleAbs is very fast for saturation casting [0,1]*255 to uint8
-                srgb_u8_stride = cv2.convertScaleAbs(arr_stride, alpha=255.0)
-            else:
-                srgb_u8_stride = (np.clip(arr_stride, 0.0, 1.0) * 255).astype(np.uint8)
+            highlights = float(edits.get("highlights", 0.0))
+            shadows = float(edits.get("shadows", 0.0))
+            should_analyze = (not for_export) or (
+                abs(highlights) > 0.001 or abs(shadows) > 0.001
+            )
 
-        arr = _srgb_to_linear(arr)
+            arr_stride = None
+            srgb_u8_stride = None
+            analysis_state = None
 
-        # 5. White Balance (Multipliers in Linear Space)
-        by = edits.get("white_balance_by", 0.0) * 0.5
-        mg = edits.get("white_balance_mg", 0.0) * 0.5
-        if abs(by) > 0.001 or abs(mg) > 0.001:
-            r_gain = 1.0 + by
-            b_gain = 1.0 - by
-            g_gain = 1.0 - mg
-            arr[:, :, 0] *= r_gain
-            arr[:, :, 1] *= g_gain
-            arr[:, :, 2] *= b_gain
+            if should_analyze:
+                # Capture strided view for analysis
+                arr_stride = arr[::4, ::4, :]
+                if cv2 is not None:
+                    # cv2.convertScaleAbs is very fast for saturation casting [0,1]*255 to uint8
+                    srgb_u8_stride = cv2.convertScaleAbs(arr_stride, alpha=255.0)
+                else:
+                    srgb_u8_stride = (np.clip(arr_stride, 0.0, 1.0) * 255).astype(np.uint8)
 
-        # --- Analyzed Highlight State (Post-WB, Pre-Exposure) ---
-        # Capture pre-exposure linear state for "True Headroom" calculation
-        pre_exposure_linear_stride = None
-        if should_analyze:
-            pre_exposure_linear_stride = arr[::4, ::4, :]
+            arr = _srgb_to_linear(arr)
 
-        # 6. Exposure (Linear Gain for True Headroom)
-        exposure = edits.get("exposure", 0.0)
-        if abs(exposure) > 0.001:
-            # EV units: 2^exposure
-            gain = 2.0**exposure
-            arr = arr * gain
+            # 5. White Balance (Multipliers in Linear Space)
+            by = edits.get("white_balance_by", 0.0) * 0.5
+            mg = edits.get("white_balance_mg", 0.0) * 0.5
+            if abs(by) > 0.001 or abs(mg) > 0.001:
+                r_gain = 1.0 + by
+                b_gain = 1.0 - by
+                g_gain = 1.0 - mg
+                arr[:, :, 0] *= r_gain
+                arr[:, :, 1] *= g_gain
+                arr[:, :, 2] *= b_gain
 
-        # --- Analyzed Highlight State (Post-Exposure, Pre-Recovery) ---
-        # We do this UNCONDITIONALLY for display so UI indicators are live.
-        # We use the current linear array 'arr' which now includes WB and Exposure.
-        # We pass srgb_u8=None to force using linear thresholds on the current data (or pre-exposure data if passed).
+            # --- Analyzed Highlight State (Post-WB, Pre-Exposure) ---
+            # Capture pre-exposure linear state for "True Headroom" calculation
+            pre_exposure_linear_stride = None
+            if should_analyze:
+                pre_exposure_linear_stride = arr[::4, ::4, :]
 
-        if should_analyze:
-            # Check cache for analysis state to avoid expensive re-computation on downstream edits
-            upstream_hash = self._get_upstream_edits_hash(edits)
+            # 6. Exposure (Linear Gain for True Headroom)
+            exposure = edits.get("exposure", 0.0)
+            if abs(exposure) > 0.001:
+                # EV units: 2^exposure
+                gain = 2.0**exposure
+                arr = arr * gain
 
-            cached_analysis = None
-            with self._lock:
-                if (
-                    self._cached_highlight_analysis
-                    and self._cached_highlight_analysis["hash"] == upstream_hash
-                ):
-                    cached_analysis = self._cached_highlight_analysis["state"]
+            # --- Analyzed Highlight State (Post-Exposure, Pre-Recovery) ---
+            # We do this UNCONDITIONALLY for display so UI indicators are live.
+            # We use the current linear array 'arr' which now includes WB and Exposure.
+            # We pass srgb_u8=None to force using linear thresholds on the current data (or pre-exposure data if passed).
 
-            if cached_analysis:
-                analysis_state = cached_analysis
-            else:
-                # Use strided views for speed (re-stride linear if it changed, but usually we just want current)
-                arr_linear_stride = arr[::4, ::4, :]
-                # Pass the srgb_u8_stride captured BEFORE linearization for true JPEG clipping detection
-                # Pass pre_exposure_linear_stride to measure "True Headroom" before exposure boost
-                # arr_linear_stride is "Current State" (Post-WB, Post-Exposure)
-                analysis_state = _analyze_highlight_state(
-                    arr_linear_stride,
-                    srgb_u8=srgb_u8_stride,  # Source (Pre-Edit) State
-                    pre_exposure_linear=pre_exposure_linear_stride,
+            if should_analyze:
+                # Check cache for analysis state to avoid expensive re-computation on downstream edits
+                upstream_hash = self._get_upstream_edits_hash(edits)
+
+                cached_analysis = None
+                with self._lock:
+                    if (
+                        self._cached_highlight_analysis
+                        and self._cached_highlight_analysis["hash"] == upstream_hash
+                    ):
+                        cached_analysis = self._cached_highlight_analysis["state"]
+
+                if cached_analysis:
+                    analysis_state = cached_analysis
+                else:
+                    # Use strided views for speed (re-stride linear if it changed, but usually we just want current)
+                    arr_linear_stride = arr[::4, ::4, :]
+                    # Pass the srgb_u8_stride captured BEFORE linearization for true JPEG clipping detection
+                    # Pass pre_exposure_linear_stride to measure "True Headroom" before exposure boost
+                    # arr_linear_stride is "Current State" (Post-WB, Post-Exposure)
+                    analysis_state = _analyze_highlight_state(
+                        arr_linear_stride,
+                        srgb_u8=srgb_u8_stride,  # Source (Pre-Edit) State
+                        pre_exposure_linear=pre_exposure_linear_stride,
+                    )
+
+                    with self._lock:
+                        self._cached_highlight_analysis = {
+                            "hash": upstream_hash,
+                            "state": analysis_state,
+                        }
+
+            if not for_export:
+                with self._lock:
+                    self._last_highlight_state = analysis_state
+
+            # 7. Highlights/Shadows - Using linear light and brightness-based processing
+            if abs(highlights) > 0.001 or abs(shadows) > 0.001:
+                arr = self._apply_highlights_shadows(
+                    arr,
+                    highlights,
+                    shadows,
+                    srgb_u8_stride=srgb_u8_stride,  # Pass if we need to recompute analysis
+                    analysis_state=analysis_state,
+                    edits=edits,
                 )
 
+            # 8-10. Clarity / Texture / Sharpness (Unified Pyramid Detail Bands)
+            #
+            # Uses a hierarchical luma-only pyramid decomposition to avoid:
+            # - Triple-amplifying the same edges (halo stacking)
+            # - Chroma artifacts from RGB high-pass
+            # - Incorrect midtone mask on HDR/linear values >1.0
+            #
+            # Bands:
+            #   D_clarity = Y - Y20    (coarse local contrast)
+            #   D_texture = Y3 - Y20   (mid-frequency detail)
+            #   D_sharp   = Y1 - Y3    (fine detail)
+            #
+            clarity = edits.get("clarity", 0.0)
+            texture = edits.get("texture", 0.0)
+            sharpness = edits.get("sharpness", 0.0)
+
+            if abs(clarity) > 0.001 or abs(texture) > 0.001 or abs(sharpness) > 0.001:
+                # Ensure float32 to avoid memory bloat from float64 upcast
+                arr = arr.astype(np.float32, copy=False)
+
+                # Current exposure gain (for scaling cached blurs)
+                current_exp_gain = 2.0 ** edits.get("exposure", 0.0)
+
+                # Compute linear luminance (Rec.709 coefficients)
+                Y = arr @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+                # Determine which blurs we need based on active sliders
+                need_Y20 = abs(clarity) > 0.001 or abs(texture) > 0.001
+                need_Y3 = abs(texture) > 0.001 or abs(sharpness) > 0.001
+                need_Y1 = abs(sharpness) > 0.001
+
+                # Check cache for detail bands (hash + frozen tuple verification)
+                detail_hash, detail_frozen = self._get_detail_upstream_hash(edits)
+                Y20_cached = Y3_cached = Y1_cached = None
+                cache_hit = False
+                cached_exp_gain = 1.0
+
                 with self._lock:
-                    self._cached_highlight_analysis = {
-                        "hash": upstream_hash,
-                        "state": analysis_state,
-                    }
+                    cached = self._cached_detail_bands
+                    # Verify both hash AND frozen values to avoid collisions
+                    if (
+                        cached
+                        and cached.get("hash") == detail_hash
+                        and cached.get("frozen") == detail_frozen
+                    ):
+                        Y20_cached = cached.get("Y20")
+                        Y3_cached = cached.get("Y3")
+                        Y1_cached = cached.get("Y1")
+                        cached_exp_gain = cached.get("exp_gain", 1.0)
+                        cache_hit = True
 
-        if not for_export:
-            with self._lock:
-                self._last_highlight_state = analysis_state
+                        # Validate cached array shapes match current Y dimensions
+                        # This prevents reusing preview-resolution blurs during export
+                        y_shape = Y.shape
+                        for cached_arr in (Y20_cached, Y3_cached, Y1_cached):
+                            if cached_arr is not None and cached_arr.shape != y_shape:
+                                # Shape mismatch - invalidate cache
+                                Y20_cached = Y3_cached = Y1_cached = None
+                                cache_hit = False
+                                break
 
-        # 7. Highlights/Shadows - Using linear light and brightness-based processing
-        if abs(highlights) > 0.001 or abs(shadows) > 0.001:
-            arr = self._apply_highlights_shadows(
-                arr,
-                highlights,
-                shadows,
-                srgb_u8_stride=srgb_u8_stride,  # Pass if we need to recompute analysis
-                analysis_state=analysis_state,
-                edits=edits,
-            )
+                # Compute exposure scale factor for reusing cached blurs
+                # blur(k*Y) = k*blur(Y) is exact only if Y scales linearly with exposure.
+                # Since highlights/shadows recovery (step 7) is non-linear and sits between
+                # exposure and detail bands, this scaling is APPROXIMATE when h/s is active.
+                # The approximation is good enough for smooth 60fps dragging; exact render
+                # happens when upstream params (WB/crop/rotate) change and cache invalidates.
+                exp_scale = (
+                    current_exp_gain / cached_exp_gain
+                    if cache_hit and abs(cached_exp_gain) > 1e-9
+                    else 1.0
+                )
 
-        # 8-10. Clarity / Texture / Sharpness (Unified Pyramid Detail Bands)
-        #
-        # Uses a hierarchical luma-only pyramid decomposition to avoid:
-        # - Triple-amplifying the same edges (halo stacking)
-        # - Chroma artifacts from RGB high-pass
-        # - Incorrect midtone mask on HDR/linear values >1.0
-        #
-        # Bands:
-        #   D_clarity = Y - Y20    (coarse local contrast)
-        #   D_texture = Y3 - Y20   (mid-frequency detail)
-        #   D_sharp   = Y1 - Y3    (fine detail)
-        #
-        clarity = edits.get("clarity", 0.0)
-        texture = edits.get("texture", 0.0)
-        sharpness = edits.get("sharpness", 0.0)
+                # Safe extraction: use [..., 0] if 3D, else keep as-is (avoids squeeze() collapsing H/W)
+                def _extract_2d(blur_result):
+                    return blur_result[..., 0] if blur_result.ndim == 3 else blur_result
 
-        if abs(clarity) > 0.001 or abs(texture) > 0.001 or abs(sharpness) > 0.001:
-            # Ensure float32 to avoid memory bloat from float64 upcast
-            arr = arr.astype(np.float32, copy=False)
+                # Get or compute each blur, tracking what we freshly computed
+                Y_3d = Y[..., None]  # (H, W, 1) for blur function
+                Y20 = Y3 = Y1 = None
+                newly_computed = {"Y20": None, "Y3": None, "Y1": None}
 
-            # Current exposure gain (for scaling cached blurs)
-            current_exp_gain = 2.0 ** edits.get("exposure", 0.0)
-
-            # Compute linear luminance (Rec.709 coefficients)
-            Y = arr @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-
-            # Determine which blurs we need based on active sliders
-            need_Y20 = abs(clarity) > 0.001 or abs(texture) > 0.001
-            need_Y3 = abs(texture) > 0.001 or abs(sharpness) > 0.001
-            need_Y1 = abs(sharpness) > 0.001
-
-            # Check cache for detail bands (hash + frozen tuple verification)
-            detail_hash, detail_frozen = self._get_detail_upstream_hash(edits)
-            Y20_cached = Y3_cached = Y1_cached = None
-            cache_hit = False
-            cached_exp_gain = 1.0
-
-            with self._lock:
-                cached = self._cached_detail_bands
-                # Verify both hash AND frozen values to avoid collisions
-                if (
-                    cached
-                    and cached.get("hash") == detail_hash
-                    and cached.get("frozen") == detail_frozen
-                ):
-                    Y20_cached = cached.get("Y20")
-                    Y3_cached = cached.get("Y3")
-                    Y1_cached = cached.get("Y1")
-                    cached_exp_gain = cached.get("exp_gain", 1.0)
-                    cache_hit = True
-
-                    # Validate cached array shapes match current Y dimensions
-                    # This prevents reusing preview-resolution blurs during export
-                    y_shape = Y.shape
-                    for cached_arr in (Y20_cached, Y3_cached, Y1_cached):
-                        if cached_arr is not None and cached_arr.shape != y_shape:
-                            # Shape mismatch - invalidate cache
-                            Y20_cached = Y3_cached = Y1_cached = None
-                            cache_hit = False
-                            break
-
-            # Compute exposure scale factor for reusing cached blurs
-            # blur(k*Y) = k*blur(Y) is exact only if Y scales linearly with exposure.
-            # Since highlights/shadows recovery (step 7) is non-linear and sits between
-            # exposure and detail bands, this scaling is APPROXIMATE when h/s is active.
-            # The approximation is good enough for smooth 60fps dragging; exact render
-            # happens when upstream params (WB/crop/rotate) change and cache invalidates.
-            exp_scale = (
-                current_exp_gain / cached_exp_gain
-                if cache_hit and abs(cached_exp_gain) > 1e-9
-                else 1.0
-            )
-
-            # Safe extraction: use [..., 0] if 3D, else keep as-is (avoids squeeze() collapsing H/W)
-            def _extract_2d(blur_result):
-                return blur_result[..., 0] if blur_result.ndim == 3 else blur_result
-
-            # Get or compute each blur, tracking what we freshly computed
-            Y_3d = Y[..., None]  # (H, W, 1) for blur function
-            Y20 = Y3 = Y1 = None
-            newly_computed = {"Y20": None, "Y3": None, "Y1": None}
-
-            if need_Y20:
-                if Y20_cached is not None:
-                    Y20 = Y20_cached * exp_scale
-                else:
-                    Y20 = _extract_2d(_gaussian_blur_float(Y_3d, radius=20.0))
-                    newly_computed["Y20"] = Y20
-
-            if need_Y3:
-                if Y3_cached is not None:
-                    Y3 = Y3_cached * exp_scale
-                else:
-                    Y3 = _extract_2d(_gaussian_blur_float(Y_3d, radius=3.0))
-                    newly_computed["Y3"] = Y3
-
-            if need_Y1:
-                if Y1_cached is not None:
-                    Y1 = Y1_cached * exp_scale
-                else:
-                    Y1 = _extract_2d(_gaussian_blur_float(Y_3d, radius=1.0))
-                    newly_computed["Y1"] = Y1
-
-            # Update cache if we computed any new blurs
-            # Merge newly computed blurs with existing cached blurs (unscaled)
-            if any(v is not None for v in newly_computed.values()):
-                with self._lock:
-                    # Start with existing cached values (unscaled) or empty
-                    if cache_hit:
-                        new_cache = {
-                            "hash": detail_hash,
-                            "frozen": detail_frozen,
-                            "exp_gain": cached_exp_gain,  # Keep original exp_gain for existing blurs
-                            "Y20": Y20_cached,
-                            "Y3": Y3_cached,
-                            "Y1": Y1_cached,
-                        }
-                        # Add newly computed blurs (they're at current_exp_gain, need to rescale to cached_exp_gain)
-                        rescale_to_cached = (
-                            cached_exp_gain / current_exp_gain
-                            if abs(current_exp_gain) > 1e-9
-                            else 1.0
-                        )
-                        for key, val in newly_computed.items():
-                            if val is not None:
-                                new_cache[key] = val * rescale_to_cached
+                if need_Y20:
+                    if Y20_cached is not None:
+                        Y20 = Y20_cached * exp_scale
                     else:
-                        # Fresh cache at current exposure
-                        new_cache = {
-                            "hash": detail_hash,
-                            "frozen": detail_frozen,
-                            "exp_gain": current_exp_gain,
-                            "Y20": newly_computed["Y20"],
-                            "Y3": newly_computed["Y3"],
-                            "Y1": newly_computed["Y1"],
-                        }
-                    self._cached_detail_bands = new_cache
+                        Y20 = _extract_2d(_gaussian_blur_float(Y_3d, radius=20.0))
+                        newly_computed["Y20"] = Y20
 
-            # Build hierarchical pyramid bands (non-overlapping frequency ranges)
-            detail = np.zeros_like(Y)
+                if need_Y3:
+                    if Y3_cached is not None:
+                        Y3 = Y3_cached * exp_scale
+                    else:
+                        Y3 = _extract_2d(_gaussian_blur_float(Y_3d, radius=3.0))
+                        newly_computed["Y3"] = Y3
 
-            if abs(clarity) > 0.001:
-                # D_clarity = Y - Y20 (coarse local contrast)
-                D_clarity = Y - Y20
-                detail += clarity * D_clarity
+                if need_Y1:
+                    if Y1_cached is not None:
+                        Y1 = Y1_cached * exp_scale
+                    else:
+                        Y1 = _extract_2d(_gaussian_blur_float(Y_3d, radius=1.0))
+                        newly_computed["Y1"] = Y1
 
-            if abs(texture) > 0.001:
-                # D_texture = Y3 - Y20 (mid-frequency detail)
-                # Y3 has more high-frequency than Y20, so this isolates mid-band
-                D_texture = Y3 - Y20
-                detail += texture * D_texture
+                # Update cache if we computed any new blurs
+                # Merge newly computed blurs with existing cached blurs (unscaled)
+                if any(v is not None for v in newly_computed.values()):
+                    with self._lock:
+                        # Start with existing cached values (unscaled) or empty
+                        if cache_hit:
+                            new_cache = {
+                                "hash": detail_hash,
+                                "frozen": detail_frozen,
+                                "exp_gain": cached_exp_gain,  # Keep original exp_gain for existing blurs
+                                "Y20": Y20_cached,
+                                "Y3": Y3_cached,
+                                "Y1": Y1_cached,
+                            }
+                            # Add newly computed blurs (they're at current_exp_gain, need to rescale to cached_exp_gain)
+                            rescale_to_cached = (
+                                cached_exp_gain / current_exp_gain
+                                if abs(current_exp_gain) > 1e-9
+                                else 1.0
+                            )
+                            for key, val in newly_computed.items():
+                                if val is not None:
+                                    new_cache[key] = val * rescale_to_cached
+                        else:
+                            # Fresh cache at current exposure
+                            new_cache = {
+                                "hash": detail_hash,
+                                "frozen": detail_frozen,
+                                "exp_gain": current_exp_gain,
+                                "Y20": newly_computed["Y20"],
+                                "Y3": newly_computed["Y3"],
+                                "Y1": newly_computed["Y1"],
+                            }
+                        self._cached_detail_bands = new_cache
 
-            if abs(sharpness) > 0.001:
-                # D_sharp = Y1 - Y3 (fine detail)
-                # Scale factor to match perceived strength of old Y - Y1 unsharp mask
-                k_sharp = 2.0
-                D_sharp = Y1 - Y3
-                detail += sharpness * k_sharp * D_sharp
+                # Build hierarchical pyramid bands (non-overlapping frequency ranges)
+                detail = np.zeros_like(Y)
 
-            # Compute bounded midtone mask from perceptual luminance
-            # Use sqrt for perceptual curve (approximates gamma)
-            Y_mask = np.clip(Y, 0.0, 1.0)
-            Y_mask = np.sqrt(Y_mask)
-            midtone_mask = np.clip(1.0 - np.abs(Y_mask - 0.5) * 2.0, 0.0, 1.0)
+                if abs(clarity) > 0.001:
+                    # D_clarity = Y - Y20 (coarse local contrast)
+                    D_clarity = Y - Y20
+                    detail += clarity * D_clarity
 
-            # Apply detail via luma-ratio gain (preserves hue/saturation)
-            # Only apply ratio where Y > eps; leave gain at 1.0 for dark/negative regions
-            eps = 1e-7
-            valid_mask = Y > eps
-            den = np.where(valid_mask, Y, 1.0)
-            gain = 1.0 + midtone_mask * detail / den
-            gain = np.where(valid_mask, gain, 1.0)
-            # Soft clamp to prevent extreme values (hard clamp for v1, can soften later)
-            gain = np.clip(gain, 0.5, 2.0)
-            arr *= gain[..., None]
+                if abs(texture) > 0.001:
+                    # D_texture = Y3 - Y20 (mid-frequency detail)
+                    # Y3 has more high-frequency than Y20, so this isolates mid-band
+                    D_texture = Y3 - Y20
+                    detail += texture * D_texture
 
-        # 11. Global Headroom Shoulder (safety net for values > 1.0)
-        # This ONLY affects values above 1.0, compressing headroom smoothly.
-        # It does NOT interfere with normal highlight slider work below 1.0.
-        # Applied here in linear space before gamma conversion.
-        # Use small max_overshoot (0.05) to keep values very close to 1.0
-        arr = _apply_headroom_shoulder(arr, max_overshoot=0.05)
+                if abs(sharpness) > 0.001:
+                    # D_sharp = Y1 - Y3 (fine detail)
+                    # Scale factor to match perceived strength of old Y - Y1 unsharp mask
+                    k_sharp = 2.0
+                    D_sharp = Y1 - Y3
+                    detail += sharpness * k_sharp * D_sharp
 
-        # --- Conversion back to sRGB ---
-        arr = _linear_to_srgb(arr)
+                # Compute bounded midtone mask from perceptual luminance
+                # Use sqrt for perceptual curve (approximates gamma)
+                Y_mask = np.clip(Y, 0.0, 1.0)
+                Y_mask = np.sqrt(Y_mask)
+                midtone_mask = np.clip(1.0 - np.abs(Y_mask - 0.5) * 2.0, 0.0, 1.0)
+
+                # Apply detail via luma-ratio gain (preserves hue/saturation)
+                # Only apply ratio where Y > eps; leave gain at 1.0 for dark/negative regions
+                eps = 1e-7
+                valid_mask = Y > eps
+                den = np.where(valid_mask, Y, 1.0)
+                gain = 1.0 + midtone_mask * detail / den
+                gain = np.where(valid_mask, gain, 1.0)
+                # Soft clamp to prevent extreme values (hard clamp for v1, can soften later)
+                gain = np.clip(gain, 0.5, 2.0)
+                arr *= gain[..., None]
+
+            # 11. Global Headroom Shoulder (safety net for values > 1.0)
+            # This ONLY affects values above 1.0, compressing headroom smoothly.
+            # It does NOT interfere with normal highlight slider work below 1.0.
+            # Applied here in linear space before gamma conversion.
+            # Use small max_overshoot (0.05) to keep values very close to 1.0
+            arr = _apply_headroom_shoulder(arr, max_overshoot=0.05)
+
+            # --- Conversion back to sRGB ---
+            arr = _linear_to_srgb(arr)
+
+        # --- sRGB Space Operations ---
+        # NOTE: All operations below must be non-mutating (use reassignment) when
+        # _skip_linear=True and for_export=True to avoid corrupting self.float_image.
+        # Vignette is excluded from the no-copy path because it uses in-place math.
 
         # 11. Brightness / Contrast (sRGB Space)
         # 7. Brightness
@@ -1186,7 +1280,13 @@ class ImageEditor:
                 gain = 1.0 + dist_sq * (-vignette)
                 arr *= np.expand_dims(gain, axis=2)
 
-        return arr  # Potentially > 1.0 if not clipped elsewhere
+        # Export contract: return in [0,1] sRGB when skip_linear (no tone mapping
+        # was applied, just sRGB-space ops). save_image also clips, but this
+        # ensures callers always get valid data.
+        if _skip_linear:
+            arr = np.clip(arr, 0.0, 1.0)
+
+        return arr  # May exceed 1.0 in preview/non-export; clipped for skip_linear export.
 
     def auto_levels(
         self, threshold_percent: float = 0.1
@@ -1461,14 +1561,15 @@ class ImageEditor:
 
                     if abs(val_deg - rounded_deg) > 1.0:
                         log.warning(
-                            f"'rotation' received {value}. Rounding to {final_val}. Use 'straighten_angle' for free rotation."
+                            "'rotation' received %s. Rounding to %d. Use 'straighten_angle' for free rotation.",
+                            value, final_val
                         )
 
                     self.current_edits[key] = final_val
                     self._edits_rev += 1
                     return True
                 except (ValueError, TypeError) as e:
-                    log.warning(f"Invalid value for rotation {value!r}: {e}")
+                    log.warning("Invalid value for rotation %r: %s", value, e)
                     return False
 
             if key in self.current_edits and key != "crop_box":
@@ -1769,11 +1870,12 @@ class ImageEditor:
                 return exif.tobytes()
             except Exception as e:
                 log.warning(
-                    f"Failed to serialize sanitized EXIF: {e}. Dropping EXIF to prevent rotation issues."
+                    "Failed to serialize sanitized EXIF: %s. Dropping EXIF to prevent rotation issues.",
+                    e
                 )
                 return None
         except Exception as e:
-            log.warning(f"Failed to sanitize EXIF orientation: {e}. Dropping EXIF.")
+            log.warning("Failed to sanitize EXIF orientation: %s. Dropping EXIF.", e)
             return None
 
     def save_image(
@@ -1798,8 +1900,13 @@ class ImageEditor:
             t0 = time.perf_counter()
 
         # 1. Apply Edits to Full Resolution
+        # Skip the expensive .copy() when safe — see _edits_can_share_input().
+        _safe_no_copy = self._edits_can_share_input(self.current_edits)
+        source_arr = self.float_image if _safe_no_copy else self.float_image.copy()
+        if _safe_no_copy:
+            log.debug("save_image: skipping float_image.copy() (safe no-copy path)")
         final_float = self._apply_edits(
-            self.float_image.copy(), for_export=True
+            source_arr, for_export=True
         )  # (H,W,3) float32
         if _debug:
             t_edits = time.perf_counter()
@@ -1808,7 +1915,7 @@ class ImageEditor:
         try:
             original_stat = original_path.stat()
         except OSError as e:
-            log.warning(f"Unable to read timestamps for {original_path}: {e}")
+            log.warning("Unable to read timestamps for %s: %s", original_path, e)
             original_stat = None
 
         # 2. Backup
@@ -1922,15 +2029,15 @@ class ImageEditor:
             return original_path, backup_path
 
         except Exception as e:
-            log.exception(f"Failed to save {self.current_filepath}: {e}")
-            raise RuntimeError(f"Save failed: {str(e)}") from e
+            log.exception("Failed to save %s: %s", self.current_filepath, e)
+            raise RuntimeError("Save failed: %s" % str(e)) from e
 
     def _restore_file_times(self, path: Path, original_stat: os.stat_result) -> None:
         """Best-effort restoration of access/modify timestamps after saving."""
         try:
             os.utime(path, (original_stat.st_atime, original_stat.st_mtime))
         except OSError as e:
-            log.warning(f"Unable to restore timestamps for {path}: {e}")
+            log.warning("Unable to restore timestamps for %s: %s", path, e)
 
     def rotate_image_cw(self):
         """Decreases the rotation edit parameter by 90° modulo 360 (clockwise)."""
