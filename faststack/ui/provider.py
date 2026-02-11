@@ -229,6 +229,8 @@ class UIState(QObject):
     editSourceModeChanged = Signal(str)  # Notify when JPEG/RAW mode changes
     saveBehaviorMessageChanged = Signal()  # Signal for save behavior message updates
     isSavingChanged = Signal(bool)  # Signal for save operation in progress
+    batchAutoLevelsProgressChanged = Signal()
+    batchAutoLevelsActiveChanged = Signal()
 
     def __init__(self, app_controller):
         super().__init__()
@@ -280,6 +282,9 @@ class UIState(QObject):
         self._is_decoding = False
         self._is_dialog_open = False
         self._is_saving = False  # Save operation in progress
+        self._batch_al_current = 0
+        self._batch_al_total = 0
+        self._batch_al_active = False
 
         # Connect to controller's dialog state signal
         self.app_controller.dialogStateChanged.connect(self._on_dialog_state_changed)
@@ -296,6 +301,31 @@ class UIState(QObject):
             self.app_controller.editSourceModeChanged.connect(
                 lambda _: self.metadataChanged.emit()
             )  # Also update metadata binding if needed
+
+        # Connect batch auto levels progress signals
+        if hasattr(self.app_controller, "batchAutoLevelsProgress"):
+            self.app_controller.batchAutoLevelsProgress.connect(
+                self._on_batch_al_progress
+            )
+        if hasattr(self.app_controller, "batchAutoLevelsFinished"):
+            self.app_controller.batchAutoLevelsFinished.connect(
+                self._on_batch_al_finished
+            )
+
+    def _on_batch_al_progress(self, current: int, total: int):
+        self._batch_al_current = current
+        self._batch_al_total = total
+        if not self._batch_al_active:
+            self._batch_al_active = True
+            self.batchAutoLevelsActiveChanged.emit()
+        self.batchAutoLevelsProgressChanged.emit()
+
+    def _on_batch_al_finished(self, processed: int, total: int):
+        self._batch_al_active = False
+        self._batch_al_current = 0
+        self._batch_al_total = 0
+        self.batchAutoLevelsActiveChanged.emit()
+        self.batchAutoLevelsProgressChanged.emit()
 
     def _on_dialog_state_changed(self, is_open: bool):
         self.isDialogOpen = is_open
@@ -414,6 +444,12 @@ class UIState(QObject):
         if not self.app_controller.image_files:
             return ""
         return self.app_controller.get_current_metadata().get("edited_date", "")
+
+    @Property(bool, notify=metadataChanged)
+    def isFavorite(self):
+        if not self.app_controller.image_files:
+            return False
+        return self.app_controller.get_current_metadata().get("favorite", False)
 
     @Property(bool, notify=metadataChanged)
     def isRestacked(self):
@@ -628,6 +664,10 @@ class UIState(QObject):
     def clear_all_batches(self):
         self.app_controller.clear_all_batches()
 
+    @Slot()
+    def addFavoritesToBatch(self):
+        self.app_controller.add_favorites_to_batch()
+
     @Slot(result=str)
     def get_helicon_path(self):
         return self.app_controller.get_helicon_path()
@@ -814,6 +854,28 @@ class UIState(QObject):
         if self._is_saving != new_value:
             self._is_saving = new_value
             self.isSavingChanged.emit(new_value)
+
+    # --- Batch Auto Levels ---
+
+    @Property(bool, notify=batchAutoLevelsActiveChanged)
+    def batchAutoLevelsActive(self) -> bool:
+        return self._batch_al_active
+
+    @Property(int, notify=batchAutoLevelsProgressChanged)
+    def batchAutoLevelsCurrent(self) -> int:
+        return self._batch_al_current
+
+    @Property(int, notify=batchAutoLevelsProgressChanged)
+    def batchAutoLevelsTotal(self) -> int:
+        return self._batch_al_total
+
+    @Slot()
+    def batchAutoLevels(self):
+        self.app_controller.batch_auto_levels()
+
+    @Slot()
+    def cancelBatchAutoLevels(self):
+        self.app_controller.cancel_batch_auto_levels()
 
     @Property(bool, notify=anySliderPressedChanged)
     def anySliderPressed(self):

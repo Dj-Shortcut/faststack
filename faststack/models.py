@@ -69,6 +69,7 @@ class EntryMetadata:
     edited_date: Optional[str] = None
     restacked: bool = False
     restacked_date: Optional[str] = None
+    favorite: bool = False
 
 
 @dataclasses.dataclass

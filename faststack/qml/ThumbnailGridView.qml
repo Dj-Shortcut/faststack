@@ -53,6 +53,7 @@ Item {
             tileIsUploaded: isUploaded || false
             tileIsEdited: isEdited || false
             tileIsRestacked: isRestacked || false
+            tileIsFavorite: isFavorite || false
             tileIsInBatch: isInBatch || false
             tileIsCurrent: isCurrent || false
             tileThumbnailSource: thumbnailSource || ""

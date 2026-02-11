@@ -1701,6 +1701,24 @@ class AppController(QObject):
         self.update_status_message(f"Marked as {status}")
         log.info("Toggled restacked flag to %s for %s", meta.restacked, stem)
 
+    def toggle_favorite(self):
+        """Toggle favorite flag for current image."""
+        if not self.image_files or self.current_index >= len(self.image_files):
+            return
+
+        stem = self.image_files[self.current_index].path.stem
+        meta = self.sidecar.get_metadata(stem)
+
+        meta.favorite = not meta.favorite
+
+        self.sidecar.save()
+        self._metadata_cache_index = (-1, -1)
+        self.dataChanged.emit()
+        self.sync_ui_state()
+        status = "Favorited" if meta.favorite else "Unfavorited"
+        self.update_status_message(status)
+        log.info("Toggled favorite flag to %s for %s", meta.favorite, stem)
+
     def toggle_stacked(self):
         """Toggle stacked flag for current image."""
         if not self.image_files or self.current_index >= len(self.image_files):
@@ -1757,6 +1775,7 @@ class AppController(QObject):
             "edited_date": meta.edited_date or "",
             "restacked": meta.restacked,
             "restacked_date": meta.restacked_date or "",
+            "favorite": meta.favorite,
             "stack_info_text": stack_info,
             "batch_info_text": batch_info,
         }
@@ -1889,6 +1908,61 @@ class AppController(QObject):
             log.info("Added %d image(s) to batch from grid selection", added_count)
         else:
             self.update_status_message("All selected images already in batch.")
+
+    def add_favorites_to_batch(self):
+        """Add all favorite-flagged images in the current directory to the batch."""
+        if not self.image_files:
+            self.update_status_message("No images loaded.")
+            return
+
+        # Find indices of all favorited images
+        indices_to_add = []
+        for i, img in enumerate(self.image_files):
+            meta = self.sidecar.get_metadata(img.path.stem)
+            if meta.favorite:
+                indices_to_add.append(i)
+
+        if not indices_to_add:
+            self.update_status_message("No favorites found.")
+            return
+
+        # Add each to batch (skip if already in a batch)
+        added_count = 0
+        for idx in indices_to_add:
+            in_batch = any(start <= idx <= end for start, end in self.batches)
+            if not in_batch:
+                self.batches.append([idx, idx])
+                added_count += 1
+
+        if added_count > 0:
+            # Sort and merge overlapping/adjacent batches
+            self.batches.sort()
+            merged_batches = [self.batches[0]] if self.batches else []
+            for i in range(1, len(self.batches)):
+                last_start, last_end = merged_batches[-1]
+                current_start, current_end = self.batches[i]
+                if current_start <= last_end + 1:
+                    merged_batches[-1] = [last_start, max(last_end, current_end)]
+                else:
+                    merged_batches.append([current_start, current_end])
+            self.batches = merged_batches
+
+            self._invalidate_batch_cache()
+            self._metadata_cache_index = (-1, -1)
+            self.dataChanged.emit()
+            self.sync_ui_state()
+
+            if hasattr(self, "_thumbnail_model") and self._thumbnail_model:
+                self._thumbnail_model.refresh()
+
+            self.update_status_message(
+                f"Added {added_count} favorite(s) to batch ({len(indices_to_add)} total favorites)"
+            )
+            log.info("Added %d favorite(s) to batch", added_count)
+        else:
+            self.update_status_message(
+                f"All {len(indices_to_add)} favorite(s) already in batch."
+            )
 
     def remove_from_batch_or_stack(self):
         """Remove current image from any batch or stack it's in."""
@@ -5240,6 +5314,143 @@ class AppController(QObject):
             )
         else:
             self.update_status_message("Failed to save image")
+
+    def _apply_auto_levels_at_index(self, index: int) -> bool:
+        """Apply auto levels and save for image at the given index.
+
+        Returns True if the image was processed and saved, False if skipped/failed.
+        Does NOT update UI state or prefetcher — caller is responsible for that.
+        """
+        if index < 0 or index >= len(self.image_files):
+            return False
+
+        image_file = self.image_files[index]
+        filepath = str(image_file.path)
+
+        # Load image into editor
+        if (
+            not self.image_editor.current_filepath
+            or str(self.image_editor.current_filepath) != filepath
+        ):
+            cached_preview = self.get_decoded_image(index)
+            self.image_editor.load_image(
+                filepath, cached_preview=cached_preview, preview_only=True
+            )
+
+        # Save current_index, temporarily set to target index for auto_levels()
+        saved_index = self.current_index
+        self.current_index = index
+
+        try:
+            self._last_auto_levels_msg = ""
+            applied = self.auto_levels()
+
+            if self.auto_level_strength_auto and not applied:
+                return False
+
+            try:
+                save_result = self.image_editor.save_image_uint8_levels()
+                if save_result is None:
+                    save_result = self.image_editor.save_image()
+            except Exception as e:
+                log.warning("batch auto levels: save failed for %s: %s", filepath, e)
+                return False
+
+            if save_result:
+                saved_path, backup_path = save_result
+                timestamp = time.time()
+                self.undo_history.append(
+                    ("auto_levels", (saved_path, backup_path), timestamp)
+                )
+                self.image_editor.clear()
+                self.image_cache.pop_path(saved_path)
+                return True
+
+            return False
+        finally:
+            self.current_index = saved_index
+
+    # --- Batch Auto Levels ---
+
+    batchAutoLevelsProgress = Signal(int, int)  # (current, total)
+    batchAutoLevelsFinished = Signal(int, int)  # (processed, total)
+
+    def batch_auto_levels(self):
+        """Auto-level every image in the current batch, one at a time via event loop."""
+        batch_indices = sorted(self._get_batch_indices())
+        if not batch_indices:
+            self.update_status_message("No images in batch.")
+            return
+
+        self._batch_al_indices = batch_indices
+        self._batch_al_pos = 0
+        self._batch_al_processed = 0
+        self._batch_al_cancelled = False
+        self._batch_al_t_start = time.perf_counter()
+
+        self.dialog_opened()
+        self.batchAutoLevelsProgress.emit(0, len(batch_indices))
+        QTimer.singleShot(0, self._batch_auto_levels_step)
+
+    def cancel_batch_auto_levels(self):
+        """Cancel an in-progress batch auto levels operation."""
+        self._batch_al_cancelled = True
+
+    def _batch_auto_levels_step(self):
+        """Process one image, then schedule the next via QTimer."""
+        indices = self._batch_al_indices
+        total = len(indices)
+
+        if self._batch_al_cancelled or self._batch_al_pos >= total:
+            self._batch_auto_levels_done()
+            return
+
+        idx = indices[self._batch_al_pos]
+        try:
+            if self._apply_auto_levels_at_index(idx):
+                self._batch_al_processed += 1
+        except Exception as e:
+            log.warning("batch auto levels: error on index %d: %s", idx, e)
+
+        self._batch_al_pos += 1
+        self.batchAutoLevelsProgress.emit(self._batch_al_pos, total)
+
+        # Schedule next step, yielding to event loop for UI updates
+        QTimer.singleShot(0, self._batch_auto_levels_step)
+
+    def _batch_auto_levels_done(self):
+        """Finish batch auto levels — refresh state and report."""
+        processed = self._batch_al_processed
+        total = len(self._batch_al_indices)
+        cancelled = self._batch_al_cancelled
+        elapsed_ms = int((time.perf_counter() - self._batch_al_t_start) * 1000)
+
+        # Refresh display
+        self.display_generation += 1
+        self.prefetcher.cancel_all()
+        self.prefetcher.update_prefetch(self.current_index)
+        self._metadata_cache_index = (-1, -1)
+        self.dataChanged.emit()
+        self.sync_ui_state()
+        if hasattr(self, "_thumbnail_model") and self._thumbnail_model:
+            self._thumbnail_model.refresh()
+
+        self.dialog_closed()
+        self.batchAutoLevelsFinished.emit(processed, total)
+
+        if cancelled:
+            msg = f"Batch auto levels cancelled: {processed}/{total} processed ({elapsed_ms} ms)"
+        else:
+            msg = f"Batch auto levels complete: {processed}/{total} processed ({elapsed_ms} ms)"
+        self.update_status_message(msg)
+        log.info(msg)
+
+        # Cleanup
+        del self._batch_al_indices
+        del self._batch_al_pos
+        del self._batch_al_processed
+        del self._batch_al_cancelled
+        del self._batch_al_t_start
 
     @Slot()
     def quick_auto_white_balance(self):

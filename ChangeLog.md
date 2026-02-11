@@ -4,6 +4,8 @@ Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better docum
 
 ## 1.5.7 (2026-02-09)
 
+- Auto levels is now much faster!
+- Images can now be tagged as favorite, and there is a menu item to add favorited images to the batch.
 - Avoid full directory rescan after quick saves by inserting the backup file into the cached list via bisect using indexer sort rules.
 - Speed up AWB (Lab) by subsampling from editor float_image; add no-op thresholds + clearer “direction” labels.
 - Improve auto-levels/AWB UX: detailed status messages and per-stage timing logs (compute/save/list/total).
@@ -17,6 +19,9 @@ Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better docum
 - Save performance: Avoid float_image.copy() during export when the edit set guarantees the pipeline won’t mutate the input buffer.
 - Load performance: Apply EXIF orientation on the 8-bit Pillow path before float conversion (rotate uint8), and only rotate the float buffer on the 16-bit OpenCV path.
 - Logging/robustness: Switch warnings/errors to lazy log formatting and improve load/save diagnostics.
+- Quick Auto Levels saves are faster for regular JPGs by using a lightweight “levels-only” save path when possible.
+- Folder refreshes from filesystem changes are now debounced (grouped together), so you get fewer slow rescans during saves.
+- Backup images (`*-backup.jpg`, `*-backup2.jpg`, etc.) are no longer shown in the image list.
 
 
 ## 1.5.6 (2026-02-08)

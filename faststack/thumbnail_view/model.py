@@ -74,6 +74,7 @@ class ThumbnailEntry:
     is_uploaded: bool = False
     is_edited: bool = False
     is_restacked: bool = False
+    is_favorite: bool = False
     folder_stats: Optional[FolderStats] = None
     mtime_ns: int = 0
     thumb_rev: int = 0  # Bumped when thumbnail is ready, forces QML refresh
@@ -110,6 +111,7 @@ class ThumbnailModel(QAbstractListModel):
     IsRestackedRole = Qt.ItemDataRole.UserRole + 14
     IsInBatchRole = Qt.ItemDataRole.UserRole + 15
     IsCurrentRole = Qt.ItemDataRole.UserRole + 16
+    IsFavoriteRole = Qt.ItemDataRole.UserRole + 17
 
     # Signal emitted when a thumbnail is ready (id = "{size}/{path_hash}/{mtime_ns}")
     thumbnailReady = Signal(str)
@@ -208,6 +210,8 @@ class ThumbnailModel(QAbstractListModel):
             return entry.name == ".." and entry.is_folder
         elif role == self.IsRestackedRole:
             return entry.is_restacked
+        elif role == self.IsFavoriteRole:
+            return entry.is_favorite
         elif role == self.IsInBatchRole:
             # Check if this row's corresponding loupe index is in any batch
             if self._get_batch_indices and not entry.is_folder:
@@ -254,6 +258,7 @@ class ThumbnailModel(QAbstractListModel):
             self.IsRestackedRole: b"isRestacked",
             self.IsInBatchRole: b"isInBatch",
             self.IsCurrentRole: b"isCurrent",
+            self.IsFavoriteRole: b"isFavorite",
         }
 
     def _get_thumbnail_source(self, entry: ThumbnailEntry) -> str:
@@ -365,6 +370,8 @@ class ThumbnailModel(QAbstractListModel):
                 is_edited = False
                 is_restacked = False
 
+                is_favorite = False
+
                 if self._get_metadata:
                     try:
                         meta = self._get_metadata(img.path.stem)
@@ -372,6 +379,7 @@ class ThumbnailModel(QAbstractListModel):
                         is_uploaded = meta.get("uploaded", False)
                         is_edited = meta.get("edited", False)
                         is_restacked = meta.get("restacked", False)
+                        is_favorite = meta.get("favorite", False)
                     except Exception:
                         pass
 
@@ -384,6 +392,7 @@ class ThumbnailModel(QAbstractListModel):
                         is_uploaded=is_uploaded,
                         is_edited=is_edited,
                         is_restacked=is_restacked,
+                        is_favorite=is_favorite,
                         mtime_ns=mtime_ns,
                     )
                 )

@@ -82,3 +82,60 @@ def test_sidecar_get_metadata_creates_new(mock_sidecar_dir):
     meta = sm.get_metadata("NEW_IMG")
     assert isinstance(meta, EntryMetadata)
     assert "NEW_IMG" in sm.data.entries
+
+
+def test_favorite_toggle_sets_json(mock_sidecar_dir):
+    """Tests that toggling favorite writes true/false to JSON."""
+    d = mock_sidecar_dir()
+    sm = SidecarManager(d, None)
+    meta = sm.get_metadata("IMG_FAV")
+
+    # Initially false
+    assert meta.favorite is False
+
+    # Toggle on
+    meta.favorite = True
+    sm.save()
+    saved = json.loads((d / "faststack.json").read_text())
+    assert saved["entries"]["IMG_FAV"]["favorite"] is True
+
+    # Toggle off
+    meta.favorite = False
+    sm.save()
+    saved = json.loads((d / "faststack.json").read_text())
+    assert saved["entries"]["IMG_FAV"]["favorite"] is False
+
+
+def test_favorite_loads_from_sidecar(mock_sidecar_dir):
+    """Tests that favorite loads correctly when reopening sidecar."""
+    content = {
+        "version": 2,
+        "last_index": 0,
+        "entries": {
+            "IMG_FAV": {"favorite": True},
+        },
+    }
+    d = mock_sidecar_dir(content)
+    sm = SidecarManager(d, None)
+    meta = sm.get_metadata("IMG_FAV")
+    assert meta.favorite is True
+
+
+def test_favorite_toggle_roundtrip(mock_sidecar_dir):
+    """Tests that toggling twice restores original JSON (round-trip)."""
+    d = mock_sidecar_dir()
+    sm = SidecarManager(d, None)
+    meta = sm.get_metadata("IMG_FAV")
+
+    # Capture original state
+    assert meta.favorite is False
+
+    # Toggle on then off
+    meta.favorite = True
+    meta.favorite = False
+    sm.save()
+
+    # Reload and verify
+    sm2 = SidecarManager(d, None)
+    meta2 = sm2.get_metadata("IMG_FAV")
+    assert meta2.favorite is False
