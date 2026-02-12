@@ -1,6 +1,7 @@
 """Filesystem watcher to detect changes in the image directory."""
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,7 @@ def _is_ignored_path(path: str) -> bool:
         or p.endswith("faststack.json")
         or ".__faststack_tmp__" in p
         or _BACKUP_RE.search(p) is not None
+        or "image recycle bin" in p.split(os.sep) or "image recycle bin" in p.split("/")
     )
 
 
@@ -39,20 +41,21 @@ class ImageDirectoryEventHandler(FileSystemEventHandler):
     def on_created(self, event):
         if _is_ignored_path(event.src_path):
             return
-        log.info("Detected file creation: %s. Requesting refresh.", event)
-        self.callback()
+        log.info("Detected file creation: %s. Requesting refresh.", event.src_path)
+        self.callback(event.src_path)
 
     def on_deleted(self, event):
         if _is_ignored_path(event.src_path):
             return
-        log.info("Detected file deletion: %s. Requesting refresh.", event)
-        self.callback()
+        log.info("Detected file deletion: %s. Requesting refresh.", event.src_path)
+        self.callback(event.src_path)
 
     def on_moved(self, event):
         if _is_ignored_path(event.src_path) or _is_ignored_path(event.dest_path):
             return
-        log.info("Detected file move: %s. Requesting refresh.", event)
-        self.callback()
+        log.info("Detected file move: %s -> %s. Requesting refresh.", event.src_path, event.dest_path)
+        self.callback(event.src_path)
+        self.callback(event.dest_path)
 
     def on_modified(self, event):
         # This is a no-op to prevent spurious refreshes from file modifications

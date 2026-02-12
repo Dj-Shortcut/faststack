@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 from faststack.imaging.orientation import get_exif_orientation, apply_orientation_to_np
+from faststack.io.utils import compute_path_hash
 
 log = logging.getLogger(__name__)
 
@@ -40,10 +41,6 @@ except ImportError:
     HAS_TURBOJPEG = False
     log.debug("TurboJPEG not available, using PIL for thumbnail decoding")
 
-
-def _compute_path_hash(path: Path) -> str:
-    """Compute a stable hash of the path for cache key purposes."""
-    return hashlib.md5(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
 
 
 class ThumbnailPrefetcher:
@@ -125,7 +122,7 @@ class ThumbnailPrefetcher:
         if size is None:
             size = self._target_size
 
-        path_hash = _compute_path_hash(path)
+        path_hash = compute_path_hash(path)
         job_key = (size, path_hash, mtime_ns)
         cache_key = f"{size}/{path_hash}/{mtime_ns}"
 

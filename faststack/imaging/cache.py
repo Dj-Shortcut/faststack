@@ -4,7 +4,9 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+import time
 from cachetools import LRUCache
+
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +22,11 @@ class ByteLRUCache(LRUCache):
     ):
         super().__init__(maxsize=max_bytes, getsizeof=size_of)
         self.on_evict = on_evict
+        # Tombstones to prevent race conditions where a deleted image is re-cached
+        # by a lingering background thread.
+        # Set of prefixes that are currently "tombstoned" (forbidden from caching).
+        self._tombstones: set[str] = set()
+        self._tombstone_expiry: dict[str, float] = {}
         log.info(
             f"Initialized byte-aware LRU cache with {max_bytes / 1024**2:.2f} MB capacity."
         )
@@ -37,6 +44,23 @@ class ByteLRUCache(LRUCache):
         log.debug(f"Cache max_bytes updated to {v / 1024**2:.2f} MB")
 
     def __setitem__(self, key, value):
+        # Check tombstones - prevent caching if key starts with a tombstoned prefix
+        # This is critical for preventing "ghost" images after deletion
+        if self._tombstones:
+            key_str = str(key)
+            # Fast check: iterate tombstones (usually very few)
+            # Remove expired tombstones lazily
+            now = time.monotonic()
+            expired = [p for p, expiry in self._tombstone_expiry.items() if now > expiry]
+            for p in expired:
+                self._tombstones.discard(p)
+                del self._tombstone_expiry[p]
+
+            for prefix in self._tombstones:
+                if key_str.startswith(prefix):
+                    log.debug(f"Refusing to cache tombstoned key: {key}")
+                    return
+
         # Before adding a new item, we might need to evict others
         # This is handled by the parent class, which will call popitem if needed
         super().__setitem__(key, value)
@@ -100,6 +124,69 @@ class ByteLRUCache(LRUCache):
                 f"Invalidated {len(keys_to_remove)} cache entries for path: {path}"
             )
 
+    def evict_paths(self, paths: list[Union[Path, str]]):
+        """Targeted eviction of all keys starting with given paths.
+        
+        Args:
+            paths: List of Path objects or strings.
+        """
+        if not paths:
+            return
+
+        # 1. Build set of prefixes (using forward slashes to match build_cache_key)
+        prefixes = []
+        for p in paths:
+            if isinstance(p, Path):
+                # Path.as_posix() returns pure forward slashes
+                prefix = p.as_posix()
+            else:
+                # String might be Windows-style, normalize to forward slashes
+                prefix = str(p).replace("\\", "/")
+            
+            # Append separator to ensure we match directory/file boundary
+            # e.g. "foo.jpg" -> "foo.jpg::"
+            prefixes.append(f"{prefix}::")
+
+        if not prefixes:
+            return
+
+        # 2. Add tombstones immediately to block re-insertion
+        now = time.monotonic()
+        ttl = 5.0  # Block re-caching for 5 seconds
+        for prefix in prefixes:
+            self._tombstones.add(prefix)
+            self._tombstone_expiry[prefix] = now + ttl
+
+        # 3. Optimistic scan: iterate keys once and collect matches
+        # Convert prefixes to tuple for fast startswith check
+        prefix_tuple = tuple(prefixes)
+        
+        keys_to_remove = []
+        for key in list(self.keys()):
+            # Keys are strings like "path/to/file.jpg::0"
+            if str(key).startswith(prefix_tuple):
+                keys_to_remove.append(key)
+
+        # 4. Remove keys
+        removed_bytes = 0
+        for k in keys_to_remove:
+            # We need size before removal to log correctly?
+            # LRUCache.pop returns value. We can ask getsizeof(value) but pop removes it anyway.
+            # ByteLRUCache tracks currsize. We can diff currsize.
+            # But simpler: just trust currsize updates.
+            # We want to log *how much* we removed.
+            # Accessing self.getsizeof(val) needs val.
+            # val = self.pop(k) would work.
+            if k in self:
+                val = self[k]
+                size = self.getsizeof(val)
+                removed_bytes += size
+                self.pop(k, None)
+
+        if keys_to_remove:
+            log.info(
+                f"Evicted {len(keys_to_remove)} entries ({removed_bytes / 1024**2:.2f} MB) for {len(paths)} paths"
+            )
 
 def get_decoded_image_size(item) -> int:
     """Calculates the size of a decoded image tuple (buffer, qimage)."""

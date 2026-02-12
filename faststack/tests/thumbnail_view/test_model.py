@@ -8,9 +8,9 @@ from unittest.mock import patch
 from faststack.thumbnail_view.model import (
     ThumbnailModel,
     ThumbnailEntry,
-    _compute_path_hash,
     _is_filesystem_root,
 )
+from faststack.io.utils import compute_path_hash
 
 
 @pytest.fixture
@@ -62,19 +62,19 @@ class TestThumbnailEntry:
 
 
 class TestComputePathHash:
-    """Tests for _compute_path_hash function."""
+    """Tests for compute_path_hash function."""
 
     def test_hash_is_stable(self, temp_folder):
         """Test that hash is stable for same path."""
         path = temp_folder / "test.jpg"
-        hash1 = _compute_path_hash(path)
-        hash2 = _compute_path_hash(path)
+        hash1 = compute_path_hash(path)
+        hash2 = compute_path_hash(path)
         assert hash1 == hash2
 
     def test_hash_is_16_chars(self, temp_folder):
         """Test that hash is 16 characters long."""
         path = temp_folder / "test.jpg"
-        hash_val = _compute_path_hash(path)
+        hash_val = compute_path_hash(path)
         assert len(hash_val) == 16
 
 

@@ -8,8 +8,8 @@ from PIL import Image
 from faststack.thumbnail_view.prefetcher import (
     ThumbnailPrefetcher,
     ThumbnailCache,
-    _compute_path_hash,
 )
+from faststack.io.utils import compute_path_hash
 
 
 @pytest.fixture
@@ -149,14 +149,14 @@ class TestThumbnailPrefetcher:
         time.sleep(0.5)
 
         # Check cache was populated
-        path_hash = _compute_path_hash(test_image)
+        path_hash = compute_path_hash(test_image)
         cache_key = f"200/{path_hash}/{mtime_ns}"
         assert cache.get(cache_key) is not None
 
     def test_submit_skips_if_cached(self, prefetcher, test_image, cache):
         """Test that submit skips if already cached."""
         mtime_ns = test_image.stat().st_mtime_ns
-        path_hash = _compute_path_hash(test_image)
+        path_hash = compute_path_hash(test_image)
         cache_key = f"200/{path_hash}/{mtime_ns}"
 
         # Pre-populate cache
@@ -240,7 +240,7 @@ class TestThumbnailDecode:
             time.sleep(0.5)
 
             # Get cached thumbnail
-            path_hash = _compute_path_hash(img_path)
+            path_hash = compute_path_hash(img_path)
             cache_key = f"100/{path_hash}/{mtime_ns}"
             cached_bytes = cache.get(cache_key)
 
@@ -272,7 +272,7 @@ class TestThumbnailDecode:
             # Wait for completion
             time.sleep(0.5)
 
-            path_hash = _compute_path_hash(img_path)
+            path_hash = compute_path_hash(img_path)
             cache_key = f"200/{path_hash}/{mtime_ns}"
             assert cache.get(cache_key) is not None
         finally:
@@ -298,7 +298,7 @@ class TestThumbnailDecode:
             time.sleep(0.5)
 
             # Cache should not have the corrupt file
-            path_hash = _compute_path_hash(img_path)
+            path_hash = compute_path_hash(img_path)
             cache_key = f"200/{path_hash}/{mtime_ns}"
             assert cache.get(cache_key) is None
 

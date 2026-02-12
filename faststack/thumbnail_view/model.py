@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Callable
@@ -16,6 +17,8 @@ from PySide6.QtCore import (
     Slot,
 )
 
+from faststack.models import ImageFile
+from faststack.io.utils import compute_path_hash
 from faststack.io.indexer import find_images
 from faststack.thumbnail_view.folder_stats import (
     FolderStats,
@@ -78,11 +81,6 @@ class ThumbnailEntry:
     folder_stats: Optional[FolderStats] = None
     mtime_ns: int = 0
     thumb_rev: int = 0  # Bumped when thumbnail is ready, forces QML refresh
-
-
-def _compute_path_hash(path: Path) -> str:
-    """Compute a stable hash of the path for cache key purposes."""
-    return hashlib.md5(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
 
 
 class ThumbnailModel(QAbstractListModel):
@@ -162,6 +160,11 @@ class ThumbnailModel(QAbstractListModel):
             return 0
         return len(self._entries)
 
+    @property
+    def folder_count(self) -> int:
+        """Total number of folder entries currently in the model."""
+        return sum(1 for e in self._entries if e.is_folder)
+
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or index.row() >= len(self._entries):
             return None
@@ -203,7 +206,7 @@ class ThumbnailModel(QAbstractListModel):
         elif role == self.ThumbRevRole:
             return entry.thumb_rev
         elif role == self.PathHashRole:
-            return _compute_path_hash(entry.path)
+            return compute_path_hash(entry.path)
         elif role == self.MtimeNsRole:
             return entry.mtime_ns
         elif role == self.IsParentFolderRole:
@@ -267,7 +270,7 @@ class ThumbnailModel(QAbstractListModel):
         Format: image://thumbnail/{size}/{path_hash}/{mtime_ns}?r={rev}
         Folders use: image://thumbnail/folder/{path_hash}/{mtime_ns}?r={rev}
         """
-        path_hash = _compute_path_hash(entry.path)
+        path_hash = compute_path_hash(entry.path)
         mtime_ns = entry.mtime_ns
         rev = entry.thumb_rev
 
@@ -286,6 +289,52 @@ class ThumbnailModel(QAbstractListModel):
         self._active_filter = filter_string
         self.refresh()
 
+    def _add_folders_to_entries(self):
+        """Scan for folders and add them to self._entries."""
+        # Add parent folder entry if not at filesystem root
+        if not _is_filesystem_root(self._current_directory):
+            parent_path = self._current_directory.parent
+            self._entries.append(
+                ThumbnailEntry(
+                    path=parent_path,
+                    name="..",
+                    is_folder=True,
+                    mtime_ns=0,
+                )
+            )
+
+        # Scan for folders
+        folders: List[ThumbnailEntry] = []
+        try:
+            for entry in os.scandir(self._current_directory):
+                if entry.is_dir() and not entry.name.startswith("."):
+                    folder_path = Path(entry.path)
+                    try:
+                        stat_info = entry.stat()
+                        mtime_ns = stat_info.st_mtime_ns
+                    except OSError:
+                        mtime_ns = 0
+
+                    folder_stats = read_folder_stats(folder_path)
+                    if folder_stats is None:
+                        folder_stats = count_images_in_folder(folder_path)
+
+                    folders.append(
+                        ThumbnailEntry(
+                            path=folder_path,
+                            name=entry.name,
+                            is_folder=True,
+                            folder_stats=folder_stats,
+                            mtime_ns=mtime_ns,
+                        )
+                    )
+        except OSError as e:
+            log.warning("Error scanning directory %s: %s", self._current_directory, e)
+
+        # Sort folders alphabetically
+        folders.sort(key=lambda e: e.name.lower())
+        self._entries.extend(folders)
+
     def refresh(self):
         """Refresh the model by rescanning the current directory."""
         cur, own = QThread.currentThread(), self.thread()
@@ -293,60 +342,15 @@ class ThumbnailModel(QAbstractListModel):
             f"ThumbnailModel.refresh() thread mismatch: current={cur}, owner={own}"
         )
         self.beginResetModel()
+        t0 = time.perf_counter()
         try:
             self._entries.clear()
             self._id_to_row.clear()
             self._selected_indices.clear()
             self._last_selected_index = None
 
-            # Add parent folder entry if not at filesystem root
-            # (allows navigating up even above base_directory)
-            if not _is_filesystem_root(self._current_directory):
-                parent_path = self._current_directory.parent
-                self._entries.append(
-                    ThumbnailEntry(
-                        path=parent_path,
-                        name="..",
-                        is_folder=True,
-                        mtime_ns=0,
-                    )
-                )
-
-            # Scan for folders
-            folders: List[ThumbnailEntry] = []
-            try:
-                for entry in os.scandir(self._current_directory):
-                    if entry.is_dir() and not entry.name.startswith("."):
-                        folder_path = Path(entry.path)
-                        try:
-                            stat_info = entry.stat()
-                            mtime_ns = stat_info.st_mtime_ns
-                        except OSError:
-                            mtime_ns = 0
-
-                        folder_stats = read_folder_stats(folder_path)
-                        # Fall back to counting actual files for folders without faststack.json
-                        # (e.g., recycle bin)
-                        if folder_stats is None:
-                            folder_stats = count_images_in_folder(folder_path)
-
-                        folders.append(
-                            ThumbnailEntry(
-                                path=folder_path,
-                                name=entry.name,
-                                is_folder=True,
-                                folder_stats=folder_stats,
-                                mtime_ns=mtime_ns,
-                            )
-                        )
-            except OSError as e:
-                log.warning(
-                    "Error scanning directory %s: %s", self._current_directory, e
-                )
-
-            # Sort folders alphabetically
-            folders.sort(key=lambda e: e.name.lower())
-            self._entries.extend(folders)
+            self._add_folders_to_entries()
+            t1 = time.perf_counter()
 
             # Get images using existing indexer (respects filter rules)
             images = find_images(self._current_directory)
@@ -356,54 +360,14 @@ class ThumbnailModel(QAbstractListModel):
                 needle = self._active_filter.lower()
                 images = [img for img in images if needle in img.path.stem.lower()]
 
-            # Convert ImageFile to ThumbnailEntry
-            for img in images:
-                try:
-                    stat_info = img.path.stat()
-                    mtime_ns = stat_info.st_mtime_ns
-                except OSError:
-                    mtime_ns = int(img.timestamp * 1e9) if img.timestamp else 0
-
-                # Get metadata if callback provided
-                is_stacked = False
-                is_uploaded = False
-                is_edited = False
-                is_restacked = False
-
-                is_favorite = False
-
-                if self._get_metadata:
-                    try:
-                        meta = self._get_metadata(img.path.stem)
-                        is_stacked = meta.get("stacked", False)
-                        is_uploaded = meta.get("uploaded", False)
-                        is_edited = meta.get("edited", False)
-                        is_restacked = meta.get("restacked", False)
-                        is_favorite = meta.get("favorite", False)
-                    except Exception:
-                        pass
-
-                self._entries.append(
-                    ThumbnailEntry(
-                        path=img.path,
-                        name=img.path.name,
-                        is_folder=False,
-                        is_stacked=is_stacked,
-                        is_uploaded=is_uploaded,
-                        is_edited=is_edited,
-                        is_restacked=is_restacked,
-                        is_favorite=is_favorite,
-                        mtime_ns=mtime_ns,
-                    )
-                )
-
-            # Build id_to_row mapping
+            self._add_images_to_entries(images)
+            t2 = time.perf_counter()
             self._rebuild_id_mapping()
+            t3 = time.perf_counter()
 
         finally:
             self.endResetModel()
 
-        # Selection was cleared during refresh
         self.selectionChanged.emit()
         log.info(
             "ThumbnailModel refreshed: %d entries (%d folders, %d images)",
@@ -411,19 +375,166 @@ class ThumbnailModel(QAbstractListModel):
             sum(1 for e in self._entries if e.is_folder),
             sum(1 for e in self._entries if not e.is_folder),
         )
+        log.info(
+            "refresh timings: folders=%.3f images=%.3f idmap=%.3f total=%.3f n=%d",
+            t1-t0, t2-t1, t3-t2, t3-t0, len(images)
+        )
+
+    def remove_rows_by_path(self, paths: List[Path]) -> None:
+        """Targeted removal of rows by path without full model reset."""
+        if not paths or not self._entries:
+            return
+
+        # 1. Map paths to rows (using string keys for robust comparison)
+        path_strings = {str(p) for p in paths}
+        indices_to_remove = []
+        for i, entry in enumerate(self._entries):
+            if str(entry.path) in path_strings:
+                indices_to_remove.append(i)
+
+        if not indices_to_remove:
+            return
+
+        # 2. Sort in reverse to maintain index validity during removal
+        indices_to_remove.sort(reverse=True)
+
+        # 3. Group consecutive indices for batch removal calls
+        ranges = []
+        if indices_to_remove:
+            current_range = [indices_to_remove[0], indices_to_remove[0]] # [last, first]
+            for idx in indices_to_remove[1:]:
+                if idx == current_range[1] - 1:
+                    current_range[1] = idx
+                else:
+                    ranges.append(current_range)
+                    current_range = [idx, idx]
+            ranges.append(current_range)
+
+        # 4. Perform removals
+        for last, first in ranges:
+            self.beginRemoveRows(QModelIndex(), first, last)
+            del self._entries[first : last + 1]
+            self.endRemoveRows()
+
+        # 5. Fix selection state (indices have shifted)
+        new_selection = set()
+        for idx in self._selected_indices:
+            if idx not in indices_to_remove:
+                # Count how many items were removed BEFORE this index to shift it
+                offset = sum(1 for r_idx in indices_to_remove if r_idx < idx)
+                new_selection.add(idx - offset)
+        self._selected_indices = new_selection
+        self._last_selected_index = None
+
+        # 6. Rebuild mapping
+        self._rebuild_id_mapping()
+        self.selectionChanged.emit()
+        log.info("ThumbnailModel removed %d rows via targeted removal", len(indices_to_remove))
+
+    def refresh_from_controller(self, images: List, metadata_map: Optional[Dict[str, dict]] = None):
+        """Refresh images from a pre-loaded list without scanning disk.
+        
+        Folders are still scanned, but image entries are built from the
+        provided objects.
+        """
+        cur, own = QThread.currentThread(), self.thread()
+        assert cur == own, f"ThumbnailModel refresh thread mismatch"
+        
+        self.beginResetModel()
+        try:
+            self._entries.clear()
+            self._id_to_row.clear()
+            self._selected_indices.clear()
+            self._last_selected_index = None
+
+            t0 = time.perf_counter()
+            self._add_folders_to_entries()
+            t1 = time.perf_counter()
+            
+            # Apply active filter if set
+            if self._active_filter:
+                needle = self._active_filter.lower()
+                images = [img for img in images if needle in img.path.stem.lower()]
+                
+            self._add_images_to_entries(images, metadata_map)
+            t2 = time.perf_counter()
+            self._rebuild_id_mapping()
+            t3 = time.perf_counter()
+        finally:
+            self.endResetModel()
+
+        self.selectionChanged.emit()
+        log.info(
+            "refresh_from_controller timings: folders=%.3f images=%.3f idmap=%.3f total=%.3f n=%d (bulk_meta=%s)",
+            t1-t0, t2-t1, t3-t2, t3-t0, len(images), metadata_map is not None
+        )
+
+    def _add_images_to_entries(self, images: List, metadata_map: Optional[Dict[str, dict]] = None):
+        """Convert list of objects (ImageFile or similar) to ThumbnailEntry."""
+        for img in images:
+            try:
+                # Use mtime from object if available to avoid stat()
+                if hasattr(img, 'timestamp') and img.timestamp:
+                    mtime_ns = int(img.timestamp * 1e9)
+                else:
+                    mtime_ns = img.path.stat().st_mtime_ns
+            except OSError:
+                mtime_ns = 0
+
+            # Get metadata
+            is_stacked = False
+            is_uploaded = False
+            is_edited = False
+            is_restacked = False
+            is_favorite = False
+
+            if metadata_map:
+                meta = metadata_map.get(img.path.stem, {})
+                is_stacked = meta.get("stacked", False)
+                is_uploaded = meta.get("uploaded", False)
+                is_edited = meta.get("edited", False)
+                is_restacked = meta.get("restacked", False)
+                is_favorite = meta.get("favorite", False)
+            elif self._get_metadata:
+                try:
+                    meta = self._get_metadata(img.path.stem)
+                    is_stacked = meta.get("stacked", False)
+                    is_uploaded = meta.get("uploaded", False)
+                    is_edited = meta.get("edited", False)
+                    is_restacked = meta.get("restacked", False)
+                    is_favorite = meta.get("favorite", False)
+                except Exception:
+                    pass
+
+            self._entries.append(
+                ThumbnailEntry(
+                    path=img.path,
+                    name=img.path.name,
+                    is_folder=False,
+                    is_stacked=is_stacked,
+                    is_uploaded=is_uploaded,
+                    is_edited=is_edited,
+                    is_restacked=is_restacked,
+                    is_favorite=is_favorite,
+                    mtime_ns=mtime_ns,
+                )
+            )
 
     def _rebuild_id_mapping(self):
-        """Rebuild the id_to_row mapping for all entries."""
+        """Rebuilds the path/stack_id -> row mapping."""
         self._id_to_row.clear()
-        for row, entry in enumerate(self._entries):
-            if entry.name == "..":
-                continue  # Don't map parent folder
-            thumbnail_id = self._make_thumbnail_id(entry)
-            self._id_to_row[thumbnail_id] = row
+        
+        # We need a stable identifier for QML
+        # Now using fast string hashing (no filesystem calls)
+        self._id_to_row = {
+            compute_path_hash(e.path): i 
+            for i, e in enumerate(self._entries)
+            if not e.is_folder
+        }
 
     def _make_thumbnail_id(self, entry: ThumbnailEntry) -> str:
         """Create thumbnail ID without query params."""
-        path_hash = _compute_path_hash(entry.path)
+        path_hash = compute_path_hash(entry.path)
         if entry.is_folder:
             return f"folder/{path_hash}/{entry.mtime_ns}"
         else:
@@ -581,6 +692,13 @@ class ThumbnailModel(QAbstractListModel):
         if 0 <= row < len(self._entries):
             return self._entries[row]
         return None
+
+    def _compute_path_hash(self, path: Path) -> str:
+        """Computes a stable hash for the given path.
+        
+        Now uses centralized helper which is purely string-based (no .resolve() calls).
+        """
+        return compute_path_hash(path)
 
     def find_image_index(self, path: Path) -> int:
         """Find the row index of an image by path.
