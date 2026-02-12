@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import time
+from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Callable
@@ -134,6 +135,7 @@ class ThumbnailModel(QAbstractListModel):
         self._get_current_index = get_current_index_callback
         self._thumbnail_size = thumbnail_size
         self._entries: List[ThumbnailEntry] = []
+        self._folder_count: int = 0  # cached; updated on mutation
         self._selected_indices: Set[int] = set()
         self._last_selected_index: Optional[int] = None
         self._active_filter: str = ""  # current filename filter (set by AppController)
@@ -162,8 +164,8 @@ class ThumbnailModel(QAbstractListModel):
 
     @property
     def folder_count(self) -> int:
-        """Total number of folder entries currently in the model."""
-        return sum(1 for e in self._entries if e.is_folder)
+        """Total number of folder entries currently in the model (cached)."""
+        return self._folder_count
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or index.row() >= len(self._entries):
@@ -368,12 +370,13 @@ class ThumbnailModel(QAbstractListModel):
         finally:
             self.endResetModel()
 
+        self._folder_count = sum(1 for e in self._entries if e.is_folder)
         self.selectionChanged.emit()
         log.info(
             "ThumbnailModel refreshed: %d entries (%d folders, %d images)",
             len(self._entries),
-            sum(1 for e in self._entries if e.is_folder),
-            sum(1 for e in self._entries if not e.is_folder),
+            self._folder_count,
+            len(self._entries) - self._folder_count,
         )
         log.info(
             "refresh timings: folders=%.3f images=%.3f idmap=%.3f total=%.3f n=%d",
@@ -385,15 +388,18 @@ class ThumbnailModel(QAbstractListModel):
         if not paths or not self._entries:
             return
 
-        # 1. Map paths to rows (using string keys for robust comparison)
-        path_strings = {str(p) for p in paths}
+        # 1. Map paths to rows (normalized for Windows case/separator consistency)
+        path_keys = {os.path.normcase(os.path.abspath(str(p))) for p in paths}
         indices_to_remove = []
         for i, entry in enumerate(self._entries):
-            if str(entry.path) in path_strings:
+            if os.path.normcase(os.path.abspath(str(entry.path))) in path_keys:
                 indices_to_remove.append(i)
 
         if not indices_to_remove:
             return
+
+        # Count folders being removed (for cached counter)
+        folders_removed = sum(1 for i in indices_to_remove if self._entries[i].is_folder)
 
         # 2. Sort in reverse to maintain index validity during removal
         indices_to_remove.sort(reverse=True)
@@ -416,17 +422,21 @@ class ThumbnailModel(QAbstractListModel):
             del self._entries[first : last + 1]
             self.endRemoveRows()
 
-        # 5. Fix selection state (indices have shifted)
+        # 5. Update cached folder count
+        self._folder_count -= folders_removed
+
+        # 6. Fix selection state (indices have shifted) — O(n log n) via bisect
+        sorted_removed = sorted(indices_to_remove)
+        removed_set = set(indices_to_remove)
         new_selection = set()
         for idx in self._selected_indices:
-            if idx not in indices_to_remove:
-                # Count how many items were removed BEFORE this index to shift it
-                offset = sum(1 for r_idx in indices_to_remove if r_idx < idx)
+            if idx not in removed_set:
+                offset = bisect_left(sorted_removed, idx)
                 new_selection.add(idx - offset)
         self._selected_indices = new_selection
         self._last_selected_index = None
 
-        # 6. Rebuild mapping
+        # 7. Rebuild mapping
         self._rebuild_id_mapping()
         self.selectionChanged.emit()
         log.info("ThumbnailModel removed %d rows via targeted removal", len(indices_to_remove))
@@ -463,6 +473,7 @@ class ThumbnailModel(QAbstractListModel):
         finally:
             self.endResetModel()
 
+        self._folder_count = sum(1 for e in self._entries if e.is_folder)
         self.selectionChanged.emit()
         log.info(
             "refresh_from_controller timings: folders=%.3f images=%.3f idmap=%.3f total=%.3f n=%d (bulk_meta=%s)",

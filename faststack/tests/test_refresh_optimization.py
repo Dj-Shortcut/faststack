@@ -3,8 +3,19 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from faststack.app import AppController
 
+
+@pytest.fixture(scope="session")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
 @pytest.fixture
-def controller(tmp_path):
+def controller(tmp_path, qapp):
+    _ = qapp
     with (
         patch('faststack.app.Watcher'),
         patch('faststack.app.SidecarManager'),
@@ -17,30 +28,14 @@ def controller(tmp_path):
         ctrl._path_resolver = Mock()
         return ctrl
 
-def test_do_delete_refresh_skips_on_sync(controller):
-    """Verify that skip logic works when counts are in sync."""
-    controller.image_files = [Mock(), Mock()] # 2 images
-    controller._thumbnail_model.rowCount.return_value = 3 # 2 images + 1 folder
-    controller._thumbnail_model.folder_count = 1
-    
-    with patch('faststack.app._debug_mode', True):
-        controller._do_delete_refresh()
-        
-    # Should NOT have called refresh_from_controller
-    assert controller._thumbnail_model.refresh_from_controller.call_count == 0
-    # Should have updated resolver
-    assert controller._path_resolver.update_from_model.called
+def test_do_delete_refresh_updates_resolver(controller):
+    """Verify that _do_delete_refresh updates the path resolver without full model rebuild."""
+    controller.image_files = [Mock(), Mock()]
 
-def test_do_delete_refresh_rebuilds_on_drift(controller):
-    """Verify that skip logic fallback works when counts drift."""
-    controller.image_files = [Mock(), Mock()] # 2 images
-    controller._thumbnail_model.rowCount.return_value = 4 # DRIFT: expected 3
-    controller._thumbnail_model.folder_count = 1
-    
     with patch('faststack.app._debug_mode', True):
         controller._do_delete_refresh()
-        
-    # Should HAVE called refresh_from_controller
-    assert controller._thumbnail_model.refresh_from_controller.called
+
+    # Should NOT have called refresh_from_controller (trusts optimistic updates)
+    assert controller._thumbnail_model.refresh_from_controller.call_count == 0
     # Should have updated resolver
     assert controller._path_resolver.update_from_model.called

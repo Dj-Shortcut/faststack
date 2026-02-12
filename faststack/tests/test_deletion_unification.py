@@ -87,7 +87,7 @@ def test_grid_delete_selection(mock_controller):
     img1 = ImageFile(Path("test1.jpg"))
     img2 = ImageFile(Path("test2.jpg"))
     mock_controller.image_files = [img1, img2]
-    mock_controller._path_to_index = {img1.path.resolve(): 0, img2.path.resolve(): 1}
+    mock_controller._rebuild_path_to_index()
 
     mock_controller._thumbnail_model.get_selected_paths.return_value = [img1.path]
 
@@ -104,7 +104,7 @@ def test_grid_cursor_correct_mapping(mock_controller):
     imgA = ImageFile(Path("A.jpg"))
     imgB = ImageFile(Path("B.jpg"))
     mock_controller.image_files = [imgA, imgB]
-    mock_controller._path_to_index = {imgA.path.resolve(): 0, imgB.path.resolve(): 1}
+    mock_controller._rebuild_path_to_index()
 
     mock_controller._thumbnail_model.get_selected_paths.return_value = []
     mock_entry = Mock()
@@ -170,7 +170,7 @@ def test_grid_cursor_mapping_regression(mock_controller):
     imgA = ImageFile(Path("A.jpg"))
     imgB = ImageFile(Path("B.jpg"))
     mock_controller.image_files = [imgB, imgA]
-    mock_controller._path_to_index = {imgB.path.resolve(): 0, imgA.path.resolve(): 1}
+    mock_controller._rebuild_path_to_index()
 
     mock_controller._thumbnail_model.get_selected_paths.return_value = []
     mock_entry = Mock()

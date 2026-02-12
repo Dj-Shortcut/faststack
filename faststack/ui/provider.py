@@ -668,6 +668,10 @@ class UIState(QObject):
     def addFavoritesToBatch(self):
         self.app_controller.add_favorites_to_batch()
 
+    @Slot()
+    def addUploadedToBatch(self):
+        self.app_controller.add_uploaded_to_batch()
+
     @Slot(result=str)
     def get_helicon_path(self):
         return self.app_controller.get_helicon_path()

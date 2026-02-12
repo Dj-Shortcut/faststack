@@ -57,7 +57,7 @@ from faststack.io.sidecar import SidecarManager
 from faststack.io.watcher import Watcher
 from faststack.io.helicon import launch_helicon_focus
 from faststack.io.executable_validator import validate_executable_path
-from faststack.io.utils import compute_path_hash
+from faststack.io.utils import normalize_path_key
 from faststack.imaging.cache import (
     ByteLRUCache,
     get_decoded_image_size,
@@ -145,8 +145,7 @@ class AppController(QObject):
         """Normalize path for consistent comparison without slow resolve()."""
         if p is None:
             return None
-        # abspath + normcase is much faster than resolve() on Windows
-        return os.path.normcase(os.path.abspath(str(p)))
+        return normalize_path_key(p)
 
     class ProgressReporter(QObject):
         progress_updated = Signal(int)
@@ -229,6 +228,7 @@ class AppController(QObject):
         # -- Backend Components --
         self.watcher = Watcher(self.image_dir, self._request_watcher_refresh)
         self._suppressed_paths: Dict[str, float] = {}  # key -> monotonic expiry time
+        self._suppressed_paths_lock = threading.Lock()  # guards cross-thread access
         self.sidecar = SidecarManager(self.image_dir, self.watcher, debug=_debug_mode)
         self.image_editor = ImageEditor()  # Initialize the editor
         self._dialog_open_count = 0  # Track nested dialogs
@@ -367,12 +367,6 @@ class AppController(QObject):
         self._watcher_debounce_timer.setInterval(200)  # 200ms debounce
         self._watcher_debounce_timer.timeout.connect(self.refresh_image_list)
 
-        # Debounce timer for post-delete refresh.
-        # Coalesces rapid deletes into a single expensive disk scan.
-        self._delete_refresh_timer = QTimer(self)
-        self._delete_refresh_timer.setSingleShot(True)
-        self._delete_refresh_timer.setInterval(500)  # 500ms debounce
-        self._delete_refresh_timer.timeout.connect(self._do_delete_refresh)
 
         # Debounce timer for metadata/highlight signals during rapid navigation
         # Only emits these signals once user stops navigating (16ms = 1 frame debounce)
@@ -745,15 +739,16 @@ class AppController(QObject):
         if path:
             key = self._key(Path(path))
             now = time.monotonic()
-            expiry = self._suppressed_paths.get(key)
-            if expiry:
-                if now < expiry:
-                    if _debug_mode:
-                        log.debug("Suppressing watcher refresh for recently deleted path: %s", path)
-                    return
-                else:
-                    # Cleanup expired entry
-                    del self._suppressed_paths[key]
+            with self._suppressed_paths_lock:
+                expiry = self._suppressed_paths.get(key)
+                if expiry:
+                    if now < expiry:
+                        if _debug_mode:
+                            log.debug("Suppressing watcher refresh for recently deleted path: %s", path)
+                        return
+                    else:
+                        # Cleanup expired entry
+                        del self._suppressed_paths[key]
 
         try:
             QMetaObject.invokeMethod(
@@ -2017,6 +2012,61 @@ class AppController(QObject):
                 f"All {len(indices_to_add)} favorite(s) already in batch."
             )
 
+    def add_uploaded_to_batch(self):
+        """Add all uploaded-flagged images in the current directory to the batch."""
+        if not self.image_files:
+            self.update_status_message("No images loaded.")
+            return
+
+        # Find indices of all uploaded images
+        indices_to_add = []
+        for i, img in enumerate(self.image_files):
+            meta = self.sidecar.get_metadata(img.path.stem)
+            if meta.uploaded:
+                indices_to_add.append(i)
+
+        if not indices_to_add:
+            self.update_status_message("No uploaded images found.")
+            return
+
+        # Add each to batch (skip if already in a batch)
+        added_count = 0
+        for idx in indices_to_add:
+            in_batch = any(start <= idx <= end for start, end in self.batches)
+            if not in_batch:
+                self.batches.append([idx, idx])
+                added_count += 1
+
+        if added_count > 0:
+            # Sort and merge overlapping/adjacent batches
+            self.batches.sort()
+            merged_batches = [self.batches[0]] if self.batches else []
+            for i in range(1, len(self.batches)):
+                last_start, last_end = merged_batches[-1]
+                current_start, current_end = self.batches[i]
+                if current_start <= last_end + 1:
+                    merged_batches[-1] = [last_start, max(last_end, current_end)]
+                else:
+                    merged_batches.append([current_start, current_end])
+            self.batches = merged_batches
+
+            self._invalidate_batch_cache()
+            self._metadata_cache_index = (-1, -1)
+            self.dataChanged.emit()
+            self.sync_ui_state()
+
+            if hasattr(self, "_thumbnail_model") and self._thumbnail_model:
+                self._thumbnail_model.refresh()
+
+            self.update_status_message(
+                f"Added {added_count} uploaded image(s) to batch ({len(indices_to_add)} total uploaded)"
+            )
+            log.info("Added %d uploaded image(s) to batch", added_count)
+        else:
+            self.update_status_message(
+                f"All {len(indices_to_add)} uploaded image(s) already in batch."
+            )
+
     def remove_from_batch_or_stack(self):
         """Remove current image from any batch or stack it's in."""
         if not self.image_files or self.current_index >= len(self.image_files):
@@ -3195,6 +3245,14 @@ class AppController(QObject):
                 "code": "cancelled"
             })
 
+        # Convert all Path objects to str before crossing signal boundary.
+        # _normalize_worker_results converts back to Path on the UI thread.
+        for lst in (successes, warnings, failures):
+            for d in lst:
+                for k, v in d.items():
+                    if isinstance(v, Path):
+                        d[k] = str(v)
+
         return {
             "job_id": job_id,
             "status": "completed",
@@ -3236,10 +3294,11 @@ class AppController(QObject):
         # Add all successfully moved/deleted files to suppressed paths
         ttl = 2.0
         now = time.monotonic()
-        for s in successes:
-            self._suppressed_paths[self._key(s["jpg"])] = now + ttl
-            if s.get("raw"):
-                self._suppressed_paths[self._key(s["raw"])] = now + ttl
+        with self._suppressed_paths_lock:
+            for s in successes:
+                self._suppressed_paths[self._key(s["jpg"])] = now + ttl
+                if s.get("raw"):
+                    self._suppressed_paths[self._key(s["raw"])] = now + ttl
 
         # 5. Bookkeeping for successes (undo history, recycle bin tracking)
         self._apply_success_records(successes, warnings, timestamp, user_undone)
@@ -3501,6 +3560,7 @@ class AppController(QObject):
         
         Optimized: No longer performs a full disk scan (refresh_image_list).
         Relies on optimistic UI updates already performed in _delete_indices.
+        Watcher events handle any true drift (external changes).
         """
         t_start = time.perf_counter()
         
@@ -3508,62 +3568,16 @@ class AppController(QObject):
         # need a separate watcher refresh immediately after.
         self._watcher_debounce_timer.stop()
         
-        # We DO need to clear raw count cache potentially if we want accurate RAW counts,
-        # but maybe we can wait? Let's keep it for now as it's just a cache clear.
         clear_raw_count_cache()
-        t_clear = time.perf_counter()
-        
-        # REMOVED: self.refresh_image_list() 
-        # The UI list is already updated optimistically.
-        
-        # Rebuild index map since indices changed
         self._rebuild_path_to_index()
-        t_rebuild = time.perf_counter()
+
+        # Update the path resolver to reflect current model state
+        if self._thumbnail_model and hasattr(self, "_path_resolver"):
+            self._path_resolver.update_from_model(self._thumbnail_model)
         
-        if self._thumbnail_model:
-            # Diagnostic: check synchronization between controller and model
-            model_count = self._thumbnail_model.rowCount()
-            folder_count = self._thumbnail_model.folder_count
-            image_count = len(self.image_files)
-            expected_count = image_count + folder_count
-            
-            if model_count == expected_count:
-                # OPTIMIZED: The model is already in sync thanks to remove_rows_by_path()
-                # which we called in _delete_indices. We only need to update the resolver.
-                if _debug_mode:
-                    log.info(
-                        "Skipping ThumbnailModel rebuild: already in sync (images=%d, folders=%d)",
-                        image_count,
-                        folder_count
-                    )
-                if hasattr(self, "_path_resolver"):
-                    self._path_resolver.update_from_model(self._thumbnail_model)
-            else:
-                # DRIFT: Fallback to full refresh (e.g. if watcher events arrived)
-                if _debug_mode:
-                    log.info(
-                        "Drift detected in ThumbnailModel: model=%d, expected=%d (images=%d, folders=%d). Performing full refresh.",
-                        model_count,
-                        expected_count,
-                        image_count,
-                        folder_count
-                    )
-                # Lightweight refresh using current in-memory list + bulk metadata
-                meta_map = self._get_bulk_metadata_map()
-                self._thumbnail_model.refresh_from_controller(self.image_files, meta_map)
-                if hasattr(self, "_path_resolver"):
-                    self._path_resolver.update_from_model(self._thumbnail_model)
-        t_end = time.perf_counter()
-        
+        dt = time.perf_counter() - t_start
         if _debug_mode:
-             log.info(
-                "delete_refresh timing: clear=%.4f rebuild=%.4f thumbs=%.4f total=%.4f n=%d",
-                t_clear - t_start,
-                t_rebuild - t_clear,
-                t_end - t_rebuild,
-                t_end - t_start,
-                len(self.image_files)
-             )
+            log.info("delete_refresh took %.4fs for %d images", dt, len(self.image_files))
 
     def _delete_indices(self, indices: List[int], action_type: str) -> dict:
         """Unified core deletion engine for FastStack.
@@ -3675,10 +3689,11 @@ class AppController(QObject):
         # Must happen BEFORE the worker starts I/O, because watchdog events can arrive immediately.
         ttl = 2.0  # seconds; plenty to cover os.replace/shutil.move and watchdog delivery
         now = time.monotonic()
-        for img in images_to_delete:
-            self._suppressed_paths[self._key(img.path)] = now + ttl
-            if img.raw_pair:
-                self._suppressed_paths[self._key(img.raw_pair)] = now + ttl
+        with self._suppressed_paths_lock:
+            for img in images_to_delete:
+                self._suppressed_paths[self._key(img.path)] = now + ttl
+                if img.raw_pair:
+                    self._suppressed_paths[self._key(img.raw_pair)] = now + ttl
 
         self.sync_ui_state()
 
@@ -4123,10 +4138,7 @@ class AppController(QObject):
             self._metadata_debounce_timer.stop()
         except Exception:
             pass
-        try:
-            self._delete_refresh_timer.stop()
-        except Exception:
-            pass
+
 
         # Stop QFileSystemWatcher if it's Qt-based
         try:
