@@ -1,11 +1,26 @@
 # ----------------------------
+# DO NOT PUSH (repo-local docs / tools)
+# ----------------------------
+prompt.md
+WARP.md
+ARCHITECTURE.md
+AGENTS.md
+.claude/
+.agent/
+
+# We don't have any good docs yet
+docs/
+
+# Fix noisy/perms tool output dir
+faststack.working-menus/
+
+# ----------------------------
 # Python / virtualenvs
 # ----------------------------
 .venv/
 venv/
 env/
-
-# Keep verify_venv locally but never track it (works anywhere in the repo)
+temp_venv/
 verify_venv/
 
 # Python caches
@@ -13,8 +28,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Type checker caches
+# Type checker / linter caches
 .mypy_cache/
+.ruff_cache/
+
+# Test caches / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # ----------------------------
 # Build / packaging outputs
@@ -23,7 +45,11 @@ build/
 dist/
 *.spec
 *.egg-info/
-faststack.egg-info/
+
+# ----------------------------
+# Runtime / generated data
+# ----------------------------
+var/
 
 # ----------------------------
 # Logs
@@ -38,7 +64,7 @@ error_log.txt
 Thumbs.db
 
 # ----------------------------
-# IDE
+# IDE / editor
 # ----------------------------
 .vscode/
 .idea/
@@ -46,26 +72,10 @@ Thumbs.db
 *.swo
 
 # ----------------------------
-# Project docs we don't track
+# Local scratch / test / debug outputs (anywhere)
 # ----------------------------
-prompt.md
-WARP.md
-AGENTS.md
-ARCHITECTURE.md
-docs/COLOR_PROFILE_FIX.md
-.claude/
-.agent/
-
-# ----------------------------
-# Runtime / generated data
-# ----------------------------
-var/
-
-# ----------------------------
-# Local test/debug outputs 
-# ----------------------------
+**/debug_test.py
 debug_*.txt
-debug_test.py
 output*.txt
 test_fail*.log
 test_out*.txt
@@ -74,18 +84,6 @@ test_report*.log
 test_results.txt
 smoke_test_output.txt
 verify_result.txt
-faststack/*fail*.txt
-faststack/*final*.txt
 
-# Same junk when produced inside the package dir
-faststack/debug_*.txt
-faststack/debug_test.py
-faststack/output*.txt
-faststack/test_fail*.log
-faststack/test_out*.txt
-faststack/test_output*.txt
-faststack/test_report*.log
-faststack/test_results.txt
-faststack/smoke_test_output.txt
-faststack/verify_result.txt
-
+**/*fail*.txt
+**/*final*.txt
