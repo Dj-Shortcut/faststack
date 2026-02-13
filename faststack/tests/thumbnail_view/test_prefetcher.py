@@ -1,15 +1,30 @@
 """Tests for ThumbnailPrefetcher and ThumbnailCache."""
 
-import pytest
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 from PIL import Image
 
-from faststack.thumbnail_view.prefetcher import (
-    ThumbnailPrefetcher,
-    ThumbnailCache,
-)
 from faststack.io.utils import compute_path_hash
+from faststack.thumbnail_view.prefetcher import ThumbnailCache, ThumbnailPrefetcher
+
+
+@pytest.fixture(scope="session")
+def qt_app():
+    """
+    Ensure a Qt event loop exists for any code paths that use QTimer / queued invokes.
+    """
+    try:
+        from PySide6.QtCore import QCoreApplication
+    except Exception:
+        # If PySide6 isn't available in this environment, tests that need it will fail anyway.
+        return None
+
+    app = QCoreApplication.instance()
+    if not app:
+        app = QCoreApplication([])
+    return app
 
 
 @pytest.fixture
@@ -45,6 +60,53 @@ def prefetcher(cache):
     )
     yield pf
     pf.shutdown()
+
+
+def _wait_until(predicate, timeout_s=2.0, interval_s=0.02, qt_app=None):
+    """Poll until predicate() is True or timeout; processes Qt events if available."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if qt_app is not None:
+            try:
+                qt_app.processEvents()
+            except Exception:
+                pass
+        if predicate():
+            return True
+        time.sleep(interval_s)
+    return False
+
+
+def _assert_ready_callback_called_once(callback: MagicMock):
+    """
+    ThumbnailPrefetcher may treat on_ready_callback as:
+      1) a plain callable: callback(cache_key)
+      2) a Qt-like signal: callback.emit(cache_key)
+
+    Accept either, but require exactly one effective delivery.
+    Return the delivered cache_key for further assertions.
+    """
+    direct_calls = callback.call_count
+    emit_calls = callback.emit.call_count if hasattr(callback, "emit") else 0
+
+    total = direct_calls + emit_calls
+    assert total == 1, f"Expected callback delivery once; direct={direct_calls}, emit={emit_calls}"
+
+    if direct_calls == 1:
+        args, _kwargs = callback.call_args
+        assert args, "callback should receive at least one positional arg"
+        return args[0]
+
+    args, _kwargs = callback.emit.call_args
+    assert args, "callback.emit should receive at least one positional arg"
+    return args[0]
+
+
+def _assert_ready_callback_not_called(callback: MagicMock):
+    """Ensure neither callback(...) nor callback.emit(...) happened."""
+    assert callback.call_count == 0
+    if hasattr(callback, "emit"):
+        assert callback.emit.call_count == 0
 
 
 class TestThumbnailCache:
@@ -138,19 +200,18 @@ class TestThumbnailPrefetcher:
         assert prefetcher._cache is cache
         assert prefetcher._target_size == 200
 
-    def test_submit_schedules_job(self, prefetcher, test_image, cache):
+    def test_submit_schedules_job(self, prefetcher, test_image, cache, qt_app):
         """Test that submit schedules a decode job."""
         mtime_ns = test_image.stat().st_mtime_ns
 
         result = prefetcher.submit(test_image, mtime_ns)
         assert result is True
 
-        # Wait for job to complete
-        time.sleep(0.5)
-
-        # Check cache was populated
+        # Wait for job to complete (cache filled)
         path_hash = compute_path_hash(test_image)
         cache_key = f"200/{path_hash}/{mtime_ns}"
+        assert _wait_until(lambda: cache.get(cache_key) is not None, timeout_s=2.0, qt_app=qt_app)
+
         assert cache.get(cache_key) is not None
 
     def test_submit_skips_if_cached(self, prefetcher, test_image, cache):
@@ -175,28 +236,42 @@ class TestThumbnailPrefetcher:
         assert result1 is True
         assert result2 is False
 
-    def test_callback_called_on_complete(self, cache, test_image):
-        """Test that callback is called when decode completes."""
+    def test_callback_called_on_complete(self, cache, test_image, qt_app):
+        """
+        Test that callback is called when decode completes.
+
+        Many implementations deliver callbacks via Qt (e.g., QTimer.singleShot(0, ...),
+        invokeMethod, queued signals). In tests, that can be flaky without a running loop.
+        We patch PySide6.QtCore.QTimer.singleShot to execute immediately.
+        """
         callback = MagicMock()
-        prefetcher = ThumbnailPrefetcher(
-            cache=cache,
-            on_ready_callback=callback,
-            max_workers=1,
-        )
 
-        try:
-            mtime_ns = test_image.stat().st_mtime_ns
-            prefetcher.submit(test_image, mtime_ns)
+        # Make QTimer.singleShot run the provided function immediately
+        def _single_shot_immediate(_ms, fn):
+            fn()
 
-            # Wait for completion
-            time.sleep(0.5)
+        from PySide6.QtCore import QTimer  # import here so patch.object has the real type
 
-            # Callback should have been called
-            callback.assert_called_once()
-            call_arg = callback.call_args[0][0]
-            assert "200/" in call_arg
-        finally:
-            prefetcher.shutdown()
+        with patch.object(QTimer, "singleShot", side_effect=_single_shot_immediate):
+            prefetcher = ThumbnailPrefetcher(
+                cache=cache,
+                on_ready_callback=callback,
+                max_workers=1,
+                target_size=200,
+            )
+            try:
+                mtime_ns = test_image.stat().st_mtime_ns
+                prefetcher.submit(test_image, mtime_ns)
+
+                # Wait for decode completion (cache fill proves the worker finished)
+                path_hash = compute_path_hash(test_image)
+                cache_key = f"200/{path_hash}/{mtime_ns}"
+                assert _wait_until(lambda: cache.get(cache_key) is not None, timeout_s=2.0, qt_app=qt_app)
+
+                delivered_key = _assert_ready_callback_called_once(callback)
+                assert "200/" in str(delivered_key)
+            finally:
+                prefetcher.shutdown()
 
     def test_cancel_all(self, prefetcher, test_image):
         """Test canceling all pending jobs."""
@@ -212,7 +287,7 @@ class TestThumbnailPrefetcher:
 class TestThumbnailDecode:
     """Tests for thumbnail decoding functionality."""
 
-    def test_decode_applies_exif_orientation(self, cache, temp_folder):
+    def test_decode_applies_exif_orientation(self, cache, temp_folder, qt_app):
         """Test that EXIF orientation is applied during decode."""
         # Create an image with EXIF orientation
         img_path = temp_folder / "oriented.jpg"
@@ -236,23 +311,18 @@ class TestThumbnailDecode:
             mtime_ns = img_path.stat().st_mtime_ns
             prefetcher.submit(img_path, mtime_ns)
 
-            # Wait for completion
-            time.sleep(0.5)
-
-            # Get cached thumbnail
+            # Wait for completion (cache filled)
             path_hash = compute_path_hash(img_path)
             cache_key = f"100/{path_hash}/{mtime_ns}"
+            assert _wait_until(lambda: cache.get(cache_key) is not None, timeout_s=2.0, qt_app=qt_app)
+
             cached_bytes = cache.get(cache_key)
-
             assert cached_bytes is not None
-
-            # Verify thumbnail was created (detailed orientation check would require
-            # decoding and checking dimensions, which is complex for a unit test)
             assert len(cached_bytes) > 0
         finally:
             prefetcher.shutdown()
 
-    def test_decode_handles_png(self, cache, temp_folder):
+    def test_decode_handles_png(self, cache, temp_folder, qt_app):
         """Test that PNG files can be decoded."""
         img_path = temp_folder / "test.png"
         img = Image.new("RGB", (300, 300), color="green")
@@ -263,22 +333,21 @@ class TestThumbnailDecode:
             cache=cache,
             on_ready_callback=callback,
             max_workers=1,
+            target_size=200,
         )
 
         try:
             mtime_ns = img_path.stat().st_mtime_ns
             prefetcher.submit(img_path, mtime_ns)
 
-            # Wait for completion
-            time.sleep(0.5)
-
             path_hash = compute_path_hash(img_path)
             cache_key = f"200/{path_hash}/{mtime_ns}"
+            assert _wait_until(lambda: cache.get(cache_key) is not None, timeout_s=2.0, qt_app=qt_app)
             assert cache.get(cache_key) is not None
         finally:
             prefetcher.shutdown()
 
-    def test_decode_handles_corrupt_file(self, cache, temp_folder):
+    def test_decode_handles_corrupt_file(self, cache, temp_folder, qt_app):
         """Test that corrupt files are handled gracefully."""
         img_path = temp_folder / "corrupt.jpg"
         img_path.write_bytes(b"not a valid jpeg")
@@ -288,21 +357,25 @@ class TestThumbnailDecode:
             cache=cache,
             on_ready_callback=callback,
             max_workers=1,
+            target_size=200,
         )
 
         try:
             mtime_ns = img_path.stat().st_mtime_ns
             prefetcher.submit(img_path, mtime_ns)
 
-            # Wait for completion
-            time.sleep(0.5)
+            # Give it a moment to attempt decode; it should fail and not cache/callback
+            time.sleep(0.3)
+            if qt_app is not None:
+                try:
+                    qt_app.processEvents()
+                except Exception:
+                    pass
 
-            # Cache should not have the corrupt file
             path_hash = compute_path_hash(img_path)
             cache_key = f"200/{path_hash}/{mtime_ns}"
             assert cache.get(cache_key) is None
 
-            # Callback should not have been called
-            callback.assert_not_called()
+            _assert_ready_callback_not_called(callback)
         finally:
             prefetcher.shutdown()

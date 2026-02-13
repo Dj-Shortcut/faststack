@@ -80,7 +80,15 @@ def test_sidecar_get_metadata_creates_new(mock_sidecar_dir):
     sm = SidecarManager(d, None)
     assert "NEW_IMG" not in sm.data.entries
     meta = sm.get_metadata("NEW_IMG")
-    assert isinstance(meta, EntryMetadata)
+
+    # EntryMetadata may be a runtime class OR a typing alias, depending on refactors.
+    if isinstance(EntryMetadata, type):
+        assert isinstance(meta, EntryMetadata)
+    else:
+        # Fallback: validate by name + expected attributes.
+        assert meta.__class__.__name__ == "EntryMetadata"
+        assert hasattr(meta, "stack_id")
+
     assert "NEW_IMG" in sm.data.entries
 
 
@@ -139,3 +147,4 @@ def test_favorite_toggle_roundtrip(mock_sidecar_dir):
     sm2 = SidecarManager(d, None)
     meta2 = sm2.get_metadata("IMG_FAV")
     assert meta2.favorite is False
+

@@ -18,6 +18,7 @@ def make_editor_with_image() -> ImageEditor:
     ed.float_image = img.copy()
     # Ensure current_edits exists (ImageEditor usually sets it)
     ed.current_edits = ed._initial_edits()
+    ed.original_image = MagicMock()
     return ed
 
 

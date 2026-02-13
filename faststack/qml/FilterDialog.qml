@@ -84,6 +84,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#4fc3f7"
+                onCheckedChanged: _collectFlags()
             }
             CheckBox {
                 id: cbStacked
@@ -91,6 +92,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#81c784"
+                onCheckedChanged: _collectFlags()
             }
             CheckBox {
                 id: cbEdited
@@ -98,6 +100,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#ffb74d"
+                onCheckedChanged: _collectFlags()
             }
             CheckBox {
                 id: cbRestacked
@@ -105,6 +108,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#ce93d8"
+                onCheckedChanged: _collectFlags()
             }
             CheckBox {
                 id: cbFavorite
@@ -112,6 +116,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#ffd54f"
+                onCheckedChanged: _collectFlags()
             }
         }
 
@@ -136,7 +141,7 @@ Dialog {
     }
 
     onAccepted: {
-        _collectFlags()
+        // Flags are now collected live via onCheckedChanged
     }
 
     onOpened: {

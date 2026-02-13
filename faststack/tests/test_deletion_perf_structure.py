@@ -6,6 +6,13 @@ from pathlib import Path
 from faststack.app import AppController
 from faststack.models import ImageFile
 
+from PySide6.QtWidgets import QApplication
+import sys
+
+# Ensure QApplication exists before AppController is imported/used in tests
+if not QApplication.instance():
+    _qapp = QApplication(sys.argv)
+
 @pytest.fixture
 def mock_app():
     """Create a partial mock of AppController for deletion testing."""
@@ -22,54 +29,78 @@ def mock_app():
         mock_engine = MagicMock()
         app = AppController(Path("."), mock_engine)
         app.image_cache = MagicMock()
+        # Ensure evict_paths is a method on the mock
+        app.image_cache.evict_paths = MagicMock()
         app.prefetcher = MagicMock()
         app._thumbnail_model = MagicMock()
         app._path_resolver = MagicMock()
         app._path_to_index = {}
         app.sidecar = MagicMock()
+        app._delete_executor = MagicMock()
         
         # Mock PathResolver update to verify no resolve calls
         return app
 
-def test_delete_uses_targeted_eviction(mock_app):
+def test_delete_uses_targeted_eviction():
     """Verify delete_indices calls evict_paths and NOT clear."""
-    # Setup
-    img1 = ImageFile(Path("c:/images/img1.jpg"), raw_pair=Path("c:/images/img1.CR2"))
-    img2 = ImageFile(Path("c:/images/img2.jpg"))
-    mock_app.image_files = [img1, img2]
-    mock_app._path_to_index = {
-        mock_app._key(img1.path): 0,
-        mock_app._key(img2.path): 1
-    }
-    mock_app.current_index = 0
-    mock_app.display_generation = 10
-    
-    # Mock deletion executor
-    mock_app._delete_executor = MagicMock()
-    mock_app._delete_executor.submit.return_value = MagicMock()
-    
-    # Act
-    # indices to delete: [0] (img1)
-    summary = mock_app._delete_indices([0], "test")
-    
-    # Assert
-    # 1. Should not clear entire cache
-    mock_app.image_cache.clear.assert_not_called()
-    
-    # 2. Should not bump display generation
-    assert mock_app.display_generation == 10
-    
-    # 3. Should call evict_paths with correct paths
-    # Note: unordered check because implementation might vary order
-    mock_app.image_cache.evict_paths.assert_called_once()
-    args, _ = mock_app.image_cache.evict_paths.call_args
-    evicted = args[0]
-    assert len(evicted) == 2
-    assert img1.path in evicted
-    assert img1.raw_pair in evicted
-    
-    # 4. Should cancel prefetch
-    mock_app.prefetcher.cancel_all.assert_called_once()
+    # Setup - use real controller with patched subsystems
+    with patch("faststack.app.ByteLRUCache") as MockCache, \
+         patch("faststack.app.ThumbnailModel") as MockModel, \
+         patch("faststack.app.Prefetcher") as MockPrefetcher, \
+         patch("faststack.app.PathResolver") as MockResolver, \
+         patch("faststack.app.Watcher"), \
+         patch("faststack.app.uuid"), \
+         patch("faststack.app.QTimer"), \
+         patch("faststack.app.concurrent.futures.ThreadPoolExecutor") as MockExecutor:
+        
+        mock_engine = MagicMock()
+        app = AppController(Path("."), mock_engine)
+        
+        # Configure mocks
+        app.image_cache = MagicMock()
+        app.prefetcher = MagicMock()
+        # Ensure evict_paths is a method on the cache mock
+        app.image_cache.evict_paths = MagicMock()
+        
+        # Setup data
+        img1 = ImageFile(Path("c:/images/img1.jpg"), raw_pair=Path("c:/images/img1.CR2"))
+        img2 = ImageFile(Path("c:/images/img2.jpg"))
+        app.image_files = [img1, img2]
+        
+        # Manually populate path index since we bypassed load()
+        app._path_to_index = {
+            app._key(img1.path): 0,
+            app._key(img2.path): 1
+        }
+        app.current_index = 0
+        app.display_generation = 10
+        
+        print("DEBUG: Calling _delete_indices")
+        # Act
+        summary = app._delete_indices([0], "test")
+        print("DEBUG: Returned from _delete_indices")
+        
+        # Assert
+        # 1. Should not clear entire cache
+        app.image_cache.clear.assert_not_called()
+        
+        # 2. Should not bump display generation (targeted update handled elsewhere)
+        # Note: optimistic deletion might bump generation if it triggers refresh, 
+        # but here we check it doesn't do a full destructive clear that resets everything.
+        # Actually _delete_indices does NOT bump display_generation itself, 
+        # that happens in undo or refresh.
+        assert app.display_generation == 10
+        
+        # 3. Should call evict_paths with correct paths
+        app.image_cache.evict_paths.assert_called_once()
+        args, _ = app.image_cache.evict_paths.call_args
+        evicted = args[0]
+        assert len(evicted) == 2
+        assert img1.path in evicted
+        assert img1.raw_pair in evicted
+        
+        # 4. Should cancel prefetch
+        app.prefetcher.cancel_all.assert_called_once()
 
 def test_evict_paths_windows_handling():
     """Verify ByteLRUCache.evict_paths handles Windows paths correctly."""
@@ -111,8 +142,7 @@ def test_model_hashing_no_resolve():
     from faststack.models import ImageFile as ModelImageFile
     
     # Mock Path.resolve to raise exception
-    with patch("faststack.io.utils.Path.resolve", side_effect=Exception("Should not call resolve!")):
-        with patch("faststack.thumbnail_view.model.Path.resolve", side_effect=Exception("Should not call resolve!")):
+    with patch("pathlib.Path.resolve", side_effect=Exception("Should not call resolve!")):
              # Note: we need to patch wherever usage might occur or globally.
              # Since we changed code to NOT use it, calling the methods should be safe.
              

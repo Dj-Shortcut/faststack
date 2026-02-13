@@ -1,7 +1,0 @@
-﻿============================= test session starts =============================
-platform win32 -- Python 3.12.10, pytest-9.0.2, pluggy-1.6.0
-rootdir: C:\code\faststack
-configfile: pyproject.toml
-collected 2 items
-
-tests\test_refresh_optimization.py 

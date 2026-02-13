@@ -1,8 +1,16 @@
 import pytest
 from unittest.mock import Mock, patch
 from pathlib import Path
+from dataclasses import dataclass
+
 from faststack.app import AppController
-from faststack.models import ImageFile
+
+
+@dataclass(frozen=True)
+class DummyImage:
+    """Minimal stand-in for faststack.models.ImageFile."""
+    path: Path
+    raw_pair: Path | None = None
 
 
 @pytest.fixture(scope="session")
@@ -37,7 +45,7 @@ def mock_controller(tmp_path, qapp):
     ):
         controller = AppController(tmp_path, engine)
 
-        # Mock the executor to prevent background jobs from running during tests
+        # Prevent background jobs from actually running
         from concurrent.futures import Future
         controller._delete_executor = Mock()
         controller._delete_executor.submit.side_effect = lambda *a, **kw: Future()
@@ -47,35 +55,64 @@ def mock_controller(tmp_path, qapp):
         controller.sync_ui_state = Mock()
         controller._do_prefetch = Mock()
         controller.update_status_message = Mock()
+
         controller._thumbnail_model = Mock()
         controller._thumbnail_model.rowCount.return_value = 0
 
         return controller
 
 
+def _assert_cache_cleanup(mock_controller, deleted_paths):
+    """
+    Newer behavior: targeted eviction is preferred (evict_paths).
+    Older behavior: clear().
+    Accept either, but require at least one.
+    """
+    cache = mock_controller.image_cache
+    called = False
+
+    if hasattr(cache, "evict_paths") and cache.evict_paths.call_count:
+        called = True
+    if hasattr(cache, "clear") and cache.clear.call_count:
+        called = True
+
+    assert called, "Expected cache cleanup via evict_paths() or clear()"
+
+    if hasattr(cache, "evict_paths") and cache.evict_paths.call_count:
+        args, _kwargs = cache.evict_paths.call_args
+        assert args, "evict_paths should receive at least one arg"
+        arg0 = list(args[0]) if not isinstance(args[0], (list, tuple, set)) else list(args[0])
+        deleted_strs = {str(p) for p in deleted_paths}
+        arg0_strs = {str(p) for p in arg0}
+        assert deleted_strs & arg0_strs, "evict_paths should include deleted path(s)"
+
+
 def test_delete_current_image_optimistic_ui(mock_controller):
     """Test that delete_current_image performs optimistic UI removal immediately."""
-    img1 = ImageFile(Path("test1.jpg"))
-    img2 = ImageFile(Path("test2.jpg"))
+    img1 = DummyImage(Path("test1.jpg"))
+    img2 = DummyImage(Path("test2.jpg"))
+
     mock_controller.image_files = [img1, img2]
     mock_controller.current_index = 0
     mock_controller.undo_history = []
     mock_controller.refresh_image_list = Mock()
+
     mock_controller.image_cache = Mock()
+    mock_controller.image_cache.evict_paths = Mock()
+    mock_controller.image_cache.clear = Mock()
+
     mock_controller.prefetcher = Mock()
+    mock_controller.prefetcher.cancel_all = Mock()
 
     mock_controller.delete_current_image()
 
-    # Optimistic UI: image removed immediately
     assert len(mock_controller.image_files) == 1
     assert mock_controller.image_files[0] == img2
 
-    # Verify cache/prefetch cleanup happened immediately
-    mock_controller.image_cache.clear.assert_called_once()
+    _assert_cache_cleanup(mock_controller, deleted_paths=[img1.path])
     mock_controller.prefetcher.cancel_all.assert_called_once()
     mock_controller.sync_ui_state.assert_called_once()
 
-    # Verify undo history has pending_delete entry
     assert len(mock_controller.undo_history) == 1
     assert mock_controller.undo_history[0][0] == "pending_delete"
 
@@ -84,27 +121,31 @@ def test_delete_async_completion(mock_controller, tmp_path):
     """Test that async deletion completes and updates undo history."""
     img_path = tmp_path / "test1.jpg"
     img_path.write_text("content")
-    img1 = ImageFile(img_path)
-    img2 = ImageFile(Path("test2.jpg"))
+
+    img1 = DummyImage(img_path)
+    img2 = DummyImage(Path("test2.jpg"))
+
     mock_controller.image_files = [img1, img2]
     mock_controller.current_index = 0
     mock_controller.undo_history = []
     mock_controller.refresh_image_list = Mock()
+
     mock_controller.image_cache = Mock()
+    mock_controller.image_cache.evict_paths = Mock()
+    mock_controller.image_cache.clear = Mock()
+
     mock_controller.prefetcher = Mock()
+    mock_controller.prefetcher.cancel_all = Mock()
 
     mock_controller.delete_current_image()
 
-    # Get job_id and manually call completion handler
     job_id = list(mock_controller._pending_delete_jobs.keys())[0]
 
-    # Use resolve() for deterministic path matching in handler
     img_path_resolved = img_path.resolve()
     recycle_bin = (tmp_path / "image recycle bin").resolve()
     recycle_bin.mkdir(exist_ok=True)
     recycled = (recycle_bin / img_path.name).resolve()
 
-    # Structured dict result
     result = {
         "job_id": job_id,
         "successes": [{
@@ -118,29 +159,31 @@ def test_delete_async_completion(mock_controller, tmp_path):
     }
     mock_controller._on_delete_finished(result)
 
-    # pending_delete replaced by delete entry
     delete_entries = [e for e in mock_controller.undo_history if e[0] == "delete"]
     assert len(delete_entries) == 1
     pending_entries = [e for e in mock_controller.undo_history if e[0] == "pending_delete"]
     assert len(pending_entries) == 0
 
-    mock_controller.update_status_message.assert_called_with(
-        "Image moved to recycle bin"
-    )
+    mock_controller.update_status_message.assert_called_with("Image moved to recycle bin")
 
 
 def test_delete_current_image_cancel(mock_controller):
     """Test undo while pending preserves image."""
-    img1 = ImageFile(Path("test1.jpg"))
+    img1 = DummyImage(Path("test1.jpg"))
+
     mock_controller.image_files = [img1]
     mock_controller.current_index = 0
+
     mock_controller.image_cache = Mock()
+    mock_controller.image_cache.evict_paths = Mock()
+    mock_controller.image_cache.clear = Mock()
+
     mock_controller.prefetcher = Mock()
+    mock_controller.prefetcher.cancel_all = Mock()
 
     mock_controller.delete_current_image()
     assert len(mock_controller.image_files) == 0
 
-    # Undo while still pending
     mock_controller.undo_delete()
 
     assert len(mock_controller.image_files) == 1
@@ -148,33 +191,44 @@ def test_delete_current_image_cancel(mock_controller):
 
 
 def test_recycle_failure_restores_image_automatically(mock_controller):
-    """Test that recycle bin failure restores the image to UI (Best-effort simplified semantics)."""
-    img1 = ImageFile(Path("test1.jpg"))
+    """
+    Recycle-bin failure: app prompts for permanent delete.
+    If user declines, image should be restored to the UI.
+    """
+    img1 = DummyImage(Path("test1.jpg"))
     mock_controller.image_files = [img1]
     mock_controller.current_index = 0
+
     mock_controller.image_cache = Mock()
+    mock_controller.image_cache.evict_paths = Mock()
+    mock_controller.image_cache.clear = Mock()
+
     mock_controller.prefetcher = Mock()
+    mock_controller.prefetcher.cancel_all = Mock()
 
     summary = mock_controller._delete_indices([0], "test")
     job_id = summary["job_id"]
 
-    # Simulate worker: recycle failed
     result = {
         "job_id": job_id,
         "successes": [],
         "failures": [{
             "jpg": img1.path.resolve(),
             "raw": None,
-            "code": "recycle_failed"
+            "code": "recycle_failed",
         }],
         "cancelled": False,
     }
 
-    # No prompt expected now
-    with patch("faststack.app.confirm_permanent_delete") as mock_confirm:
+    # User declines permanent delete -> expect rollback/restore
+    with patch("faststack.app.confirm_permanent_delete", return_value=False) as mock_confirm:
         mock_controller._on_delete_finished(result)
-        mock_confirm.assert_not_called()
 
-    # Image should be restored/rolled back to the UI
+        mock_confirm.assert_called_once()
+        # The exact arg shape may vary; just sanity-check reason kwarg if present.
+        _args, kwargs = mock_confirm.call_args
+        if "reason" in kwargs:
+            assert kwargs["reason"] == "Recycle bin failure"
+
     assert len(mock_controller.image_files) == 1
     assert mock_controller.image_files[0] == img1

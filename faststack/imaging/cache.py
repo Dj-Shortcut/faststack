@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 import time
+import threading
 from cachetools import LRUCache
 
 
@@ -22,6 +23,7 @@ class ByteLRUCache(LRUCache):
     ):
         super().__init__(maxsize=max_bytes, getsizeof=size_of)
         self.on_evict = on_evict
+        self._lock = threading.RLock()
         # Tombstones to prevent race conditions where a deleted image is re-cached
         # by a lingering background thread.
         # Set of prefixes that are currently "tombstoned" (forbidden from caching).
@@ -44,37 +46,55 @@ class ByteLRUCache(LRUCache):
         log.debug(f"Cache max_bytes updated to {v / 1024**2:.2f} MB")
 
     def __setitem__(self, key, value):
-        # Check tombstones - prevent caching if key starts with a tombstoned prefix
-        # This is critical for preventing "ghost" images after deletion
-        if self._tombstones:
-            key_str = str(key)
-            # Fast check: iterate tombstones (usually very few)
-            # Remove expired tombstones lazily
-            now = time.monotonic()
-            expired = [p for p, expiry in self._tombstone_expiry.items() if now > expiry]
-            for p in expired:
-                self._tombstones.discard(p)
-                del self._tombstone_expiry[p]
+        with self._lock:
+            # Check tombstones - prevent caching if key starts with a tombstoned prefix
+            # This is critical for preventing "ghost" images after deletion
+            if self._tombstones:
+                key_str = str(key)
+                # Fast check: iterate tombstones (usually very few)
+                # Remove expired tombstones lazily
+                now = time.monotonic()
+                expired = [p for p, expiry in self._tombstone_expiry.items() if now > expiry]
+                for p in expired:
+                    self._tombstones.discard(p)
+                    del self._tombstone_expiry[p]
 
-            for prefix in self._tombstones:
-                if key_str.startswith(prefix):
-                    log.debug(f"Refusing to cache tombstoned key: {key}")
-                    return
+                for prefix in self._tombstones:
+                    if key_str.startswith(prefix):
+                        log.debug(f"Refusing to cache tombstoned key: {key}")
+                        return
 
-        # Before adding a new item, we might need to evict others
-        # This is handled by the parent class, which will call popitem if needed
-        super().__setitem__(key, value)
-        log.debug(f"Cached item '{key}'. Cache size: {self.currsize / 1024**2:.2f} MB")
+            # Before adding a new item, we might need to evict others
+            # This is handled by the parent class, which will call popitem if needed
+            super().__setitem__(key, value)
+            log.debug(f"Cached item '{key}'. Cache size: {self.currsize / 1024**2:.2f} MB")
+
+    def __getitem__(self, key):
+        """Thread-safe access (updates LRU order)."""
+        with self._lock:
+            return super().__getitem__(key)
+
+    def __contains__(self, key):
+        """Thread-safe existence check."""
+        with self._lock:
+            return super().__contains__(key)
+
+    def get(self, key, default=None):
+        """Thread-safe get."""
+        with self._lock:
+            return super().get(key, default)
 
     def popitem(self):
         """Extend popitem to log eviction."""
-        key, value = super().popitem()
-        log.debug(
-            f"Evicted item '{key}'. Cache size after eviction: {self.currsize / 1024**2:.2f} MB"
-        )
+        with self._lock:
+            key, value = super().popitem()
+            log.debug(
+                f"Evicted item '{key}'. Cache size after eviction: {self.currsize / 1024**2:.2f} MB"
+            )
+            callback = self.on_evict
 
-        if self.on_evict:
-            self.on_evict()
+        if callback:
+            callback()
 
         # In a real Qt app, `value` would be a tuple like (numpy_buffer, qtexture_id)
         # and we would explicitly free the GPU texture here.
@@ -83,12 +103,13 @@ class ByteLRUCache(LRUCache):
     def clear(self):
         """Clear cache without triggering eviction callbacks."""
         # Temporarily disable callback to prevent "thrashing" warnings during mass clear
-        callback = self.on_evict
-        self.on_evict = None
-        try:
-            super().clear()
-        finally:
-            self.on_evict = callback
+        with self._lock:
+            callback = self.on_evict
+            self.on_evict = None
+            try:
+                super().clear()
+            finally:
+                self.on_evict = callback
 
     def pop_path(self, path: Union[Path, str]):
         """Targeted invalidation of all generations for a given path.
@@ -106,18 +127,19 @@ class ByteLRUCache(LRUCache):
             pass
 
         keys_to_remove = []
-        # Use list(self.keys()) to avoid mutation during iteration
-        for key in list(self.keys()):
-            key_str = str(key)
-            # Match exact path or path::generation pattern
-            for t in targets:
-                t_str = str(t)
-                if key_str == t_str or key_str.startswith(f"{t_str}::"):
-                    keys_to_remove.append(key)
-                    break
+        with self._lock:
+            # Use list(self.keys()) to avoid mutation during iteration
+            for key in list(self.keys()):
+                key_str = str(key)
+                # Match exact path or path::generation pattern
+                for t in targets:
+                    t_str = str(t)
+                    if key_str == t_str or key_str.startswith(f"{t_str}::"):
+                        keys_to_remove.append(key)
+                        break
 
-        for k in keys_to_remove:
-            self.pop(k, None)
+            for k in keys_to_remove:
+                self.pop(k, None)
 
         if keys_to_remove:
             log.debug(
@@ -150,38 +172,43 @@ class ByteLRUCache(LRUCache):
         if not prefixes:
             return
 
-        # 2. Add tombstones immediately to block re-insertion
-        now = time.monotonic()
-        ttl = 5.0  # Block re-caching for 5 seconds
-        for prefix in prefixes:
-            self._tombstones.add(prefix)
-            self._tombstone_expiry[prefix] = now + ttl
+        with self._lock:
+            # 2. Add tombstones immediately to block re-insertion
+            now = time.monotonic()
+            ttl = 5.0  # Block re-caching for 5 seconds
+            for prefix in prefixes:
+                self._tombstones.add(prefix)
+                self._tombstone_expiry[prefix] = now + ttl
 
-        # 3. Optimistic scan: iterate keys once and collect matches
-        # Convert prefixes to tuple for fast startswith check
-        prefix_tuple = tuple(prefixes)
-        
-        keys_to_remove = []
-        for key in list(self.keys()):
-            # Keys are strings like "path/to/file.jpg::0"
-            if str(key).startswith(prefix_tuple):
-                keys_to_remove.append(key)
+            # 3. Optimistic scan: iterate keys once and collect matches
+            # Convert prefixes to tuple for fast startswith check
+            prefix_tuple = tuple(prefixes)
+            
+            keys_to_remove = []
+            for key in list(self.keys()):
+                # Keys are strings like "path/to/file.jpg::0"
+                if str(key).startswith(prefix_tuple):
+                    keys_to_remove.append(key)
 
-        # 4. Remove keys
-        removed_bytes = 0
-        for k in keys_to_remove:
-            # We need size before removal to log correctly?
-            # LRUCache.pop returns value. We can ask getsizeof(value) but pop removes it anyway.
-            # ByteLRUCache tracks currsize. We can diff currsize.
-            # But simpler: just trust currsize updates.
-            # We want to log *how much* we removed.
-            # Accessing self.getsizeof(val) needs val.
-            # val = self.pop(k) would work.
-            if k in self:
-                val = self[k]
-                size = self.getsizeof(val)
-                removed_bytes += size
-                self.pop(k, None)
+            # 4. Remove keys
+            removed_bytes = 0
+            for k in keys_to_remove:
+                # We need size before removal to log correctly?
+                # LRUCache.pop returns value. We can ask getsizeof(value) but pop removes it anyway.
+                # ByteLRUCache tracks currsize. We can diff currsize.
+                # But simpler: just trust currsize updates.
+                # We want to log *how much* we removed.
+                # Accessing self.getsizeof(val) needs val.
+                # val = self.pop(k) would work.
+                # We want to log *how much* we removed.
+                if k in self:
+                    # Pop first to avoid updating LRU order with self[k]
+                    val = self.pop(k)
+                    try:
+                        size = get_decoded_image_size(val)
+                    except Exception:
+                        size = 0  # Fallback
+                    removed_bytes += size
 
         if keys_to_remove:
             log.info(
@@ -216,5 +243,5 @@ def build_cache_key(image_path: Union[Path, str], display_generation: int) -> st
     if isinstance(image_path, Path):
         path_str = image_path.as_posix()
     else:
-        path_str = str(image_path)
+        path_str = str(image_path).replace("\\", "/")
     return f"{path_str}::{display_generation}"

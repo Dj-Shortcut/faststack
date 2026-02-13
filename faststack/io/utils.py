@@ -13,6 +13,8 @@ def normalize_path_key(path: Union[Path, str]) -> str:
     """
     # str(path) converts Path to string using native separators (e.g. \ on Windows)
     p_str = str(path)
+    # normalize separators to current OS standard first (handles mixed usage)
+    p_str = p_str.replace("/", os.sep).replace("\\", os.sep)
     # os.path.normcase on Windows: lowercases and converts / to \
     # os.path.normcase on Linux: returns as-is
     # os.path.abspath: ensures absolute path and collapses ..

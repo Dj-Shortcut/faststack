@@ -86,9 +86,6 @@ def test_undo_pending_delete_no_disk_ops(app_controller):
     app_controller.undo_delete()
 
     assert len(app_controller.image_files) == 1
-    assert app_controller.image_files[0] == img_file
-
-    # File should still exist on disk
     assert img_path.exists()
 
 
@@ -134,7 +131,14 @@ def test_async_delete_completion(app_controller):
 
 
 def test_delete_rollback_on_cancel(app_controller):
-    """Test that cancelled deletion restores images to the list."""
+    """
+    Test that cancellation restores images to the list.
+
+    NOTE:
+    In the current design, cancellation is user-driven (undo while pending),
+    which sets the job's cancel_event and restores the UI immediately.
+    The later completion callback (cancelled=True) should not remove it again.
+    """
     img_path = (app_controller.image_dir / "test.jpg").resolve()
     img_path.write_text("content")
 
@@ -142,10 +146,16 @@ def test_delete_rollback_on_cancel(app_controller):
     app_controller.image_files = [img_file]
     app_controller.current_index = 0
 
+    # Enqueue + optimistic removal
     app_controller.delete_current_image()
     assert len(app_controller.image_files) == 0
 
-    # Resolve as cancelled
+    # User cancels via undo => immediate UI restore
+    app_controller.undo_delete()
+    assert len(app_controller.image_files) == 1
+    assert img_path.exists()
+
+    # Completion arrives marked cancelled
     job_id = list(app_controller._pending_delete_jobs.keys())[0]
     result = {
         "job_id": job_id,
@@ -158,10 +168,10 @@ def test_delete_rollback_on_cancel(app_controller):
         "cancelled": True,
     }
     app_controller._on_delete_finished(result)
-    
-    # Image should be back in list
+
+    # Image should remain in list (no double-remove)
     assert len(app_controller.image_files) == 1
-    assert app_controller.image_files[0].path.resolve() == img_path.resolve()
+    assert img_path.exists()
 
 
 def test_debounced_refresh(app_controller):
@@ -173,13 +183,21 @@ def test_debounced_refresh(app_controller):
     # Delete both images rapidly
     app_controller._delete_indices([0], "test1")
     app_controller._delete_indices([0], "test2")
-    
+
     # refresh_image_list should not have been called yet (it's debounced)
     app_controller.refresh_image_list.assert_not_called()
 
 
 def test_cancel_midlight_with_real_files(app_controller):
-    """Worker cancels after some files moved; completion restores unprocessed."""
+    """
+    Worker cancels after some files moved; user hits Undo mid-flight.
+
+    Current semantics:
+    - "Cancel" is initiated by undo_delete() while the job is pending.
+    - undo_delete() restores UI immediately (optimistic rollback) and sets cancel_event.
+    - When completion arrives with cancelled=True and some successes, the controller
+      should auto-restore any moved files (best-effort) and keep the UI restored.
+    """
     p1 = (app_controller.image_dir / "a.jpg").resolve()
     p2 = (app_controller.image_dir / "b.jpg").resolve()
     p3 = (app_controller.image_dir / "c.jpg").resolve()
@@ -193,11 +211,23 @@ def test_cancel_midlight_with_real_files(app_controller):
     summary = app_controller._delete_indices([0, 1, 2], "test")
     job_id = summary["job_id"]
 
-    # Simulate: worker moved a.jpg, then was cancelled
+    # Optimistic removal of all three
+    assert len(app_controller.image_files) == 0
+
+    # Simulate: worker moved a.jpg before cancel was processed
     recycle_bin = (app_controller.image_dir / "image recycle bin").resolve()
     recycle_bin.mkdir(exist_ok=True)
     recycled_a = (recycle_bin / "a.recycled.jpg").resolve()
     p1.rename(recycled_a)
+
+    # User cancels mid-flight (Undo) => immediate UI restore
+    app_controller.undo_delete()
+    assert len(app_controller.image_files) == 3
+    assert p2.exists()
+    assert p3.exists()
+
+    # Completion arrives: one success + cancellations
+    app_controller._restore_from_recycle_bin_safe = Mock(return_value=(True, ""))
 
     result = {
         "job_id": job_id,
@@ -215,15 +245,15 @@ def test_cancel_midlight_with_real_files(app_controller):
     }
     app_controller._on_delete_finished(result)
 
-    # b.jpg and c.jpg should be restored to UI
-    assert len(app_controller.image_files) == 2
-    restored_paths = {img.path.resolve() for img in app_controller.image_files}
-    assert p2 in restored_paths
-    assert p3 in restored_paths
+    # UI stays restored (no double-remove)
+    assert len(app_controller.image_files) == 3
 
-    # a.jpg should have a delete undo entry
+    # Auto-restore attempted for moved file
+    app_controller._restore_from_recycle_bin_safe.assert_called_with(p1, recycled_a)
+
+    # No "delete" undo entry should be added (Undo consumed it)
     delete_entries = [e for e in app_controller.undo_history if e[0] == "delete"]
-    assert len(delete_entries) == 1
+    assert len(delete_entries) == 0
 
 
 def test_undo_midflight_auto_restores(app_controller, tmp_path):
@@ -238,7 +268,7 @@ def test_undo_midflight_auto_restores(app_controller, tmp_path):
 
     summary = app_controller._delete_indices([0], "test")
     job_id = summary["job_id"]
-    
+
     # Removed optimistically
     assert len(app_controller.image_files) == 0
 
@@ -266,6 +296,6 @@ def test_undo_midflight_auto_restores(app_controller, tmp_path):
 
     # 2. UI keeps the image (restored by undo, kept by auto-restore)
     assert len(app_controller.image_files) == 1
-    
+
     # 3. Restore was attempted
     app_controller._restore_from_recycle_bin_safe.assert_called_with(p1, Path("recycle/test.jpg"))

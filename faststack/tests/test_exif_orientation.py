@@ -3,40 +3,26 @@ import tempfile
 import unittest
 from pathlib import Path
 from PIL import Image, ExifTags
-
-# Adjust path to import faststack
 from unittest.mock import MagicMock, patch
 import sys
 
-# Removed global sys.modules override
-sys.path.append(str(Path(__file__).parents[2]))
-
-# MOVED: from faststack.imaging.editor import ImageEditor
+from faststack.imaging.editor import ImageEditor
 
 
 class TestExifOrientation(unittest.TestCase):
     def setUp(self):
-        # Patch sys.modules safely per-test
-        self.modules_patcher = patch.dict(sys.modules, {"cv2": MagicMock()})
-        self.modules_patcher.start()
-
-        # Import internally to respect the patch
-        try:
-            from faststack.imaging.editor import ImageEditor
-
-            self.ImageEditorClass = ImageEditor
-        except ImportError:
-            # Fallback if path issues persist (shouldn't with sys.path.append)
-            raise
-
         self.test_dir = tempfile.mkdtemp()
-        self.editor = self.ImageEditorClass()
+        self.editor = ImageEditor()
+        
+        # Patch cv2 in the editor module if needed for some tests,
+        # but ImageEditor logic mainly uses PIL/numpy unless specialized.
+        # If we really need to mock cv2, we should do it on the imported module attribute.
+        self.cv2_patch = patch("faststack.imaging.editor.cv2", MagicMock())
+        self.mock_cv2 = self.cv2_patch.start()
 
     def tearDown(self):
-        self.modules_patcher.stop()
+        self.cv2_patch.stop()
         shutil.rmtree(self.test_dir)
-        # Ensure we don't pollute other tests with our mocked-import version
-        sys.modules.pop("faststack.imaging.editor", None)
 
     def _create_test_image(self, filename, orientation=1):
         """Creates a dummy JPEG with specific EXIF orientation."""
@@ -174,8 +160,10 @@ class TestExifOrientation(unittest.TestCase):
 
         # If we ARE developing a RAW, we usually want to bake in the orientation
         # or at least ensure the output is correct.
+        
+        # Current logic: We ALWAYS sanitize to 1 because we bake orientation on load.
+        # This prevents "double rotation".
 
-        # Let's test what happens currently:
         res = self.editor.save_image(write_developed_jpg=True)
         developed_path = Path(self.test_dir) / "working_source-developed.jpg"
 
@@ -183,8 +171,8 @@ class TestExifOrientation(unittest.TestCase):
             exif = dev.getexif()
             self.assertEqual(
                 exif.get(ExifTags.Base.Orientation),
-                6,
-                "Orientation preserved if no editor transforms",
+                1,
+                "Orientation should be sanitized to 1 even if no editor transforms (to prevent double rotation)",
             )
 
         # 5. Now apply an editor transform (90 deg)

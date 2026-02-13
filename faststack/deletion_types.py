@@ -12,14 +12,19 @@ from typing import Any, List, Optional, Tuple
 
 
 
-class DeletionErrorCodes:
+from enum import Enum
+
+class DeletionErrorCodes(str, Enum):
     """Standardized error codes for deletion failures."""
     RECYCLE_FAILED = "recycle_failed"
-    PERMISSION_DENIED = "Trash permission denied"
-    TRASH_FULL = "full"
+    PERMISSION_DENIED = "permission_denied"
+    TRASH_FULL = "trash_full"
     ROLLBACK_FAILED = "raw_recycle_failed_rollback_failed"
     RAW_RECYCLE_FAILED = "raw_recycle_failed"
     ROLLBACK_DEST_EXISTS = "rollback_dest_exists"
+    INVALID_WORK_ITEM = "invalid_work_item"
+    CANCELLED = "cancelled"  # Added standardized code
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -35,7 +40,7 @@ class DeleteJob:
     timestamp: float
     cancel_event: threading.Event
     previous_index: int
-    images_to_delete: List[Any]  # List[ImageFile]
+    images_to_delete: List[Any]  # List[ImageFile] objects removed from UI
     user_undone: bool = False
     undo_requested: bool = False  # Policy 1: auto-restore files on completion
     saved_batches: Optional[list] = None
@@ -68,6 +73,7 @@ class DeleteFailure:
     jpg: Optional[Path] = None
     raw: Optional[Path] = None
     code: str = ""
+    message: str = ""
 
 
 @dataclass
@@ -98,6 +104,7 @@ class DeleteResult:
         """
         if raw.get("_perm_result"):
             return cls(
+                job_id=raw.get("job_id", 0),
                 is_perm_result=True,
                 perm_success=raw.get("perm_success", []),
                 perm_fail=raw.get("perm_fail", []),
@@ -129,6 +136,7 @@ class DeleteResult:
                 jpg=_to_path(f.get("jpg")),
                 raw=_to_path(f.get("raw")),
                 code=f.get("code", ""),
+                message=f.get("message", ""),
             ))
 
         return cls(

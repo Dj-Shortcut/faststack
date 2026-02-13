@@ -2,9 +2,11 @@
 
 Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
 
-## 1.5.8 (2026-02-10)
+## 1.5.8 (2026-02-12)
 
 - Instant delete: move recycle/permanent delete to background thread; debounce refresh; improved undo handling.
+- Users can now filter by flags (uploaded/stacked/edited/restacked/favorite)
+- Fixed bugs in grid view
 
 ## 1.5.7 (2026-02-09)
 

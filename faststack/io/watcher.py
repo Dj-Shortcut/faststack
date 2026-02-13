@@ -17,13 +17,14 @@ _BACKUP_RE = re.compile(r"-backup\d*\.jpe?g$")
 
 def _is_ignored_path(path: str) -> bool:
     """Return True for paths the watcher should silently ignore."""
-    p = path.lower()
+    # Normalize separators to forward slashes for consistent checking
+    p = path.lower().replace(os.sep, "/").replace("\\", "/")
     return (
         p.endswith(".tmp")
         or p.endswith("faststack.json")
         or ".__faststack_tmp__" in p
         or _BACKUP_RE.search(p) is not None
-        or "image recycle bin" in p.split(os.sep) or "image recycle bin" in p.split("/")
+        or "image recycle bin" in p.split("/")
     )
 
 

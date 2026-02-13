@@ -90,7 +90,6 @@ from faststack.deletion_types import (
     DeleteResult,
     DeleteRecord,
     DeleteWarning,
-    DeleteWarning,
     DeleteFailure,
     DeletionErrorCodes,
 )
@@ -478,10 +477,10 @@ class AppController(QObject):
         # Fallback for RAW-only case where path is the RAW
         return img.path
 
-    @Slot(str)
-    def apply_filter(self, filter_string: str, filter_flags: list = None):
+    @Slot(str, "QVariantList")
+    def apply_filter(self, filter_string: str, filter_flags: list):
         filter_string = filter_string.strip()
-        flags = list(filter_flags) if filter_flags else []
+        flags = list(filter_flags or [])
 
         if not filter_string and not flags:
             self.clear_filter()
@@ -757,7 +756,9 @@ class AppController(QObject):
         move) are coalesced into a single ``refresh_image_list`` call.
         """
         if path:
-            key = self._key(Path(path))
+            # Defensive handling: watchdog sends str, but direct calls might send Path
+            p = path if isinstance(path, Path) else Path(path)
+            key = self._key(p)
             now = time.monotonic()
             with self._suppressed_paths_lock:
                 expiry = self._suppressed_paths.get(key)
@@ -819,9 +820,18 @@ class AppController(QObject):
         # Apply flag-based filtering (AND logic: image must have ALL checked flags)
         if self._filter_enabled and self._filter_flags:
             flags = self._filter_flags
+            # Optimize: access sidecar entries directly to avoid get_metadata overhead
+            entries = self.sidecar.data.entries
             result = []
             for img in filtered:
-                meta = self.sidecar.get_metadata(img.path.stem)
+                # Direct dict lookup is faster than get_metadata() which might create objects
+                stem = img.path.stem
+                meta = entries.get(stem)
+                if not meta:
+                    continue
+                
+                # Check if all flags are present
+                # EntryMetadata is a simple object, getattr is fast
                 if all(getattr(meta, flag, False) for flag in flags):
                     result.append(img)
             filtered = result
@@ -2053,7 +2063,10 @@ class AppController(QObject):
         indices_to_add = []
         for i, img in enumerate(self.image_files):
             meta = self.sidecar.get_metadata(img.path.stem)
-            if meta.uploaded:
+            if not meta:
+                continue
+            uploaded = meta.get("uploaded", False) if isinstance(meta, dict) else getattr(meta, "uploaded", False)
+            if uploaded:
                 indices_to_add.append(i)
 
         if not indices_to_add:
@@ -3268,11 +3281,13 @@ class AppController(QObject):
         created_bins: set = set()
         processed_count = 0
         did_cancel = False
+        cancel_index = -1
 
-        for item in images_to_delete:
+        for i, item in enumerate(images_to_delete):
             if cancel_event.is_set():
                 log.info("Delete job %d cancelled mid-flight", job_id)
                 did_cancel = True
+                cancel_index = i
                 break
 
             # Sanity Check for Problem A (AttributeError):
@@ -3280,19 +3295,26 @@ class AppController(QObject):
             # If item is (0, (path, raw)), it's a nested structure from incorrect calling code.
             if not isinstance(item, (tuple, list)) or len(item) != 2:
                 log.error("CRITICAL: _delete_worker received invalid item format: %r", item)
+                failures.append({
+                    "jpg": None,
+                    "raw": None,
+                    "code": DeletionErrorCodes.INVALID_WORK_ITEM.value,
+                })
                 continue
 
             jpg_path, raw_path = item
             
             # Robustness: if raw_path is a tuple/list, we have a nested structure error.
+            # This is a hard error — record failure and skip rather than silently recovering,
+            # which would mask upstream bugs.
             if isinstance(raw_path, (tuple, list)):
                 log.error("CRITICAL: _delete_worker received nested tuple item: %r", item)
-                # Fallback: try to extract the inner tuple if it looks right
-                # This prevents the 'tuple' object has no attribute 'exists' crash.
-                if len(raw_path) == 2 and isinstance(raw_path[0], Path):
-                     jpg_path, raw_path = raw_path
-                else:
-                    continue
+                failures.append({
+                    "jpg": str(jpg_path) if jpg_path else None,
+                    "raw": None,
+                    "code": DeletionErrorCodes.INVALID_WORK_ITEM.value,
+                })
+                continue
 
             processed_count += 1
             actual_raw_exists = bool(raw_path and raw_path.exists())
@@ -3303,7 +3325,7 @@ class AppController(QObject):
                     failures.append({
                         "jpg": jpg_path,
                         "raw": raw_path,
-                        "code": DeletionErrorCodes.RECYCLE_FAILED
+                        "code": DeletionErrorCodes.RECYCLE_FAILED.value
                     })
                     continue
 
@@ -3328,21 +3350,48 @@ class AppController(QObject):
                     "recycled_raw": recycled_raw
                 })
 
+            except PermissionError:
+                log.warning("Permission denied deleting %s", jpg_path.name)
+                failures.append({
+                    "jpg": jpg_path,
+                    "raw": raw_path,
+                    "code": DeletionErrorCodes.PERMISSION_DENIED.value
+                })
+            except OSError as e:
+                # Check for "trash full" or similar OS errors if distinguishable,
+                # otherwise treat as generic recycle failure or unknown.
+                # Windows "trash full" is hard to detect reliably without win32 api,
+                # but we can at least capture the message.
+                log.warning("OSError deleting %s: %s", jpg_path.name, e)
+                failures.append({
+                    "jpg": jpg_path,
+                    "raw": raw_path,
+                    "code": DeletionErrorCodes.RECYCLE_FAILED.value,  # Fallback to recycle failed
+                    "message": str(e)
+                })
             except Exception as e:
                 log.warning("Recycle exception for %s: %s", jpg_path.name, e)
                 failures.append({
                     "jpg": jpg_path,
                     "raw": raw_path,
-                    "code": str(e)
+                    "code": DeletionErrorCodes.UNKNOWN.value,
+                    "message": str(e)
                 })
 
         # Record unprocessed items (skipped due to cancellation)
-        for jpg_path, raw_path in images_to_delete[processed_count:]:
-            failures.append({
-                "jpg": jpg_path,
-                "raw": raw_path,
-                "code": "cancelled"
-            })
+        if did_cancel and cancel_index >= 0:
+            remaining = images_to_delete[cancel_index:]
+            for item in remaining:
+                # Re-validate shape to prevent crashes on invalid items
+                if not isinstance(item, (tuple, list)) or len(item) != 2:
+                    continue
+                
+                jpg_path, raw_path = item
+                failures.append({
+                    "jpg": jpg_path,
+                    "raw": raw_path,
+                    "code": DeletionErrorCodes.CANCELLED.value
+                })
 
         # Convert all Path objects to str before crossing signal boundary.
         # _normalize_worker_results converts back to Path on the UI thread.
@@ -3417,9 +3466,16 @@ class AppController(QObject):
         # --- Phase 2: Apply Results ---
         
         # 2a. Update suppression (prevent watcher loops for moved files)
+        # Opportunistic cleanup of expired suppression entries
         ttl = 2.0
         now = time.monotonic()
         with self._suppressed_paths_lock:
+            # Prune expired
+            expired_keys = [k for k, t in self._suppressed_paths.items() if t < now]
+            for k in expired_keys:
+                del self._suppressed_paths[k]
+
+            # Add new
             for s in result.successes:
                 if s.jpg:
                     self._suppressed_paths[self._key(s.jpg)] = now + ttl
@@ -3518,9 +3574,9 @@ class AppController(QObject):
         
         # Helper to find if a specific failure code warrants perm delete
         recycle_codes = {
-            DeletionErrorCodes.RECYCLE_FAILED,
-            DeletionErrorCodes.PERMISSION_DENIED,
-            DeletionErrorCodes.TRASH_FULL
+            DeletionErrorCodes.RECYCLE_FAILED.value,
+            DeletionErrorCodes.PERMISSION_DENIED.value,
+            DeletionErrorCodes.TRASH_FULL.value
         }
         
         # Map failure code by key for easy lookup
@@ -3535,8 +3591,8 @@ class AppController(QObject):
             # Prompt user for permanent delete
             
             # 1. Rollback non-candidates first
-            candidate_ids = {id(img) for _, img in perm_candidates}
-            to_rollback = [(i, img) for i, img in failed_indices_and_imgs if id(img) not in candidate_ids]
+            candidate_keys = {self._key(img.path) for _, img in perm_candidates}
+            to_rollback = [(i, img) for i, img in failed_indices_and_imgs if self._key(img.path) not in candidate_keys]
             
             if to_rollback:
                 self._rollback_ui_items(to_rollback, job)
@@ -3591,14 +3647,26 @@ class AppController(QObject):
         """Restore items to the UI list in correct order."""
         # Sort reverse by index to insert correctly
         # Access attributes of DeleteJob
-        items.sort(key=lambda x: x[0], reverse=True)
-        for idx, img in items:
+        for idx, img in sorted(items, key=lambda x: x[0], reverse=True):
             self.image_files.insert(min(idx, len(self.image_files)), img)
         
         # Restore selection/focus (approximated)
         self.current_index = min(job.previous_index, len(self.image_files) - 1)
         self.display_generation += 1
-        self.image_cache.clear()
+
+        # Targeted cache invalidation instead of full clear
+        if self.image_cache is not None:
+             paths_to_invalidate = []
+             for _, img in items:
+                 paths_to_invalidate.append(img.path)
+                 if img.raw_pair:
+                     paths_to_invalidate.append(img.raw_pair)
+             self.image_cache.evict_paths(paths_to_invalidate)
+
+        if self._thumbnail_model:
+            # Restore model rows (simple refresh for correctness)
+            self._thumbnail_model.refresh()
+
         if self.image_files:
             self.prefetcher.update_prefetch(self.current_index)
 
@@ -3608,21 +3676,7 @@ class AppController(QObject):
             self.batch_start_index = job.saved_batch_start_index
             self._invalidate_batch_cache()
 
-    def _finalize_perm_delete_choice(self, perm_candidates: list, real_failures: list) -> Tuple[bool, str]:
-        """Determine reason and prompt user for permanent delete."""
-        if any(f.get("code") == "raw_recycle_failed_rollback_failed" for f in real_failures):
-            reason = "Move failed for some RAW files. Rollback to original location failed for the JPEG."
-        elif any(f.get("code") == "raw_recycle_failed" for f in real_failures):
-            reason = "RAW file move failed, but JPEG was successfully restored."
-        elif any("rollback_dest_exists" in f.get("code", "") for f in real_failures):
-            reason = "File move failed and rollback was blocked because the destination already exists."
-        else:
-            reason = "Recycle bin failure or insufficient permissions."
 
-        if len(perm_candidates) == 1:
-            return confirm_permanent_delete(perm_candidates[0], reason=reason), reason
-        else:
-            return confirm_batch_permanent_delete(perm_candidates, reason=reason), reason
 
 
 
@@ -3726,7 +3780,8 @@ class AppController(QObject):
             self.current_index = min(previous_index, len(self.image_files) - 1)
 
         # Update UI immediately - this is fast since it just reads from memory
-        if self.image_cache:
+        # Check for existence, not truthiness (empty cache is falsy)
+        if self.image_cache is not None:
             # Targeted eviction: remove only deleted images and their raw pairs
             # This preserves the cache for remaining images (huge perf win)
             paths_to_evict = []
@@ -3820,7 +3875,7 @@ class AppController(QObject):
                     "job_id": job_id,
                     "successes": [],
                     "failures": [
-                        {"jpg": p, "raw": r, "code": str(e)}
+                        {"jpg": str(p) if p else None, "raw": str(r) if r else None, "code": str(e)}
                         for p, r in worker_items
                     ],
                     "cancelled": False,
@@ -4067,7 +4122,14 @@ class AppController(QObject):
 
                 self.current_index = min(previous_index, len(self.image_files) - 1)
                 self.display_generation += 1
-                self.image_cache.clear()
+                # Targeted eviction instead of full clear
+                if self.image_cache is not None:
+                     paths_to_evict = []
+                     for _, img in removed_items:
+                         paths_to_evict.append(img.path)
+                         if img.raw_pair:
+                             paths_to_evict.append(img.raw_pair)
+                     self.image_cache.evict_paths(paths_to_evict)
                 self.prefetcher.cancel_all()
                 if self.image_files:
                     self.prefetcher.update_prefetch(self.current_index)
