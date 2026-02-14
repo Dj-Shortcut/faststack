@@ -4,10 +4,13 @@ import logging
 import os
 import io
 import hashlib
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, Future
-from typing import List, Dict, Optional, Callable
 import mmap
+from pathlib import Path
+from concurrent.futures import Future
+from typing import List, Dict, Optional, Callable
+import threading
+import time
+
 
 import numpy as np
 from PIL import Image as PILImage, ImageCms
@@ -20,14 +23,13 @@ except ImportError:
     QImage = None
 
 from faststack.models import ImageFile, DecodedImage
-from faststack.imaging.jpeg import decode_jpeg_rgb, decode_jpeg_resized, TURBO_AVAILABLE
+from faststack.imaging.jpeg import decode_jpeg_rgb, decode_jpeg_resized
 from faststack.imaging.cache import build_cache_key
-from faststack.imaging.orientation import apply_exif_orientation
+from faststack.imaging.orientation import apply_orientation_to_np
 from faststack.config import config
+from faststack.util.executors import create_daemon_threadpool_executor
 
 log = logging.getLogger(__name__)
-
-import threading
 
 # ---- Option C: ICC Color Management Setup ----
 SRGB_PROFILE = ImageCms.createProfile("sRGB")
@@ -115,7 +117,11 @@ def get_monitor_profile() -> Optional[ImageCms.ImageCmsProfile]:
         return _monitor_profile_cache[monitor_icc_path]
 
 
-# apply_exif_orientation imported from orientation.py
+# apply_orientation_to_np imported from orientation.py
+
+_EXIF_ORIENTATION_TAG = 274  # Exif "Orientation"
+
+
 
 
 def apply_saturation_compensation(
@@ -179,7 +185,7 @@ class Prefetcher:
         # Rule of thumb: 2x CPU cores for I/O bound, 1x for CPU bound
         optimal_workers = min((os.cpu_count() or 1) * 2, 8)  # Cap at 8 for fast navigation
 
-        self.executor = ThreadPoolExecutor(
+        self.executor = create_daemon_threadpool_executor(
             max_workers=optimal_workers,
             thread_name_prefix="Prefetcher",
         )
@@ -219,15 +225,12 @@ class Prefetcher:
             direction: 1 for forward, -1 for backward, None to use last direction
         """
         if self.debug:
-            import time
             _t_start = time.perf_counter()
             print(f"[DBGCACHE] {_t_start*1000:.3f} update_prefetch: START index={current_index} dir={direction}")
 
         # NOTE: Generation is NOT incremented here. It only changes when display size,
         # zoom state, or color mode changes - events that actually invalidate cached images.
         # Navigation just shifts which indices to prefetch.
-
-        # OLD GENERATION CLEANUP MOVED TO INSIDE LOCK BELOW
 
         # Track navigation direction
         if direction is not None:
@@ -282,23 +285,20 @@ class Prefetcher:
         tasks_submitted = 0
         with self._futures_lock:
             # Clean up old generation entries to prevent memory leak
-            # MOVED INSIDE LOCK to prevent race with cancel_all()
             old_generations = [g for g in self._scheduled if g < self.generation]
             for g in old_generations:
                 del self._scheduled[g]
 
-            # Get scheduled set for current generation (inside lock to prevent race)
+            # Get scheduled set for current generation (inside lock)
             scheduled = self._scheduled.setdefault(self.generation, set())
             stale_keys = []
             for index, future in list(self.futures.items()):
                 if index < start or index >= end:
                     if future.cancel():
                         stale_keys.append(index)
-                        scheduled.discard(index)  # Remove from scheduled set
+                        scheduled.discard(index)
             for key in stale_keys:
                 del self.futures[key]
-
-            # Submit new tasks - prioritize current image and direction of travel
 
             # Build priority order: current first, then in direction of travel
             priority_order = [current_index]
@@ -324,41 +324,24 @@ class Prefetcher:
     def submit_task(
         self, index: int, generation: int, priority: bool = False
     ) -> Optional[Future]:
-        """Submits a decoding task for a given index.
-
-        Args:
-            index: Image index to decode
-            generation: Generation number for cache invalidation
-            priority: If True, cancels lower-priority pending tasks to free up workers
-        """
-        # Don't submit new work if shutdown is in progress
+        """Submits a decoding task for a given index."""
         if self._stop_event.is_set():
             return None
 
-        import time
         if self.debug and priority:
             _t_start = time.perf_counter()
             print(f"[DBGCACHE] {_t_start*1000:.3f} submit_task: PRIORITY index={index} gen={generation}")
 
         with self._futures_lock:
             if index in self.futures and not self.futures[index].done():
-                return self.futures[index]  # Already submitted
+                return self.futures[index]
 
-            # For high-priority tasks (current image), cancel pending prefetch tasks
-            # to free up worker threads and reduce blocking time
             if priority:
                 cancelled_count = 0
-                # Don't cancel tasks that are very close to the requested index (e.g. +/- 2)
-                # This prevents thrashing when the user is navigating quickly
                 safe_radius = 2
 
                 for task_index, future in list(self.futures.items()):
-                    # Skip the current task
-                    if task_index == index:
-                        continue
-
-                    # Skip tasks within safe radius
-                    if abs(task_index - index) <= safe_radius:
+                    if task_index == index or abs(task_index - index) <= safe_radius:
                         continue
 
                     if not future.done() and future.cancel():
@@ -384,12 +367,10 @@ class Prefetcher:
                 display_generation,
             )
             self.futures[index] = future
-            log.debug(
-                "Submitted %s task for index %d",
-                "priority" if priority else "prefetch",
-                index,
-            )
+            future.add_done_callback(lambda f, idx=index: self._cleanup_future(idx, f))
             return future
+
+
 
     def _decode_and_cache(
         self,
@@ -401,570 +382,208 @@ class Prefetcher:
         display_generation: int,
     ) -> Optional[tuple[Path, int]]:
         """The actual work done by the thread pool."""
-        import time
-
-        t_start = time.perf_counter()
-        exif_obj = None  # Ensure variable is always initialized
-
-        # Early check: if generation has already advanced since this task was submitted, skip it
-        if generation != self.generation:
-            log.debug(
-                "Skipping stale task for index %d (submitted gen %d != current gen %d)",
-                index,
-                generation,
-                self.generation,
-            )
+        if generation != self.generation or self._stop_event.is_set():
             return None
 
-        # Cooperative abort: check if shutdown is in progress
-        if self._stop_event.is_set():
-            log.debug("Aborting decode for index %d - shutdown in progress", index)
-            return None
+        exif_obj = None
 
         try:
-            # Check for empty file to avoid mmap error
             if os.path.getsize(image_file.path) == 0:
                 log.warning("Skipping empty image file: %s", image_file.path)
                 return None
 
-            # Get current color management mode and optimization setting
             color_mode = config.get("color", "mode", fallback="none").lower()
             optimize_for = config.get("core", "optimize_for", fallback="speed").lower()
             fast_dct = optimize_for == "speed"
-            use_resized = (
-                optimize_for == "speed"
-            )  # Use decode_jpeg_resized for speed, decode_jpeg_rgb for quality
-
-            # Determine if we should resize
+            use_resized = optimize_for == "speed"
             should_resize = display_width > 0 and display_height > 0
-
-            # Determine file type
             is_jpeg = image_file.path.suffix.lower() in {".jpg", ".jpeg", ".jpe"}
 
-            # Option C: Full ICC pipeline - Use TurboJPEG for decode, Pillow only for ICC conversion
+            buffer = None
+            icc_bytes = None
+            exif_obj = None
+
             if color_mode == "icc":
                 monitor_profile = get_monitor_profile()
-                monitor_icc_path = config.get(
-                    "color", "monitor_icc_path", fallback=""
-                ).strip()
+                monitor_icc_path = config.get("color", "monitor_icc_path", fallback="").strip()
 
                 if monitor_profile is not None:
-                    # FAST: Use TurboJPEG for decode + resize (ONLY for JPEGs)
-                    buffer = None
-                    t_before_read = time.perf_counter()
-
                     if is_jpeg:
                         try:
                             with open(image_file.path, "rb") as f:
-                                with mmap.mmap(
-                                    f.fileno(), 0, access=mmap.ACCESS_READ
-                                ) as mmapped:
-                                    # Pass mmap directly - no copy! Decoders accept bytes-like objects
+                                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped:
                                     if use_resized and should_resize:
-                                        buffer = decode_jpeg_resized(
-                                            mmapped,
-                                            display_width,
-                                            display_height,
-                                            fast_dct=fast_dct,
-                                        )
+                                        buffer = decode_jpeg_resized(mmapped, display_width, display_height, fast_dct=fast_dct)
                                     else:
-                                        # Quality mode or Full Res: decode full image then resize with high quality
-                                        buffer = decode_jpeg_rgb(
-                                            mmapped, fast_dct=fast_dct
-                                        )
+                                        buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
                                         if buffer is not None and should_resize:
                                             img = PILImage.fromarray(buffer)
-                                            img.thumbnail(
-                                                (display_width, display_height),
-                                                PILImage.Resampling.LANCZOS,
-                                            )
+                                            img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
                                             buffer = np.array(img)
-                        except Exception:
-                            log.debug(
-                                "TurboJPEG failed on JPEG %s, falling back",
-                                image_file.path,
-                            )
+                                    
+                                    if buffer is not None:
+                                        try:
+                                            mmapped.seek(0)
+                                            with PILImage.open(mmapped) as pil_img:
+                                                icc_bytes = pil_img.info.get("icc_profile")
+                                                if exif_obj is None:
+                                                    exif_obj = pil_img.getexif()
+                                        except Exception:
+                                            pass
+                        except Exception as e:
+                            log.warning("Decode failed (ICC path) index=%d path=%s: %s", index, image_file.path, e)
                             buffer = None
 
-                    # If not JPEG or TurboJPEG failed, try generic Pillow load
                     if buffer is None:
                         try:
-                            # We can't use mmap for Generic Pillow open widely (some formats need seek/tell on file)
-                            # So we open nominally.
                             with PILImage.open(image_file.path) as img:
                                 img = img.convert("RGB")
                                 if should_resize:
-                                    img.thumbnail(
-                                        (display_width, display_height),
-                                        PILImage.Resampling.LANCZOS,
-                                    )
+                                    img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
                                 buffer = np.array(img)
                         except Exception as e:
-                            log.warning(
-                                "Failed to decode image %s: %s", image_file.path, e
-                            )
+                            log.warning("Decode failed (ICC fallback) index=%d path=%s: %s", index, image_file.path, e)
                             return None
 
-                    t_after_read = time.perf_counter()
-                    if buffer is None:
-                        return None
-                    t_after_decode = time.perf_counter()
-
-                    # Convert numpy array to PIL Image for ICC conversion
                     img = PILImage.fromarray(buffer)
-                    t_after_array_to_pil = time.perf_counter()
-
-                    # Extract ICC profile AND EXIF from original file (need to read header only)
-                    t_before_profile_read = time.perf_counter()
-                    exif_obj = None
-                    with PILImage.open(image_file.path) as orig:
-                        icc_bytes = orig.info.get("icc_profile")
-                        exif_obj = orig.getexif()  # Capture EXIF while open
-                    t_after_profile_read = time.perf_counter()
+                    
+                    if icc_bytes is None or exif_obj is None:
+                        try:
+                            with PILImage.open(image_file.path) as orig:
+                                if icc_bytes is None:
+                                    icc_bytes = orig.info.get("icc_profile")
+                                if exif_obj is None:
+                                    exif_obj = orig.getexif()
+                        except Exception as e:
+                            log.warning("Failed to read metadata from %s: %s", image_file.path, e)
 
                     src_profile = None
                     src_profile_key = None
                     if icc_bytes:
                         try:
-                            src_profile = ImageCms.ImageCmsProfile(
-                                io.BytesIO(icc_bytes)
-                            )
-                            # Compute stable key: SHA-256 digest of ICC bytes
+                            src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_bytes))
                             src_profile_key = hashlib.sha256(icc_bytes).hexdigest()
-                            log.debug(
-                                "Using embedded ICC profile from %s", image_file.path
-                            )
-                        except (OSError, ImageCms.PyCMSError, ValueError) as e:
-                            log.warning(
-                                "Failed to parse ICC profile from %s: %s",
-                                image_file.path,
-                                e,
-                            )
+                        except Exception as e:
+                            log.warning("Failed to parse ICC profile: %s", e)
 
                     if src_profile is None:
                         src_profile = SRGB_PROFILE
-                        # Use a constant key for sRGB since it's always the same
                         src_profile_key = "srgb_builtin"
-                        log.debug(
-                            "No embedded profile, assuming sRGB for %s", image_file.path
-                        )
 
-                    # Convert from source profile to monitor profile using cached transform
                     try:
-                        log.debug("Converting image from source to monitor profile")
-                        t_before_icc = time.perf_counter()
-                        transform = get_icc_transform(
-                            src_profile,
-                            monitor_profile,
-                            src_profile_key,
-                            monitor_icc_path,
-                        )
-                        # Alan 11-20-25 - Add inPlace=True to speed up copy, shouldn't have many negative effects
+                        transform = get_icc_transform(src_profile, monitor_profile, src_profile_key, monitor_icc_path)
                         ImageCms.applyTransform(img, transform, inPlace=True)
-                        t_after_icc = time.perf_counter()
-
-                        rgb = np.array(img, dtype=np.uint8)
-
-                        # Note: We do NOT apply EXIF orientation here anymore.
-                        # It is handled in the Unified EXIF Orientation Application block below.
-                        # This avoids "double rotation" or potential "apply and discard" bugs.
-
-                        # Memory Optimization: Avoid explicit copy
-                        buffer = np.ascontiguousarray(rgb)
-                        bytes_per_line = buffer.strides[0]
-                        mv = memoryview(buffer).cast("B")
-                        t_after_copy = time.perf_counter()
-
-                        if self.debug:
-                            decoder = "TurboJPEG" if TURBO_AVAILABLE else "Pillow"
-                            log.info(
-                                "ICC decode timing for index %d (%s): read=%.3fs, decode=%.3fs, array_to_pil=%.3fs, profile_read=%.3fs, icc=%.3fs, copy=%.3fs, total=%.3fs, size=%dx%d",
-                                index,
-                                decoder,
-                                t_after_read - t_before_read,
-                                t_after_decode - t_after_read,
-                                t_after_array_to_pil - t_after_decode,
-                                t_after_profile_read - t_before_profile_read,
-                                t_after_icc - t_before_icc,
-                                t_after_copy - t_after_icc,
-                                t_after_copy - t_start,
-                                buffer.shape[1],
-                                buffer.shape[0],
-                            )
-                    except (OSError, ImageCms.PyCMSError, ValueError) as e:
-                        # ICC conversion failed, fall back to standard decode
-                        log.warning(
-                            "ICC profile conversion failed for %s: %s, falling back to standard decode",
-                            image_file.path,
-                            e,
-                        )
-                        t_before_fallback_read = time.perf_counter()
-
-                        if is_jpeg:
-                            # JPEG-specific fast path with mmap + TurboJPEG
-                            with open(image_file.path, "rb") as f:
-                                with mmap.mmap(
-                                    f.fileno(), 0, access=mmap.ACCESS_READ
-                                ) as mmapped:
-                                    if use_resized and should_resize:
-                                        buffer = decode_jpeg_resized(
-                                            mmapped,
-                                            display_width,
-                                            display_height,
-                                            fast_dct=fast_dct,
-                                        )
-                                    else:
-                                        buffer = decode_jpeg_rgb(
-                                            mmapped, fast_dct=fast_dct
-                                        )
-                                        if buffer is not None and should_resize:
-                                            img = PILImage.fromarray(buffer)
-                                            img.thumbnail(
-                                                (display_width, display_height),
-                                                PILImage.Resampling.LANCZOS,
-                                            )
-                                            buffer = np.array(img)
-                        else:
-                            # Generic Pillow fallback for non-JPEGs
-                            try:
-                                with PILImage.open(image_file.path) as img:
-                                    img = img.convert("RGB")
-                                    if should_resize:
-                                        img.thumbnail(
-                                            (display_width, display_height),
-                                            PILImage.Resampling.LANCZOS,
-                                        )
-                                    buffer = np.array(img)
-                            except Exception as e:
-                                log.warning(
-                                    "Pillow fallback failed for %s: %s",
-                                    image_file.path,
-                                    e,
-                                )
-                                return None
-
-                        t_after_fallback_read = time.perf_counter()
-                        if buffer is None:
-                            return None
-                        t_after_fallback_decode = time.perf_counter()
-
-                        # EXIF orientation correction
-
-                        pass
-
-                        # Memory Optimization: Avoid explicit copy
-                        buffer = np.ascontiguousarray(buffer)
-                        bytes_per_line = buffer.strides[0]
-                        mv = memoryview(buffer).cast("B")
-
-                        # Align with non-fallback paths for timing/logging
-                        t_after_copy = time.perf_counter()
-
-                        if self.debug:
-                            decoder = "TurboJPEG" if TURBO_AVAILABLE else "Pillow"
-                            log.info(
-                                "ICC fallback decode timing for index %d (%s): read=%.3fs, decode=%.3fs, copy=%.3fs, total=%.3fs, size=%dx%d",
-                                index,
-                                decoder,
-                                t_after_fallback_read - t_before_fallback_read,
-                                t_after_fallback_decode - t_after_fallback_read,
-                                t_after_copy - t_after_fallback_decode,
-                                t_after_copy - t_start,
-                                buffer.shape[1],
-                                buffer.shape[0],
-                            )
-                else:
-                    # Fall back to standard decode if ICC profile not available
-                    log.warning(
-                        "ICC mode selected but no monitor profile available, using standard decode"
-                    )
-                    t_before_read = time.perf_counter()
-
-                    if is_jpeg:
-                        # JPEG-specific fast path with mmap + TurboJPEG
-                        with open(image_file.path, "rb") as f:
-                            with mmap.mmap(
-                                f.fileno(), 0, access=mmap.ACCESS_READ
-                            ) as mmapped:
-                                if use_resized and should_resize:
-                                    buffer = decode_jpeg_resized(
-                                        mmapped,
-                                        display_width,
-                                        display_height,
-                                        fast_dct=fast_dct,
-                                    )
-                                else:
-                                    buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
-                                    if buffer is not None and should_resize:
-                                        img = PILImage.fromarray(buffer)
-                                        img.thumbnail(
-                                            (display_width, display_height),
-                                            PILImage.Resampling.LANCZOS,
-                                        )
-                                        buffer = np.array(img)
-                    else:
-                        # Generic Pillow fallback for non-JPEGs
-                        try:
-                            with PILImage.open(image_file.path) as img:
-                                img = img.convert("RGB")
-                                if should_resize:
-                                    img.thumbnail(
-                                        (display_width, display_height),
-                                        PILImage.Resampling.LANCZOS,
-                                    )
-                                buffer = np.array(img)
-                        except Exception as e:
-                            log.warning(
-                                "Pillow fallback failed for %s: %s", image_file.path, e
-                            )
-                            return None
-
-                    t_after_read = time.perf_counter()
-                    if buffer is None:
-                        return None
-                    t_after_decode = time.perf_counter()
-
-                    # EXIF orientation application
-
-                    # Memory Optimization: Avoid explicit copy
-                    buffer = np.ascontiguousarray(buffer)
-                    bytes_per_line = buffer.strides[0]
-                    mv = memoryview(buffer).cast("B")
-
-                    # Align with non-fallback paths for timing/logging
-                    t_after_copy = time.perf_counter()
-
-                    if self.debug:
-                        decoder = "TurboJPEG" if TURBO_AVAILABLE else "Pillow"
-                        log.info(
-                            "Standard decode timing (no ICC profile) for index %d (%s): read=%.3fs, decode=%.3fs, copy=%.3fs, total=%.3fs, size=%dx%d",
-                            index,
-                            decoder,
-                            t_after_read - t_before_read,
-                            t_after_decode - t_after_read,
-                            t_after_copy - t_after_decode,
-                            t_after_copy - t_start,
-                            buffer.shape[1],
-                            buffer.shape[0],
-                        )
-
-            else:
-                # Standard decode path (Option A or no color management)
-                t_before_read = time.perf_counter()
-
-                buffer = None
+                        buffer = np.array(img, dtype=np.uint8)
+                    except Exception as e:
+                        log.warning("ICC conversion failed: %s", e)
+            
+            if buffer is None:
                 if is_jpeg:
                     try:
                         with open(image_file.path, "rb") as f:
-                            with mmap.mmap(
-                                f.fileno(), 0, access=mmap.ACCESS_READ
-                            ) as mmapped:
+                            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped:
                                 if use_resized and should_resize:
-                                    buffer = decode_jpeg_resized(
-                                        mmapped,
-                                        display_width,
-                                        display_height,
-                                        fast_dct=fast_dct,
-                                    )
+                                    buffer = decode_jpeg_resized(mmapped, display_width, display_height, fast_dct=fast_dct)
                                 else:
                                     buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
                                     if buffer is not None and should_resize:
                                         img = PILImage.fromarray(buffer)
-                                        img.thumbnail(
-                                            (display_width, display_height),
-                                            PILImage.Resampling.LANCZOS,
-                                        )
+                                        img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
                                         buffer = np.array(img)
+                                
+                                if buffer is not None:
+                                    try:
+                                        mmapped.seek(0)
+                                        with PILImage.open(mmapped) as pil_img:
+                                            if exif_obj is None:
+                                                exif_obj = pil_img.getexif()
+                                    except Exception:
+                                        pass
                     except Exception:
                         buffer = None
 
                 if buffer is None:
                     try:
                         with PILImage.open(image_file.path) as img:
+                            # Optimization: capture EXIF while the file is open
+                            if exif_obj is None:
+                                exif_obj = img.getexif()
+
                             img = img.convert("RGB")
                             if should_resize:
-                                img.thumbnail(
-                                    (display_width, display_height),
-                                    PILImage.Resampling.LANCZOS,
-                                )
+                                img.thumbnail((display_width, display_height), PILImage.Resampling.LANCZOS)
                             buffer = np.array(img)
                     except Exception as e:
-                        log.warning("Failed to decode image %s: %s", image_file.path, e)
+                        log.warning("Decode failed index=%d path=%s: %s", index, image_file.path, e)
                         return None
-                t_after_read = time.perf_counter()
-                if buffer is None:
-                    return None
-                t_after_decode = time.perf_counter()
 
-                # EXIF orientation correction moved to post-decode block
-
-                # Memory Optimization: Avoid explicit copy
-                buffer = np.ascontiguousarray(buffer)
-                bytes_per_line = buffer.strides[0]
-                mv = memoryview(buffer).cast("B")
-
-                t_after_copy = time.perf_counter()
-
-            # Unified EXIF Orientation Application
-            if buffer is not None:
-                pre_h, pre_w = buffer.shape[:2]
-                try:
-                    # Optimization: Use pre-read EXIF object if available (ICC path)
-                    # For non-ICC path, we might still need to open it.
-                    if exif_obj is not None:
-                        buffer = apply_exif_orientation(
-                            buffer, image_file.path, exif=exif_obj
-                        )
-                    else:
-                        # Fallback to opening (Non-ICC path or where we didn't capture it)
-                        with PILImage.open(image_file.path) as img:
-                            buffer = apply_exif_orientation(
-                                buffer, image_file.path, exif=img.getexif()
-                            )
-                except Exception as e:
-                    log.warning(
-                        "Failed to apply EXIF orientation for %s: %s",
-                        image_file.path,
-                        e,
-                    )
-
-                # Always re-establish these no matter what happened
-                h, w = buffer.shape[:2]
-                buffer = np.ascontiguousarray(buffer)
-                bytes_per_line = buffer.strides[0]
-                mv = memoryview(buffer).cast("B")
-
-                if self.debug and (w != pre_w or h != pre_h):
-                    log.info(
-                        "Applied EXIF orientation for index %d: %dx%d -> %dx%d",
-                        index,
-                        pre_w,
-                        pre_h,
-                        w,
-                        h,
-                    )
-
-            # Apply saturation compensation if enabled
-            if color_mode == "saturation":
-                try:
-                    factor = float(
-                        config.get("color", "saturation_factor", fallback="1.0")
-                    )
-
-                    # Ensure buffer is contiguous and create a 1D view for saturation compensation
-                    # Note: buffer is already made contiguous (np.ascontiguousarray) in the decode blocks above or orientation block
-                    arr = buffer.ravel()
-
-                    # Verify shape expectations
-                    if self.debug:
-                        assert buffer.flags[
-                            "C_CONTIGUOUS"
-                        ], "Buffer must be C-contiguous for in-place modification"
-                        assert (
-                            arr.size == h * bytes_per_line
-                        ), f"Buffer size mismatch: {arr.size} != {h} * {bytes_per_line}"
-                        assert (
-                            arr.dtype == np.uint8
-                        ), f"Buffer dtype must be uint8, got {arr.dtype}"
-
-                    apply_saturation_compensation(arr, w, h, bytes_per_line, factor)
-                    t_after_saturation = time.perf_counter()
-
-                    if self.debug:
-                        decoder = "TurboJPEG" if TURBO_AVAILABLE else "Pillow"
-                        log.info(
-                            "Saturation decode timing for index %d (%s): read=%.3fs, decode=%.3fs, copy=%.3fs, saturation=%.3fs, total=%.3fs, size=%dx%d",
-                            index,
-                            decoder,
-                            t_after_read - t_before_read,
-                            t_after_decode - t_after_read,
-                            t_after_copy - t_after_decode,
-                            t_after_saturation - t_after_copy,
-                            t_after_saturation - t_start,
-                            w,
-                            h,
-                        )
-                except (ValueError, AssertionError) as e:
-                    log.warning("Failed to apply saturation compensation: %s", e)
-            else:
-                # No color management - log standard timing
-                if self.debug:
-                    decoder = "TurboJPEG" if TURBO_AVAILABLE else "Pillow"
-                    log.info(
-                        "Standard decode timing for index %d (%s): read=%.3fs, decode=%.3fs, copy=%.3fs, total=%.3fs, size=%dx%d",
-                        index,
-                        decoder,
-                        t_after_read - t_before_read,
-                        t_after_decode - t_after_read,
-                        t_after_copy - t_after_decode,
-                        t_after_copy - t_start,
-                        w,
-                        h,
-                    )
-
-            # Re-check generation before caching (in case it changed during decode)
-            if self.generation != generation:
-                log.debug(
-                    "Generation changed for index %d before caching (current gen %d != submitted gen %d). Skipping cache_put.",
-                    index,
-                    self.generation,
-                    generation,
-                )
+            if buffer is None:
                 return None
 
-            decoded_image = DecodedImage(
+            buffer = np.ascontiguousarray(buffer)
+            bytes_per_line = buffer.strides[0]
+
+            try:
+                if exif_obj is None:
+                    with PILImage.open(image_file.path) as orig:
+                        exif_obj = orig.getexif()
+                orientation = exif_obj.get(274, 1) if exif_obj else 1
+                if orientation > 1:
+                    buffer = apply_orientation_to_np(buffer, orientation)
+                    buffer = np.ascontiguousarray(buffer)
+                    bytes_per_line = buffer.strides[0]
+            except Exception as e:
+                log.warning("Failed to apply EXIF orientation: %s", e)
+
+            if color_mode == "saturation":
+                # Safer pattern for custom config wrappers
+                val = config.get("color", "saturation_factor", fallback="1.0")
+                saturation_factor = float(val) if val is not None else 1.0
+                if saturation_factor != 1.0:
+                    apply_saturation_compensation(buffer.ravel(), buffer.shape[1], buffer.shape[0], bytes_per_line, saturation_factor)
+
+            mv = memoryview(buffer).cast("B")
+            decoded = DecodedImage(
                 buffer=mv,
-                width=w,
-                height=h,
+                width=buffer.shape[1],
+                height=buffer.shape[0],
                 bytes_per_line=bytes_per_line,
                 format=QImage.Format.Format_RGB888 if QImage else None,
             )
+
+            if generation != self.generation or self._stop_event.is_set():
+                return None
+
             cache_key = build_cache_key(image_file.path, display_generation)
-            self.cache_put(cache_key, decoded_image)
-            log.debug(
-                "Successfully decoded and cached image at index %d for display gen %d",
-                index,
-                display_generation,
-            )
-            return image_file.path, display_generation
+            self.cache_put(cache_key, decoded)
+            return (image_file.path, display_generation)
 
-        except (OSError, IOError, ValueError, MemoryError) as e:
-            log.warning(
-                "Error decoding image %s at index %d: %s", image_file.path, index, e
-            )
+        except Exception as e:
+            # Downgraded from ERROR to prevent log noise on bad files
+            log.warning("Error in _decode_and_cache: %s", e)
+            return None
 
-        return None
-
-    def _is_in_prefetch_range(
-        self, index: int, current_index: int, radius: Optional[int] = None
-    ) -> bool:
-        """Checks if an index is within the current prefetch window.
-
-        Args:
-            index: The index to check
-            current_index: The center of the prefetch window
-            radius: Optional custom radius; if None, uses self.prefetch_radius
-        """
-        if radius is None:
-            radius = self.prefetch_radius
-        return abs(index - current_index) <= radius
+    def _cleanup_future(self, index: int, future: Future):
+        """Removes the future from the tracking dictionary upon completion."""
+        with self._futures_lock:
+            # Only remove if it's the specific future we're tracking
+            # (to avoid race if a new task for the same index was submitted)
+            if self.futures.get(index) is future:
+                del self.futures[index]
 
     def cancel_all(self):
-        """Cancels all pending prefetch tasks."""
+        """Cancels all pending prefetching tasks."""
         with self._futures_lock:
-            log.info("Cancelling all prefetch tasks.")
-            self.generation += 1
-            for future in self.futures.values():
+            self.generation += 1  # Invalidate in-flight tasks
+            for index, future in list(self.futures.items()):
                 future.cancel()
-            self.futures.clear()
-            self._scheduled.clear()  # Clear scheduled indices when bumping generation
+                del self.futures[index]
+            self._scheduled.clear()
+
 
     def shutdown(self):
-        """Shuts down the thread pool executor."""
-        log.info("Shutting down prefetcher thread pool.")
-        # Set stop event first to signal workers to abort
+        """Initiates a clean shutdown of the prefetcher."""
+        log.info("Shutting down Prefetcher...")
         self._stop_event.set()
         self.cancel_all()
-        # cancel_futures=True cancels queued work immediately (Python 3.9+)
-        # wait=False so we don't block on slow decode tasks
         self.executor.shutdown(wait=False, cancel_futures=True)

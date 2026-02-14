@@ -67,6 +67,7 @@ class Keybinder:
             (Qt.Key_2, Qt.ControlModifier): "zoom_200",
             (Qt.Key_3, Qt.ControlModifier): "zoom_300",
             (Qt.Key_4, Qt.ControlModifier): "zoom_400",
+            (Qt.Key_U, Qt.AltModifier): "jump_to_last_uploaded",
         }
 
     def _call(self, method_name: str):

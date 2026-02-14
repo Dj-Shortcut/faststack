@@ -137,6 +137,9 @@ CACHE_THRASH_THRESHOLD = 5
 CACHE_WARNING_COOLDOWN_SECS = 300
 
 
+from faststack.util.executors import create_daemon_threadpool_executor
+
+
 class AppController(QObject):
     dataChanged = Signal()  # New signal for general data changes
     is_zoomed_changed = Signal(bool)  # Signal for zoom state changes
@@ -172,7 +175,7 @@ class AppController(QObject):
     ):
         super().__init__()
         # Histogram Offloading Setup
-        self._hist_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._hist_executor = create_daemon_threadpool_executor(max_workers=1, thread_name_prefix="Histogram")
         self._hist_inflight = False
         self._hist_pending = None
         self._hist_token = 0
@@ -181,10 +184,14 @@ class AppController(QObject):
         self.previewReady.connect(self._apply_preview_result)
 
         # Save Offloading Setup (runs save_image in background thread)
-        self._save_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # ⚠️ NON-DAEMON: We must ensure saving finishes to avoid data loss on exit.
+        self._save_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="Save"
+        )
         self._saveFinished.connect(self._on_save_finished)
 
         # Delete Offloading Setup (runs recycle/delete I/O in background thread)
+        # ⚠️ NON-DAEMON: Ensure delete/recycle operations complete.
         self._delete_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="Deleter"
         )
@@ -193,7 +200,7 @@ class AppController(QObject):
         self._next_delete_job_id = 0
 
         # Preview Offloading Setup
-        self._preview_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._preview_executor = create_daemon_threadpool_executor(max_workers=1, thread_name_prefix="Preview")
         self._preview_inflight = False
         self._preview_pending = False
         self._preview_token = 0
@@ -1379,6 +1386,48 @@ class AppController(QObject):
             log.warning("Invalid image index: %d", index)
             self.update_status_message("Invalid image number")
 
+    @Slot()
+    def jump_to_last_uploaded(self):
+        """Find the uploaded image with the highest index and jump to it."""
+        if not self.image_files:
+            self.update_status_message("No images in current folder")
+            return
+
+        last_uploaded_index = None
+        # Optimization: Iterate backwards to find the last uploaded image faster
+        # for idx in range(last_index, -1, -1)
+        for idx in range(len(self.image_files) - 1, -1, -1):
+            img = self.image_files[idx]
+            # Dynamic look-up of self.sidecar as requested (important for mocks in tests)
+            meta = self.sidecar.get_metadata(img.path.stem)
+
+            # Robust extraction of 'uploaded' flag: handle both object and dict formats.
+            # Mock-safety: must evaluate False if it's a MagicMock (test requirement).
+            # We explicitly check for boolean True.
+            if isinstance(meta, dict):
+                uploaded = meta.get("uploaded")
+            else:
+                uploaded = getattr(meta, "uploaded", None)
+
+            if uploaded is True:
+                last_uploaded_index = idx
+                break
+
+        if last_uploaded_index is not None:
+            if last_uploaded_index == self.current_index:
+                self.update_status_message("Already at last uploaded image")
+            else:
+                self.jump_to_image(last_uploaded_index)
+                # Ensure grid view scrolls if it's active
+                ui = getattr(self, "ui_state", None)
+                if ui:
+                    sig = getattr(ui, "gridScrollToIndex", None)
+                    if sig and hasattr(sig, "emit"):
+                        sig.emit(last_uploaded_index)
+        else:
+            self.update_status_message("No uploaded images found in this folder")
+
+
     def show_jump_to_image_dialog(self):
         """Shows the jump to image dialog (called from keybinder)."""
         if self.main_window and hasattr(self.main_window, "show_jump_to_image_dialog"):
@@ -1853,8 +1902,14 @@ class AppController(QObject):
         stack_info = self._get_stack_info(self.current_index)
         batch_info = self._get_batch_info(self.current_index)
 
+        filename = self.image_files[self.current_index].path.name
+        if self.image_files[self.current_index].has_raw:
+            # e.g. "image.JPG + ORF"
+            raw_ext = self.image_files[self.current_index].raw_path.suffix.lstrip(".").upper()
+            filename += f" + {raw_ext}"
+
         self._metadata_cache = {
-            "filename": self.image_files[self.current_index].path.name,
+            "filename": filename,
             "stacked": meta.stacked,
             "stacked_date": meta.stacked_date or "",
             "uploaded": meta.uploaded,
@@ -4336,8 +4391,9 @@ class AppController(QObject):
             log.info("Shutting down background executors...")
             self._hist_executor.shutdown(wait=False, cancel_futures=True)
             self._preview_executor.shutdown(wait=False, cancel_futures=True)
-            self._save_executor.shutdown(wait=False, cancel_futures=True)
-            self._delete_executor.shutdown(wait=False, cancel_futures=True)
+            # wait=True ensures pending saves/deletes complete to avoid data loss/corruption
+            self._save_executor.shutdown(wait=True, cancel_futures=False)
+            self._delete_executor.shutdown(wait=True, cancel_futures=False)
         except Exception as e:
             log.warning("Error shutting down executors: %s", e)
 
@@ -4355,11 +4411,13 @@ class AppController(QObject):
             log.warning("Error shutting down thumbnail prefetcher: %s", e)
 
         # Save sidecar state
+        # NOTE: This runs on the main thread during shutdown (via main() -> shutdown_nonqt()).
+        # It needs to be robust against file I/O errors to avoid hanging the exit.
         try:
             self.sidecar.set_last_index(self.current_index)
             self.sidecar.save()
         except Exception as e:
-            log.warning("Error saving sidecar: %s", e)
+            log.warning("Error saving sidecar during shutdown: %s", e)
 
         log.info("Background shutdown complete.")
 
@@ -6668,12 +6726,13 @@ def main(image_dir: str = "", debug: bool = False, debug_cache: bool = False):
         log.info("aboutToQuit fired")
 
         # Backstop MUST start first, or it won't run if shutdown blocks.
-        killer = threading.Timer(3.0, lambda: os._exit(1))
+        # Increased to 7s to ensure pending saves (wait=True) have time to complete.
+        killer = threading.Timer(7.0, lambda: os._exit(1))
         killer.daemon = True
         killer.start()
 
-        # After 2s, dump stacks to stderr so we can see what's hung.
-        faulthandler.dump_traceback_later(2.0, repeat=False)
+        # After 4s, dump stacks to stderr so we can see what's hung just before the kill.
+        faulthandler.dump_traceback_later(4.0, repeat=False)
 
         try:
             # Stop Qt timers on main thread
@@ -6687,7 +6746,7 @@ def main(image_dir: str = "", debug: bool = False, debug_cache: bool = False):
             
             # Consolidated shutdown for all thread pools and pending jobs
             # This replaces previous ad-hoc shutdown logic
-            controller._shutdown_executors()
+            controller.shutdown_nonqt()
             
             _log_live_threads("after shutdown_executors")
 

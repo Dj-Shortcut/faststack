@@ -2,11 +2,16 @@
 
 Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
 
-## 1.5.8 (2026-02-12)
+## 1.5.8 (2026-02-13)
 
 - Instant delete: move recycle/permanent delete to background thread; debounce refresh; improved undo handling.
 - Users can now filter by flags (uploaded/stacked/edited/restacked/favorite)
 - Fixed bugs in grid view
+- Added **Jump to Last Uploaded** (Alt+U + menu item) to jump to the most recently-uploaded photo in the folder.
+- Improved **shutdown safety**: saving and delete/recycle operations now finish cleanly on exit to avoid data loss.
+- Improved **thumbnail responsiveness**: visible thumbnails are now queued with higher priority than background prefetch.
+- Improved **prefetch stability/performance**: prefetch work runs on daemon threads and cleans up finished futures.
+- UI tweaks: recycle-bin details text is selectable and uses updated colors; metadata filename now shows RAW extension when present (e.g., `IMG_0001.JPG + ORF`).
 
 ## 1.5.7 (2026-02-09)
 

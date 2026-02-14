@@ -648,6 +648,24 @@ ApplicationWindow {
             ItemDelegate {
                 width: 220
                 height: 36
+                text: "Jump to Last Uploaded"
+                onClicked: {
+                    if (uiState) uiState.jumpToLastUploaded()
+                    actionsMenu.close()
+                }
+                background: Rectangle {
+                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: root.currentTextColor
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 10
+                }
+            }
+            ItemDelegate {
+                width: 220
+                height: 36
                 text: "Auto-Level Batch"
                 onClicked: {
                     if (uiState) uiState.batchAutoLevels()
@@ -1154,6 +1172,7 @@ ApplicationWindow {
                           "&nbsp;&nbsp;J / Right Arrow: Next Image<br>" +
                           "&nbsp;&nbsp;K / Left Arrow: Previous Image<br>" +
                           "&nbsp;&nbsp;G: Jump to Image Number<br>" +
+                          "&nbsp;&nbsp;Alt+U: Jump to Last Uploaded<br>" +
                           "&nbsp;&nbsp;I: Show EXIF Data<br>" +
                           "&nbsp;&nbsp;T: Toggle Thumbnail Grid / Single Image View<br><br>" +
                           "<b>Thumbnail Grid View:</b><br>" +
@@ -1444,13 +1463,15 @@ ApplicationWindow {
                     
                     TextArea {
                         id: detailsText
+                        width: parent.width
                         text: uiState ? uiState.recycleBinDetailedText : ""
-                        color: root.isDarkTheme ? "#bbbbbb" : "#444444"
+                        color: root.isDarkTheme ? "#efefef" : "#333333"
                         font.family: "Consolas, 'Courier New', monospace"
                         font.pixelSize: 13
                         padding: 10
                         wrapMode: Text.WrapAnywhere
                         readOnly: true
+                        selectByMouse: true
                         background: null
                     }
                 }

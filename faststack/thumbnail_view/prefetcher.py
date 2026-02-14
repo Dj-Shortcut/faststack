@@ -1,17 +1,19 @@
 """Background thumbnail decode and prefetch for grid view."""
 
-import hashlib
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import Future
 from pathlib import Path
 from threading import Lock
 import threading
-from typing import Dict, Optional, Set, Tuple, Callable
+from typing import Dict, Optional, Set, Tuple, Callable, TYPE_CHECKING
+if TYPE_CHECKING:
+    from faststack.imaging.cache import ByteLRUCache
 
 import numpy as np
 from PIL import Image
 
+from faststack.util.executors import create_priority_executor
 from faststack.imaging.orientation import get_exif_orientation, apply_orientation_to_np
 from faststack.io.utils import compute_path_hash
 
@@ -32,7 +34,7 @@ except Exception:
 
 # Try to import turbojpeg for faster JPEG decoding
 try:
-    from turbojpeg import TurboJPEG, TJPF_RGB, TJSAMP_444
+    from turbojpeg import TurboJPEG, TJPF_RGB
 
     _tj = TurboJPEG()
     HAS_TURBOJPEG = True
@@ -40,6 +42,11 @@ except ImportError:
     _tj = None
     HAS_TURBOJPEG = False
     log.debug("TurboJPEG not available, using PIL for thumbnail decoding")
+
+
+
+
+
 
 
 
@@ -52,6 +59,10 @@ class ThumbnailPrefetcher:
     - EXIF orientation applied in exactly one place
     - Cache key: (size, path_hash, mtime_ns)
     """
+
+    # Priority levels
+    PRIO_HIGH = 0  # Visible items
+    PRIO_MED = 1   # Prefetch items
 
     def __init__(
         self,
@@ -75,7 +86,7 @@ class ThumbnailPrefetcher:
         self._on_ready = on_ready_callback
         self._target_size = target_size
         self._stop_event = threading.Event()
-        self._executor = ThreadPoolExecutor(
+        self._executor = create_priority_executor(
             max_workers=max_workers, thread_name_prefix="thumb"
         )
 
@@ -104,13 +115,16 @@ class ThumbnailPrefetcher:
             target_size,
         )
 
-    def submit(self, path: Path, mtime_ns: int, size: int = None) -> bool:
+    def submit(
+        self, path: Path, mtime_ns: int, size: int = None, priority: int = PRIO_MED
+    ) -> bool:
         """Submit a thumbnail decode job.
 
         Args:
             path: Path to the image file
             mtime_ns: File modification time in nanoseconds
             size: Target size (default: self._target_size)
+            priority: Job priority (PRIO_HIGH, PRIO_MED)
 
         Returns:
             True if job was submitted, False if already in-flight or cached
@@ -132,7 +146,13 @@ class ThumbnailPrefetcher:
 
         # Check/add to inflight set
         with self._inflight_lock:
+            # If already in flight, check if we want to upgrade priority
             if job_key in self._inflight:
+                # ThreadPoolExecutor doesn't support priority upgrade easily,
+                # but our PriorityExecutor pulls from a queue.
+                # However, once a task is pulled, it stays at that priority.
+                # For now, we don't re-submit. If it's already in flight, it's either
+                # running or waiting in the queue.
                 return False
             self._inflight.add(job_key)
 
@@ -144,6 +164,7 @@ class ThumbnailPrefetcher:
                 path_hash,
                 mtime_ns,
                 size,
+                priority=priority,
             )
 
             with self._inflight_lock:
@@ -278,7 +299,8 @@ class ThumbnailPrefetcher:
         # Always remove bookkeeping first to avoid stranding entries
         with self._inflight_lock:
             self._inflight.discard(job_key)
-            self._futures.pop(job_key, None)
+            if self._futures.get(job_key) is future:
+                del self._futures[job_key]
 
         # Then bail if shutting down
         if self._stop_event.is_set():

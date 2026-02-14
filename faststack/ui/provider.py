@@ -672,6 +672,11 @@ class UIState(QObject):
     def addUploadedToBatch(self):
         self.app_controller.add_uploaded_to_batch()
 
+    @Slot()
+    def jumpToLastUploaded(self):
+        self.app_controller.jump_to_last_uploaded()
+
+
     @Slot(result=str)
     def get_helicon_path(self):
         return self.app_controller.get_helicon_path()
@@ -1450,7 +1455,9 @@ class UIState(QObject):
         for i in range(startIndex, endIndex + 1):
             entry = model.get_entry(i)
             if entry and not entry.is_folder:
-                prefetcher.submit(entry.path, entry.mtime_ns)
+                prefetcher.submit(
+                    entry.path, entry.mtime_ns, priority=prefetcher.PRIO_MED
+                )
 
     @Property(str, notify=recycleBinStatsTextChanged)
     def recycleBinStatsText(self):
@@ -1480,6 +1487,7 @@ class UIState(QObject):
         """Returns a detailed list of all file paths in recycle bins."""
         stats = self.app_controller.get_recycle_bin_stats()
         if not stats:
+            log.debug("recycleBinDetailedText: No recycle bin stats found")
             return ""
 
         lines = []
@@ -1489,7 +1497,9 @@ class UIState(QObject):
                 lines.append(f"  - {fname}")
             lines.append("")
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        log.debug("recycleBinDetailedText: Returning %d lines of details", len(lines))
+        return result
 
     @Property(bool, notify=hasRecycleBinItemsChanged)
     def hasRecycleBinItems(self):

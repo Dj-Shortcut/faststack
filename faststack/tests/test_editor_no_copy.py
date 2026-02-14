@@ -65,10 +65,19 @@ def test_apply_edits_no_copy_does_not_mutate_input():
 def test_save_image_passes_float_image_without_copy_when_safe(tmp_path):
     """
     Wiring test: prove save_image uses the same float_image object when _edits_can_share_input is True.
-    Avoid real disk I/O by mocking all filesystem + PIL save points.
+    Avoid real disk I/O by mocking PIL save points, but use real files for availability checks
+    to avoid global Path patches.
     """
     ed = make_editor_with_image()
-    ed.current_filepath = Path(tmp_path / "test.jpg")
+    
+    # Create a real dummy file so we don't need to patch Path.exists/stat globally
+    dummy_file = tmp_path / "test.jpg"
+    dummy_file.write_bytes(b"fake_jpg_content")
+    
+    # Set modify time to something non-zero for stat checks
+    # (though typically write_bytes sets mtime)
+    
+    ed.current_filepath = dummy_file
 
     # Safe edits only (no vignette/geometry/linear edits)
     ed.current_edits.update(
@@ -94,22 +103,25 @@ def test_save_image_passes_float_image_without_copy_when_safe(tmp_path):
 
     seen = {"same_obj": False}
 
+    # Use instance-specific spy to avoid intercepting calls from other tests/threads
+    # We capture the *original* bound method of this instance
     real_apply = ed._apply_edits
 
     def spy_apply(arr, for_export=False, *args, **kwargs):
+        # We only care about the call for this specific test instance
         if for_export and arr is ed.float_image:
             seen["same_obj"] = True
         return real_apply(arr, for_export=for_export, *args, **kwargs)
 
-    # Mock all the save_image I/O edges
-    fake_stat = MagicMock()
-    fake_stat.st_atime = 0
-    fake_stat.st_mtime = 0
-
-    with patch.object(ImageEditor, "_apply_edits", side_effect=spy_apply), \
+    # Mock all the save_image I/O edges locally or on the instance
+    # We no longer patch Path.exists or Path.stat globally!
+    
+    # We still need to patch create_backup_file to avoid actual backup copying logic
+    # or just let it run if we don't care? 
+    # The existing test patched it. Let's patch it to return a dummy path without side effects.
+    
+    with patch.object(ed, "_apply_edits", side_effect=spy_apply), \
          patch("faststack.imaging.editor.create_backup_file", return_value=tmp_path / "backup.jpg"), \
-         patch("faststack.imaging.editor.Path.exists", return_value=True), \
-         patch("faststack.imaging.editor.Path.stat", return_value=fake_stat), \
          patch("PIL.Image.Image.save"), \
          patch.object(ed, "_restore_file_times"), \
          patch.object(ed, "_get_sanitized_exif_bytes", return_value=None):

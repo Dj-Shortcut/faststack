@@ -13,8 +13,11 @@ if project_root not in sys.path:
 # Pre-mock modules that might cause issues or aren't needed for this test
 sys.modules["cv2"] = MagicMock()
 # Mock faststack.models since it's used by editor.py
-mock_models = MagicMock()
-sys.modules["faststack.models"] = mock_models
+# The instruction implies removing 'faststack.models' from a patch.dict,
+# but it's currently a direct assignment.
+# Assuming the intent is to remove the mocking of faststack.models entirely.
+# mock_models = MagicMock()
+# sys.modules["faststack.models"] = mock_models
 
 from faststack.imaging.editor import ImageEditor, sanitize_exif_orientation
 

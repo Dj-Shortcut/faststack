@@ -169,7 +169,9 @@ class ThumbnailProvider(QQuickImageProvider):
         if self._path_resolver:
             path = self._path_resolver(path_hash)
             if path:
-                self._prefetcher.submit(path, mtime_ns, thumb_size)
+                self._prefetcher.submit(
+                    path, mtime_ns, thumb_size, priority=self._prefetcher.PRIO_HIGH
+                )
 
         # Return placeholder immediately (non-blocking)
         return self._placeholder
