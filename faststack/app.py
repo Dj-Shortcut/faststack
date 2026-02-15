@@ -247,6 +247,7 @@ class AppController(QObject):
         self.sidecar = SidecarManager(self.image_dir, self.watcher, debug=_debug_mode)
         self.image_editor = ImageEditor()  # Initialize the editor
         self._dialog_open_count = 0  # Track nested dialogs
+        self._temp_files_to_clean: List[Path] = []  # Track temp files for cleanup on shutdown
 
         # -- Caching & Prefetching --
         cache_size_gb = config.getfloat("core", "cache_size_gb", 1.5)
@@ -2535,8 +2536,8 @@ class AppController(QObject):
         unique_files = sorted(list(set(files)))
         success, tmp_path = launch_helicon_focus(unique_files)
         if success and tmp_path:
-            # Schedule delayed deletion of the temporary file
-            QTimer.singleShot(5000, lambda: self._delete_temp_file(tmp_path))
+            # Defer deletion until shutdown to avoid race condition with Helicon Focus
+            self._temp_files_to_clean.append(tmp_path)
 
             # Record stacking metadata
             today = date.today().isoformat()
@@ -2555,14 +2556,7 @@ class AppController(QObject):
 
         return success
 
-    def _delete_temp_file(self, tmp_path: Path):
-        """Deletes the temporary file list passed to Helicon Focus."""
-        if tmp_path.exists():
-            try:
-                os.remove(tmp_path)
-                log.info("Deleted temporary file: %s", tmp_path)
-            except OSError as e:
-                log.error("Error deleting temporary file %s: %s", tmp_path, e)
+
 
     def clear_all_stacks(self):
         log.info("Clearing all defined stacks.")
@@ -4418,6 +4412,17 @@ class AppController(QObject):
             self.sidecar.save()
         except Exception as e:
             log.warning("Error saving sidecar during shutdown: %s", e)
+
+        # Clean up temporary files (e.g. Helicon Focus lists)
+        if self._temp_files_to_clean:
+            log.debug("Cleaning up %d temporary files...", len(self._temp_files_to_clean))
+            for tmp_path in self._temp_files_to_clean:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                    log.debug("Deleted temporary file: %s", tmp_path)
+                except OSError as e:
+                    log.warning("Error deleting temporary file %s: %s", tmp_path, e)
+            self._temp_files_to_clean.clear()
 
         log.info("Background shutdown complete.")
 
