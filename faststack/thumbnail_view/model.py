@@ -144,10 +144,16 @@ class ThumbnailModel(QAbstractListModel):
         self._last_selected_index: Optional[int] = None
         self._active_filter: str = ""  # current filename filter (set by AppController)
         self._active_filter_flags: list = []  # current flag filters (e.g. ["uploaded", "stacked"])
+        
+        # One-shot reason for logging
+        self._next_source_reason: Optional[str] = None
 
         # Mapping from thumbnail_id (without query params) to row index
         # id format: "{size}/{path_hash}/{mtime_ns}"
         self._id_to_row: Dict[str, int] = {}
+        
+        # One-shot reason for logging
+        self._next_source_reason: Optional[str] = None
 
         # Connect our own signal to handle thumbnail ready events
         self.thumbnailReady.connect(self._on_thumbnail_ready)
@@ -197,7 +203,10 @@ class ThumbnailModel(QAbstractListModel):
         elif role == self.IsEditedRole:
             return entry.is_edited
         elif role == self.ThumbnailSourceRole:
-            return self._get_thumbnail_source(entry)
+            reason = self._next_source_reason or "scroll"
+            # Consume one-shot reason
+            self._next_source_reason = None
+            return self._get_thumbnail_source(entry, reason=reason)
         elif role == self.FolderStatsRole:
             if entry.folder_stats:
                 return {
@@ -282,10 +291,10 @@ class ThumbnailModel(QAbstractListModel):
             self.HasDevelopedRole: b"hasDeveloped",
         }
 
-    def _get_thumbnail_source(self, entry: ThumbnailEntry) -> str:
+    def _get_thumbnail_source(self, entry: ThumbnailEntry, reason: str = "scroll") -> str:
         """Build thumbnail URL for QML Image source.
 
-        Format: image://thumbnail/{size}/{path_hash}/{mtime_ns}?r={rev}
+        Format: image://thumbnail/{size}/{path_hash}/{mtime_ns}?r={rev}&reason={reason}
         Folders use: image://thumbnail/folder/{path_hash}/{mtime_ns}?r={rev}
         """
         path_hash = compute_path_hash(entry.path)
@@ -295,27 +304,18 @@ class ThumbnailModel(QAbstractListModel):
         if entry.is_folder:
             return f"image://thumbnail/folder/{path_hash}/{mtime_ns}?r={rev}"
         else:
-            return f"image://thumbnail/{self._thumbnail_size}/{path_hash}/{mtime_ns}?r={rev}"
+            return f"image://thumbnail/{self._thumbnail_size}/{path_hash}/{mtime_ns}?r={rev}&reason={reason}"
 
     def set_filter(self, filter_string: str) -> None:
-        """Set the active filename filter and refresh the model.
-
-        Args:
-            filter_string: Filter to apply (case-insensitive substring match on stem).
-                           Pass empty string to clear the filter.
-        """
+        """Set the active filename filter and refresh the model."""
         self._active_filter = filter_string
+        self._next_source_reason = "filter"
         self.refresh()
 
     def set_filter_flags(self, flags: list) -> None:
-        """Set the active flag filters and refresh the model.
-
-        Args:
-            flags: List of flag names to filter by (e.g. ["uploaded", "stacked"]).
-                   Images must have ALL listed flags set to True (AND logic).
-                   Pass empty list to clear flag filters.
-        """
+        """Set the active flag filters and refresh the model."""
         self._active_filter_flags = list(flags)
+        self._next_source_reason = "filter"
         self.refresh()
 
     def _add_folders_to_entries(self):
@@ -493,6 +493,7 @@ class ThumbnailModel(QAbstractListModel):
         Folders are still scanned, but image entries are built from the
         provided objects.
         """
+        self._next_source_reason = "refresh"
         cur, own = QThread.currentThread(), self.thread()
         assert cur == own, f"ThumbnailModel refresh thread mismatch"
         
@@ -701,6 +702,7 @@ class ThumbnailModel(QAbstractListModel):
         self._current_directory = resolved
         self._selected_indices.clear()
         self._last_selected_index = None
+        self._next_source_reason = "jump"
         self.refresh()
 
     # Selection methods

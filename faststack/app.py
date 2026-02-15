@@ -135,6 +135,7 @@ log = logging.getLogger(__name__)
 # Global flags for debug modes - set by main()
 _debug_mode = False
 _debug_thumb_timing = False
+_debug_thumb_trace = False
 
 # Cache Thrashing Detection Constants
 CACHE_THRASH_WINDOW_SECS = 2.0
@@ -176,10 +177,17 @@ class AppController(QObject):
     )  # Signal for async delete completion (result dict from worker)
 
     def __init__(
-        self, image_dir: Path, engine: QQmlApplicationEngine, debug_cache: bool = False, debug_thumb_timing: bool = False
+        self, image_dir: Path, engine: QQmlApplicationEngine, 
+        debug_cache: bool = False, 
+        debug_thumb_timing: bool = False,
+        debug_thumb_trace: bool = False
     ):
         super().__init__()
         self.debug_thumb_timing = debug_thumb_timing
+        self.debug_thumb_trace = debug_thumb_trace
+
+        import faststack.util.thumb_debug as thumb_debug
+        thumb_debug.init(timing=self.debug_thumb_timing, trace=self.debug_thumb_trace)
         # Histogram Offloading Setup
         self._hist_executor = create_daemon_threadpool_executor(max_workers=1, thread_name_prefix="Histogram")
         self._hist_inflight = False
@@ -301,6 +309,7 @@ class AppController(QObject):
             on_ready_callback=self._on_thumbnail_ready,
             target_size=200,
             debug_timing=self.debug_thumb_timing,
+            debug_trace=self.debug_thumb_trace,
         )
         self._thumbnail_model = ThumbnailModel(
             base_directory=self.image_dir,
@@ -317,6 +326,7 @@ class AppController(QObject):
             path_resolver=self._path_resolver.resolve,
             default_size=200,
             debug_timing=self.debug_thumb_timing,
+            debug_trace=self.debug_thumb_trace,
         )
         # Connect thread-safe thumbnail ready signal to GUI thread handler
         # The callback is invoked from worker threads, so we use a signal to hop to GUI thread
@@ -398,6 +408,13 @@ class AppController(QObject):
         self._watcher_debounce_timer.setSingleShot(True)
         self._watcher_debounce_timer.setInterval(200)  # 200ms debounce
         self._watcher_debounce_timer.timeout.connect(self.refresh_image_list)
+
+        # Periodic summary for thumbnail debug logging
+        if self.debug_thumb_timing or self.debug_thumb_trace:
+            self._thumb_summary_timer = QTimer(self)
+            self._thumb_summary_timer.setInterval(1000)  # Check every second
+            self._thumb_summary_timer.timeout.connect(thumb_debug.check_periodic_summary)
+            self._thumb_summary_timer.start()
 
 
         # Debounce timer for metadata/highlight signals during rapid navigation
@@ -6753,7 +6770,13 @@ class AppController(QObject):
         clear_raw_count_cache()
 
 
-def main(image_dir: str = "", debug: bool = False, debug_cache: bool = False, debug_thumb_timing: bool = False):
+def main(
+    image_dir: Optional[str] = None,
+    debug: bool = False,
+    debug_cache: bool = False,
+    debug_thumb_timing: bool = False,
+    debug_thumb_trace: bool = False,
+):
     """FastStack Application Entry Point"""
     global _debug_mode, _debug_thumb_timing
     _debug_mode = debug
@@ -6824,7 +6847,13 @@ def main(image_dir: str = "", debug: bool = False, debug_cache: bool = False, de
         os.path.join(os.path.dirname(PySide6.__file__), "qml", "Qt5Compat")
     )
 
-    controller = AppController(image_dir_path, engine, debug_cache=debug_cache, debug_thumb_timing=debug_thumb_timing)
+    controller = AppController(
+        image_dir=image_dir_path,
+        engine=engine,
+        debug_cache=debug_cache,
+        debug_thumb_timing=debug_thumb_timing,
+        debug_thumb_trace=debug_thumb_trace,
+    )
     if debug:
         log.info("Startup: after AppController: %.3fs", time.perf_counter() - t0)
     image_provider = ImageProvider(controller)
@@ -6942,14 +6971,20 @@ def cli():
         action="store_true",
         help="Enable thumbnail pipeline timing logs (implies --debug)",
     )
+    parser.add_argument(
+        "--debug-thumbtrace",
+        action="store_true",
+        help="Enable thumbnail pipeline trace logs (implies --debug)",
+    )
     args = parser.parse_args()
-    if args.debug_thumbtiming:
+    if args.debug_thumbtiming or args.debug_thumbtrace:
         args.debug = True
     main(
         image_dir=args.image_dir,
         debug=args.debug,
         debug_cache=args.debugcache,
         debug_thumb_timing=args.debug_thumbtiming,
+        debug_thumb_trace=args.debug_thumbtrace,
     )
 
 

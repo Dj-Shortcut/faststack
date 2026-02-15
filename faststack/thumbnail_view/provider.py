@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+import faststack.util.thumb_debug as thumb_debug
+
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage, QPixmap, QColor
 from PySide6.QtQuick import QQuickImageProvider
@@ -44,6 +46,7 @@ class ThumbnailProvider(QQuickImageProvider):
         path_resolver: callable = None,
         default_size: int = 200,
         debug_timing: bool = False,
+        debug_trace: bool = False,
     ):
         """Initialize the provider.
 
@@ -53,6 +56,7 @@ class ThumbnailProvider(QQuickImageProvider):
             path_resolver: Function to resolve path_hash to actual Path
             default_size: Default thumbnail size
             debug_timing: Enable [THUMB-TIMING] log lines
+            debug_trace: Enable verbose trace logs
         """
         super().__init__(QQuickImageProvider.ImageType.Pixmap)
         self._cache = cache
@@ -60,6 +64,7 @@ class ThumbnailProvider(QQuickImageProvider):
         self._path_resolver = path_resolver
         self._default_size = default_size
         self._debug_timing = debug_timing
+        self._debug_trace = debug_trace
 
         # Pre-create placeholder pixmaps
         self._placeholder = self._create_placeholder(default_size, PLACEHOLDER_COLOR)
@@ -134,74 +139,116 @@ class ThumbnailProvider(QQuickImageProvider):
         # Format: {size}/{path_hash}/{mtime_ns}?r={rev}
         # Or: folder/{path_hash}/{mtime_ns}?r={rev}
 
-        # Timing: track first call and request rate
-        if self._debug_timing:
-            now = time.perf_counter()
-            if self._first_request_time is None:
-                self._first_request_time = now
-                log.info("[THUMB-TIMING] ThumbnailProvider.requestPixmap first call at %.3fs", now)
-            self._request_count += 1
-            elapsed = now - self._first_request_time
-            if not self._first_second_logged and elapsed >= 1.0:
-                self._first_second_logged = True
-                log.info(
-                    "[THUMB-TIMING] ThumbnailProvider: %d requests in first %.1fs (%.0f req/s)",
-                    self._request_count, elapsed, self._request_count / elapsed,
-                )
-
         # Strip query params
         id_clean = id_str.split("?")[0]
-        parts = id_clean.split("/")
+        
+        # Track total requests if logging enabled
+        if thumb_debug.timing_enabled or thumb_debug.trace_enabled:
+            thumb_debug.inc_request_count()
 
-        if len(parts) < 3:
-            log.debug("Invalid thumbnail ID format: %s", id_str)
-            return self._error_placeholder
-
-        # Determine if folder
-        if parts[0] == "folder":
-            # Folder thumbnail
-            path_hash = parts[1]
-            try:
-                mtime_ns = int(parts[2])
-            except ValueError:
+        # Deferred logging setup
+        timer = None
+        if thumb_debug.timing_enabled or thumb_debug.trace_enabled:
+            # Parse reason
+            reason = "unknown"
+            parts_query = id_str.split("?")
+            if len(parts_query) > 1:
+                query = parts_query[1]
+                for param in query.split("&"):
+                    if param.startswith("reason="):
+                        reason = param.split("=")[1]
+            
+            # Key/ID parts
+            # Key format: {size}/{path_hash}/{mtime_ns}
+            parts = id_clean.split("/")
+            if len(parts) < 3:
+                log.debug("Invalid thumbnail ID format: %s", id_str)
                 return self._error_placeholder
 
-            # Folders just get folder icon
-            return self._folder_placeholder
+            # Determine if folder (early exit for folders)
+            if parts[0] == "folder":
+                return self._folder_placeholder
 
-        # File thumbnail
-        try:
-            thumb_size = int(parts[0])
-            path_hash = parts[1]
-            mtime_ns = int(parts[2])
-        except (ValueError, IndexError):
-            log.debug("Invalid thumbnail ID: %s", id_str)
-            return self._error_placeholder
+            try:
+                thumb_size = int(parts[0])
+                path_hash = parts[1]
+                mtime_ns = int(parts[2])
+            except (ValueError, IndexError):
+                log.debug("Invalid thumbnail ID: %s", id_str)
+                return self._error_placeholder
 
-        # Build cache key (same as id_clean)
-        cache_key = f"{thumb_size}/{path_hash}/{mtime_ns}"
+            cache_key = f"{thumb_size}/{path_hash}/{mtime_ns}"
+            # Resolve path only if needed for trace
+            path = self._path_resolver(path_hash) if self._path_resolver else None
+            timer = thumb_debug.ThumbTimer(key=cache_key, path=path, reason=reason)
+            thumb_debug.log_trace("requested", rid=timer.rid, key=timer.key, src=timer.src, reason=reason)
+        else:
+            # Normal fast path — already have id_clean
+            cache_key = id_clean
 
         # Check cache (O(1) lookup)
+        t_cache_get_start = time.perf_counter()
         cached_bytes = self._cache.get(cache_key)
+        dt_cache_get = (time.perf_counter() - t_cache_get_start) * 1000
+        
         if cached_bytes:
+            if timer:
+                thumb_debug.inc("req_cache_hit")
+                thumb_debug.log_trace("cache_hit", rid=timer.rid, ms=f"{dt_cache_get:.3f}")
+            
             # Decode JPEG bytes to pixmap
+            t_pixmap_start = time.perf_counter()
             pixmap = self._bytes_to_pixmap(cached_bytes)
+            dt_pixmap = (time.perf_counter() - t_pixmap_start) * 1000
+
             if pixmap and not pixmap.isNull():
-                if self._debug_timing and not self._first_hit_logged:
-                    self._first_hit_logged = True
-                    log.info(
-                        "[THUMB-TIMING] first thumbnail delivered to UI at %.3fs (req #%d)",
-                        time.perf_counter(), self._request_count,
+                if timer:
+                    thumb_debug.log_trace("delivered", rid=timer.rid, pixmap_ms=f"{dt_pixmap:.3f}")
+                    timer.log_timing(
+                        cache="hit", 
+                        cache_get_ms=f"{dt_cache_get:.3f}",
+                        pixmap_ms=f"{dt_pixmap:.3f}"
                     )
                 return pixmap
+        
+        if timer:
+            thumb_debug.inc("req_cache_miss")
+            thumb_debug.log_trace("cache_miss", rid=timer.rid, ms=f"{dt_cache_get:.3f}")
 
-        # Not in cache - schedule decode if we can resolve the path
-        if self._path_resolver:
-            path = self._path_resolver(path_hash)
-            if path:
-                self._prefetcher.submit(
-                    path, mtime_ns, thumb_size, priority=self._prefetcher.PRIO_HIGH
-                )
+        # Not in cache - parse parts if we haven't already
+        # If timer was created, parts, thumb_size, path_hash, mtime_ns are already set.
+        # If not, we need to parse them now.
+        if not timer:
+            parts = id_clean.split("/")
+            if len(parts) < 3:
+                log.debug("Invalid thumbnail ID format: %s", id_str)
+                return self._error_placeholder
+
+            # Determine if folder (early exit for folders)
+            if parts[0] == "folder":
+                path_hash = parts[1]
+                try:
+                    mtime_ns = int(parts[2])
+                except ValueError:
+                    return self._error_placeholder
+                return self._folder_placeholder
+
+            try:
+                thumb_size = int(parts[0])
+                path_hash = parts[1]
+                mtime_ns = int(parts[2])
+            except (ValueError, IndexError):
+                log.debug("Invalid thumbnail ID: %s", id_str)
+                return self._error_placeholder
+
+        # Resolve path
+        path = self._path_resolver(path_hash) if self._path_resolver else None
+        if path:
+            self._prefetcher.submit(
+                path, mtime_ns, thumb_size, 
+                priority=self._prefetcher.PRIO_HIGH,
+                timer=timer
+            )
 
         # Return placeholder immediately (non-blocking)
         return self._placeholder
