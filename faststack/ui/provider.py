@@ -322,7 +322,7 @@ class UIState(QObject):
             )
         
         # Ensure image source updates when switching grid/loupe
-        self.isGridViewActiveChanged.connect(self.currentImageSourceChanged.emit)
+        self.isGridViewActiveChanged.connect(lambda _: self.currentImageSourceChanged.emit())
 
     def _on_batch_al_progress(self, current: int, total: int):
         self._batch_al_current = current
