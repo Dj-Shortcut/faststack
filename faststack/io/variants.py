@@ -3,14 +3,11 @@
 Pure-logic module with no Qt dependencies.
 """
 
-import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
-log = logging.getLogger(__name__)
+from faststack.io.utils import normalize_path_key as norm_path
 
 # Token-boundary regex: match `-developed` as a real dash-delimited token.
 # Ensures "undeveloped" or "mydeveloped" do NOT match.
@@ -57,12 +54,12 @@ def parse_variant_stem(stem: str) -> Tuple[str, bool, Optional[int]]:
         - backup_number: None if not a backup, 1 for `-backup`, N for `-backupN`
     """
     # 1. Check for -developed token
-    is_developed = bool(_DEVELOPED_TOKEN_RE.search(stem))
+    m = _DEVELOPED_TOKEN_RE.search(stem)
+    is_developed = m is not None
 
     # 2. Remove exactly one -developed token (first occurrence) -> stripped
     if is_developed:
         # Find the match and remove it, handling leading/trailing dashes
-        m = _DEVELOPED_TOKEN_RE.search(stem)
         start, end = m.start(), m.end()
         # Remove the token and any resulting double-dash or leading/trailing dash
         before = stem[:start]
@@ -103,7 +100,11 @@ def build_variant_map(
     # 1. Parse all files
     groups: Dict[str, VariantGroup] = {}  # keyed by group_key.casefold()
 
-    for path in all_jpg_paths:
+    # Sort paths to ensure deterministic behavior for group_key casing
+    # (The first-seen case preserved stem sets the group's display key).
+    sorted_paths = sorted(all_jpg_paths, key=lambda p: str(p).casefold())
+
+    for path in sorted_paths:
         group_key, is_developed, backup_number = parse_variant_stem(path.stem)
         key_cf = group_key.casefold()
 
@@ -205,13 +206,12 @@ def build_badge_list(group: VariantGroup) -> List[Dict]:
     Each badge is a dict: {"label": str, "path": str, "kind": str}.
     """
     badges = []
-    norm = norm_path
 
     if group.main_path is not None:
         badges.append(
             {
                 "label": "Main",
-                "path": norm(group.main_path),
+                "path": norm_path(group.main_path),
                 "kind": "main",
             }
         )
@@ -220,7 +220,7 @@ def build_badge_list(group: VariantGroup) -> List[Dict]:
         badges.append(
             {
                 "label": "D",
-                "path": norm(group.developed_path),
+                "path": norm_path(group.developed_path),
                 "kind": "developed",
             }
         )
@@ -234,7 +234,7 @@ def build_badge_list(group: VariantGroup) -> List[Dict]:
         badges.append(
             {
                 "label": label,
-                "path": norm(bp),
+                "path": norm_path(bp),
                 "kind": "backup",
             }
         )
@@ -242,6 +242,3 @@ def build_badge_list(group: VariantGroup) -> List[Dict]:
     return badges
 
 
-def norm_path(p: Path) -> str:
-    """Normalize a path for consistent comparison."""
-    return os.path.normcase(os.path.abspath(str(p)))

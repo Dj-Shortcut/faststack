@@ -177,6 +177,7 @@ class AppController(QObject):
     _deleteFinished = Signal(
         object
     )  # Signal for async delete completion (result dict from worker)
+    _exifBriefReady = Signal(str, str)  # (path_str, brief) from background thread
 
     def __init__(
         self,
@@ -387,6 +388,8 @@ class AppController(QObject):
 
         self._metadata_cache = {}
         self._metadata_cache_index = (-1, -1)
+        self._exif_brief_cache: dict = {}  # normalized path key → formatted EXIF string
+        self._exif_pending_path: Optional[str] = None  # path currently awaiting EXIF read
         with self._last_image_lock:
             self.last_displayed_image = None
         self._logged_empty_metadata = False
@@ -447,6 +450,13 @@ class AppController(QObject):
         self._metadata_debounce_timer.timeout.connect(
             self._emit_debounced_metadata_signals
         )
+
+        # Debounce timer for EXIF reads — only fires after user stops scrolling
+        self._exif_debounce_timer = QTimer(self)
+        self._exif_debounce_timer.setSingleShot(True)
+        self._exif_debounce_timer.setInterval(150)  # 150ms debounce
+        self._exif_debounce_timer.timeout.connect(self._read_exif_deferred)
+        self._exifBriefReady.connect(self._on_exif_brief_ready)
 
         # Track if any dialog is open to disable keybindings
         self._dialog_open = False
@@ -828,7 +838,7 @@ class AppController(QObject):
             index, is_navigation=is_navigation, direction=direction
         )
 
-    def load(self):
+    def load(self, skip_thumbnail_refresh: bool = False):
         """Loads images, sidecar data, and starts services."""
         # Reset instrumentation for this load operation
         self._scan_count_variant = 0
@@ -854,7 +864,7 @@ class AppController(QObject):
         self._folder_loaded = True
         self.ui_state.isFolderLoadedChanged.emit()
 
-        if self._is_grid_view_active:
+        if self._is_grid_view_active and not skip_thumbnail_refresh:
 
             # Ensure grid model is populated if starting in grid mode
             if (
@@ -1403,6 +1413,9 @@ class AppController(QObject):
 
     def _emit_debounced_metadata_signals(self):
         """Emit deferred metadata/highlight signals after navigation stops."""
+        if not self.ui_state:
+            return
+
         if self.debug_cache:
             _t_start = time.perf_counter()
             print(
@@ -2267,8 +2280,21 @@ class AppController(QObject):
             )
             filename += f" + {raw_ext}"
 
+        # EXIF brief: instant from cache, otherwise schedule deferred read.
+        # Always read EXIF from the variant group's main image (not backup/developed).
+        exif_key = self._exif_source_key(self.current_index)
+        exif_brief = self._exif_brief_cache.get(exif_key, None)
+        if exif_brief is None:
+            exif_brief = ""
+            # Only restart timer when the pending path actually changes,
+            # so repeated QML property evaluations don't keep resetting it.
+            if self._exif_pending_path != exif_key:
+                self._exif_pending_path = exif_key
+                self._exif_debounce_timer.start()
+
         self._metadata_cache = {
             "filename": filename,
+            "exif_brief": exif_brief,
             "stacked": meta.stacked,
             "stacked_date": meta.stacked_date or "",
             "uploaded": meta.uploaded,
@@ -2283,6 +2309,76 @@ class AppController(QObject):
         }
         self._metadata_cache_index = cache_key
         return self._metadata_cache
+
+    _JPEG_SUFFIXES = frozenset({".jpg", ".jpeg", ".jpe"})
+
+    def _exif_source_key(self, index: int) -> str:
+        """Return a normalized cache key for the EXIF source of image at *index*.
+
+        Resolves to the variant group's main image path when available,
+        so backups/developed files use the same EXIF as the original.
+        Uses ``normalize_path_key`` for Windows case-insensitivity.
+        """
+        img = self.image_files[index]
+        source_path = img.path
+        key_cf = get_group_key_for_path(img.path, self._variant_map)
+        if key_cf is not None:
+            group = self._variant_map[key_cf]
+            if group.main_path is not None:
+                source_path = group.main_path
+        return normalize_path_key(source_path)
+
+    def _read_exif_deferred(self):
+        """Called after 150ms of no navigation. Submits EXIF read to background."""
+        if getattr(self, "_shutting_down", False):
+            return
+        if not self.image_files or self.current_index >= len(self.image_files):
+            return
+        exif_key = self._exif_source_key(self.current_index)
+        if exif_key in self._exif_brief_cache:
+            return  # already cached
+        # Resolve the actual file path for the EXIF source
+        img = self.image_files[self.current_index]
+        source_path = img.path
+        key_cf = get_group_key_for_path(img.path, self._variant_map)
+        if key_cf is not None:
+            group = self._variant_map[key_cf]
+            if group.main_path is not None:
+                source_path = group.main_path
+        # Early return for non-JPEGs — EXIF extraction only supports JPEG
+        if source_path.suffix.lower() not in self._JPEG_SUFFIXES:
+            self._exif_brief_cache[exif_key] = ""
+            return
+        # Submit to histogram executor (daemon, 1 worker) to avoid blocking GUI
+        signal = self._exifBriefReady
+
+        def _worker(key=exif_key, p=str(source_path)):
+            from faststack.imaging.metadata import get_exif_brief
+
+            brief = get_exif_brief(p)
+            signal.emit(key, brief)
+
+        try:
+            self._hist_executor.submit(_worker)
+        except RuntimeError:
+            pass  # executor shut down, ignore
+
+    def _on_exif_brief_ready(self, exif_key: str, brief: str):
+        """Slot called on main thread when background EXIF read completes."""
+        if getattr(self, "_shutting_down", False) or not self.ui_state:
+            return
+        self._exif_brief_cache[exif_key] = brief
+        if self._exif_pending_path == exif_key:
+            self._exif_pending_path = None
+        # Only refresh UI if we're still looking at this image
+        if (
+            self.image_files
+            and self.current_index < len(self.image_files)
+            and self._exif_source_key(self.current_index) == exif_key
+        ):
+            self._metadata_cache_index = (-1, -1)
+            if self.ui_state:
+                self.ui_state.metadataChanged.emit()
 
     def begin_new_stack(self):
         self.stack_start_index = self.current_index
@@ -3387,6 +3483,7 @@ class AppController(QObject):
         self.display_generation += 1
         self._metadata_cache = {}
         self._metadata_cache_index = (-1, -1)
+        self._exif_brief_cache.clear()
 
         # Clear batch indices cache (avoids stale batch membership checks)
         if hasattr(self, "_batch_indices_cache"):
@@ -4742,11 +4839,18 @@ class AppController(QObject):
     def shutdown_qt(self):
         """Shutdown Qt objects only - MUST run on main/Qt thread."""
         self._shutting_down = True  # set EARLY to make all slots no-op
+        self._exif_pending_path = None
         log.info("Application shutting down (Qt cleanup).")
 
         # Stop Qt timers
         try:
             self._metadata_debounce_timer.stop()
+            self._exif_debounce_timer.stop()
+            self._watcher_debounce_timer.stop()
+            self.histogram_timer.stop()
+            self.resize_timer.stop()
+            if hasattr(self, "_thumb_summary_timer"):
+                self._thumb_summary_timer.stop()
         except Exception:
             pass
 
@@ -4890,7 +4994,16 @@ class AppController(QObject):
                     # UI update logic
                     used_gb = self.image_cache.currsize / (1024**3)
                     max_gb = self.image_cache.max_bytes / (1024**3)
-                    msg = f"Cache thrashing! {len(self._eviction_timestamps)} evictions in {CACHE_THRASH_WINDOW_SECS}s. Usage: {used_gb:.1f}GB / {max_gb:.1f}GB."
+
+                    # Include key/value summary to fix lint error and provide context
+                    val_summary = ""
+                    if hasattr(value, "width") and hasattr(value, "height"):
+                        val_summary = f" ({value.width}x{value.height})"
+                    elif hasattr(value, "__len__"):
+                        val_summary = f" (len={len(value)})"
+
+                    key_name = getattr(key, "name", str(key))
+                    msg = f"Cache thrashing! {len(self._eviction_timestamps)} evictions in {CACHE_THRASH_WINDOW_SECS}s. Evicted {key_name}{val_summary}. Usage: {used_gb:.1f}GB / {max_gb:.1f}GB."
 
                     # Schedule UI work safely on main thread
                     # QTimer.singleShot(0, ...) is thread-safe entry to main loop
@@ -7049,9 +7162,10 @@ def main(
     debug_thumb_trace: bool = False,
 ):
     """FastStack Application Entry Point"""
-    global _debug_mode, _debug_thumb_timing
+    global _debug_mode, _debug_thumb_timing, _debug_thumb_trace
     _debug_mode = debug
     _debug_thumb_timing = debug_thumb_timing
+    _debug_thumb_trace = debug_thumb_trace
 
     t0 = time.perf_counter()
     setup_logging(debug)

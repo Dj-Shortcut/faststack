@@ -7,6 +7,7 @@ Todo:   More testing Linux / Mac.   Create Windows .exe.   Write better document
 - Full Screen Mode: Press F11 to toggle fullscreen in loupe view 
 - Spark Line Display: Grid view now shows upload progress indicators per folder.
 - Optimized grid view performance and prefetch behavior.
+- Displays image backups with Bk badges
 - Improved cache eviction and lock handling.
 
 ## 1.5.8 (2026-02-13)

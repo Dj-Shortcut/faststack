@@ -27,7 +27,7 @@ class TestUIPrefetchSafety(unittest.TestCase):
 
         # Default mock behavior
         self.model.rowCount.return_value = 5000
-        self.model.thumbnail_size = (256, 256)
+        self.model.thumbnail_size = 256
 
         def get_entry_mock(i):
             entry = MagicMock()

@@ -1,13 +1,14 @@
 import unittest
+import os
 from pathlib import Path
-from faststack.io.variants import build_variant_map, VariantGroup
+from faststack.io.variants import build_variant_map, VariantGroup, norm_path
 
 
 class TestVariantsLogic(unittest.TestCase):
     def test_main_selection_priority(self):
         """Verify Main selection priority: Non-dev > Dev > Backup."""
 
-        # Cas 1: Pure Main exists
+        # Case 1: Pure Main exists
         paths = [
             Path("img.jpg"),
             Path("img-developed.jpg"),
@@ -87,6 +88,23 @@ class TestVariantsLogic(unittest.TestCase):
         # Check that backup list contains the backup-developed file
         # It has backup_number=1.
         self.assertEqual(group.backup_paths[1].name, "img-backup-developed.jpg")
+
+    def test_path_normalization(self):
+        """Verify path normalization (case-insensitivity, absolute paths)."""
+        if os.name != "nt":
+            self.skipTest("Path normalization test is Windows-only")
+
+        p1 = Path("C:/Test/File.JPG")
+        p2 = Path("C:/Test/file.jpg")
+
+        n1 = Path(norm_path(p1))
+        n2 = Path(norm_path(p2))
+
+        # On Windows, these should match after normalization
+        self.assertEqual(n1, n2)
+
+        # Basic property check (should not be empty and should be absolute)
+        self.assertTrue(n1.is_absolute())
 
 
 if __name__ == "__main__":

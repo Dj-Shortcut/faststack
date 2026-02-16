@@ -64,7 +64,7 @@ class DaemonThreadPoolExecutor(ThreadPoolExecutor):
 
 def create_daemon_threadpool_executor(
     max_workers: int, thread_name_prefix: str = ""
-) -> ThreadPoolExecutor:
+) -> DaemonThreadPoolExecutor:
     """
     Create a ThreadPoolExecutor whose worker threads are daemon threads.
     Returns a DaemonThreadPoolExecutor instance which is a subclass of ThreadPoolExecutor.

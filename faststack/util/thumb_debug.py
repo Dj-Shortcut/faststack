@@ -192,15 +192,15 @@ class ThumbTimer:
         parts.append(f"total_ms={total_ms:.1f}")
 
         # Phase timings
-        if self.t_queued:
+        if self.t_queued is not None:
             sched_ms = (self.t_queued - self.t_requested) * 1000
             parts.append(f"sched_ms={sched_ms:.1f}")
 
-            if self.t_worker_start:
+            if self.t_worker_start is not None:
                 wait_ms = (self.t_worker_start - self.t_queued) * 1000
                 parts.append(f"wait_ms={wait_ms:.1f}")
 
-                if self.t_done:
+                if self.t_done is not None:
                     worker_ms = (self.t_done - self.t_worker_start) * 1000
                     parts.append(f"worker_ms={worker_ms:.1f}")
 

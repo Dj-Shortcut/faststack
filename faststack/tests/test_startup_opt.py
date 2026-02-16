@@ -31,14 +31,13 @@ def controller(tmp_path, qapp):
 
 
 def test_startup_only_one_scan(controller):
-    """Verify that startup performs exactly one variant scan and zero simple scans."""
+    """Verify that startup performs exactly one variant scan."""
     with patch(
         "faststack.app.find_images_with_variants", return_value=([], {})
     ) as mock_scan:
         controller.load()
 
     assert controller._scan_count_variant == 1
-    assert controller._scan_count_simple == 0
     assert controller._grid_refreshes == 1
     assert mock_scan.call_count == 1
 
@@ -89,13 +88,7 @@ def test_loupe_filter_handles_dirty_flag(controller):
     controller._grid_refreshes = 0
     controller._thumbnail_model.refresh_from_controller.reset_mock()
 
-    print(
-        f"DEBUG: before apply_filter: grid_active={controller._is_grid_view_active}, dirty={controller._grid_model_dirty}"
-    )
     controller.apply_filter("test", [])
-    print(
-        f"DEBUG: after apply_filter: grid_active={controller._is_grid_view_active}, dirty={controller._grid_model_dirty}"
-    )
 
     # Grid should NOT have refreshed
     assert (

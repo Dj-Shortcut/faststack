@@ -2,6 +2,7 @@
 
 import logging
 import time
+from urllib.parse import unquote
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -139,8 +140,80 @@ class ThumbnailProvider(QQuickImageProvider):
         # Format: {size}/{path_hash}/{mtime_ns}?r={rev}
         # Or: folder/{path_hash}/{mtime_ns}?r={rev}
 
-        # Strip query params
-        id_clean = id_str.split("?")[0]
+    def _parse_id(
+        self, id_str: str
+    ) -> tuple[str, list[str], Optional[int], Optional[str], Optional[int], str, bool, bool]:
+        """Parse the thumbnail ID string.
+
+        Format: {size}/{path_hash}/{mtime_ns}?r={rev}
+        Or: folder/{path_hash}/{mtime_ns}?r={rev}
+
+        Returns:
+            Tuple of (id_clean, parts, thumb_size, path_hash, mtime_ns, reason, is_folder, is_valid)
+        """
+        # Split query params
+        parts_query = id_str.split("?")
+        id_clean = parts_query[0]
+        reason = "unknown"
+
+        if len(parts_query) > 1:
+            query = parts_query[1]
+            for param in query.split("&"):
+                if param.startswith("reason="):
+                    # Robust parsing with split(..., 1) and URL decoding
+                    reason = unquote(param.split("=", 1)[1])
+
+        parts = id_clean.split("/")
+        if len(parts) < 3:
+            return id_clean, parts, None, None, None, reason, False, False
+
+        is_folder = parts[0] == "folder"
+        try:
+            # If folder, we don't have a thumb_size in the first part, 
+            # but we need path_hash and mtime_ns.
+            if is_folder:
+                thumb_size = self._default_size
+                path_hash = parts[1]
+                mtime_ns = int(parts[2])
+            else:
+                thumb_size = int(parts[0])
+                path_hash = parts[1]
+                mtime_ns = int(parts[2])
+            return id_clean, parts, thumb_size, path_hash, mtime_ns, reason, is_folder, True
+        except (ValueError, IndexError):
+            return id_clean, parts, None, None, None, reason, is_folder, False
+
+    def requestPixmap(self, id_str: str, size: QSize, requestedSize: QSize) -> QPixmap:
+        """Request a pixmap for the given ID.
+
+        This method is O(1) - returns immediately with cached data or placeholder.
+
+        Args:
+            id_str: URL path after "image://thumbnail/"
+            size: Output size reference (set by us)
+            requestedSize: Requested size from QML
+
+        Returns:
+            QPixmap of the thumbnail or placeholder
+        """
+        # Parse the ID
+        (
+            id_clean,
+            parts,
+            thumb_size,
+            path_hash,
+            mtime_ns,
+            reason,
+            is_folder,
+            is_valid,
+        ) = self._parse_id(id_str)
+
+        if not is_valid:
+            log.debug("Invalid thumbnail ID: %s", id_str)
+            return self._error_placeholder
+
+        if is_folder:
+            return self._folder_placeholder
 
         # Track total requests if logging enabled
         if thumb_debug.timing_enabled or thumb_debug.trace_enabled:
@@ -148,50 +221,19 @@ class ThumbnailProvider(QQuickImageProvider):
 
         # Deferred logging setup
         timer = None
+        cache_key = id_clean
         if thumb_debug.timing_enabled or thumb_debug.trace_enabled:
-            # Parse reason
-            reason = "unknown"
-            parts_query = id_str.split("?")
-            if len(parts_query) > 1:
-                query = parts_query[1]
-                for param in query.split("&"):
-                    if param.startswith("reason="):
-                        reason = param.split("=")[1]
-
-            # Key/ID parts
-            # Key format: {size}/{path_hash}/{mtime_ns}
-            parts = id_clean.split("/")
-            if len(parts) < 3:
-                log.debug("Invalid thumbnail ID format: %s", id_str)
-                return self._error_placeholder
-
-            # Determine if folder (early exit for folders)
-            if parts[0] == "folder":
-                return self._folder_placeholder
-
-            try:
-                thumb_size = int(parts[0])
-                path_hash = parts[1]
-                mtime_ns = int(parts[2])
-            except (ValueError, IndexError):
-                log.debug("Invalid thumbnail ID: %s", id_str)
-                return self._error_placeholder
-
-            cache_key = f"{thumb_size}/{path_hash}/{mtime_ns}"
             # Resolve path only if needed for trace
             path = self._path_resolver(path_hash) if self._path_resolver else None
             timer = thumb_debug.ThumbTimer(key=cache_key, path=path, reason=reason)
             thumb_debug.log_trace(
                 "requested", rid=timer.rid, key=timer.key, src=timer.src, reason=reason
             )
-        else:
-            # Normal fast path — already have id_clean
-            cache_key = id_clean
 
         # Check cache (O(1) lookup)
-        t_cache_get_start = time.perf_counter()
+        t_cache_get_start = time.perf_counter() if timer else 0
         cached_bytes = self._cache.get(cache_key)
-        dt_cache_get = (time.perf_counter() - t_cache_get_start) * 1000
+        dt_cache_get = (time.perf_counter() - t_cache_get_start) * 1000 if timer else 0
 
         if cached_bytes:
             if timer:
@@ -201,9 +243,9 @@ class ThumbnailProvider(QQuickImageProvider):
                 )
 
             # Decode JPEG bytes to pixmap
-            t_pixmap_start = time.perf_counter()
+            t_pixmap_start = time.perf_counter() if timer else 0
             pixmap = self._bytes_to_pixmap(cached_bytes)
-            dt_pixmap = (time.perf_counter() - t_pixmap_start) * 1000
+            dt_pixmap = (time.perf_counter() - t_pixmap_start) * 1000 if timer else 0
 
             if pixmap and not pixmap.isNull():
                 if timer:
@@ -221,33 +263,7 @@ class ThumbnailProvider(QQuickImageProvider):
             thumb_debug.inc("req_cache_miss")
             thumb_debug.log_trace("cache_miss", rid=timer.rid, ms=f"{dt_cache_get:.3f}")
 
-        # Not in cache - parse parts if we haven't already
-        # If timer was created, parts, thumb_size, path_hash, mtime_ns are already set.
-        # If not, we need to parse them now.
-        if not timer:
-            parts = id_clean.split("/")
-            if len(parts) < 3:
-                log.debug("Invalid thumbnail ID format: %s", id_str)
-                return self._error_placeholder
-
-            # Determine if folder (early exit for folders)
-            if parts[0] == "folder":
-                path_hash = parts[1]
-                try:
-                    mtime_ns = int(parts[2])
-                except ValueError:
-                    return self._error_placeholder
-                return self._folder_placeholder
-
-            try:
-                thumb_size = int(parts[0])
-                path_hash = parts[1]
-                mtime_ns = int(parts[2])
-            except (ValueError, IndexError):
-                log.debug("Invalid thumbnail ID: %s", id_str)
-                return self._error_placeholder
-
-        # Resolve path
+        # Resolve path - we already have path_hash and mtime_ns
         path = self._path_resolver(path_hash) if self._path_resolver else None
         if path:
             self._prefetcher.submit(

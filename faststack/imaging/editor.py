@@ -1625,7 +1625,7 @@ class ImageEditor:
         shadows: float,
         *,
         srgb_u8_stride: Optional[np.ndarray] = None,
-        srgb_u8: Optional[np.ndarray] = None,
+        srgb_u8: Optional[np.ndarray] = None,  # Planned future alias for srgb_u8_stride
         analysis_state: Optional[Dict[str, float]] = None,
         edits: Optional[Dict[str, Any]] = None,
     ) -> np.ndarray:
@@ -1645,7 +1645,7 @@ class ImageEditor:
             shadows: -1.0 to 1.0, positive lifts shadows, negative crushes
             srgb_u8_stride: Optional uint8 sRGB array (strided) for accurate JPEG clipping detection
                      (should be the image BEFORE linearization)
-            srgb_u8: Keyword-only alias for srgb_u8_stride (preferred if provided).
+            srgb_u8: Keyword-only alias for srgb_u8_stride (not yet active in call site).
             analysis_state: Optional pre-computed analysis state to avoid re-work.
 
         Returns:
@@ -1958,10 +1958,7 @@ class ImageEditor:
             raise RuntimeError("No image loaded")
 
         # Ensure float master exists (preview_only loads may not have it)
-        try:
-            self._ensure_float_image()
-        except RuntimeError:
-            raise
+        self._ensure_float_image()
 
         _debug = log.isEnabledFor(logging.DEBUG)
         if _debug:
@@ -2145,7 +2142,9 @@ class ImageEditor:
             return None
 
         # Only applicable when blacks/whites are the sole active edits
-        edits = self.current_edits
+        with self._lock:
+            edits = self.current_edits.copy()
+
         for key, default in self._initial_edits().items():
             if key in ("blacks", "whites"):
                 continue
@@ -2175,10 +2174,14 @@ class ImageEditor:
 
         # Build 768-entry LUT matching _apply_edits step 13 (cached by rounded key)
         cache_key = (round(blacks, 3), round(whites, 3))
-        cached = self._cached_u8_lut
-        if cached is not None and cached[0] == cache_key:
-            lut_rgb = cached[1]
-        else:
+        with self._lock:
+            cached = self._cached_u8_lut
+            if cached is not None and cached[0] == cache_key:
+                lut_rgb = cached[1]
+            else:
+                lut_rgb = None
+
+        if lut_rgb is None:
             bp = -blacks * 0.15
             wp = 1.0 - (whites * 0.15)
             if abs(wp - bp) < 0.0001:
@@ -2187,7 +2190,8 @@ class ImageEditor:
             lut = (lut - bp) / (wp - bp)
             lut = np.clip(lut, 0.0, 1.0)
             lut_rgb = (lut * 255.0).astype(np.uint8).tolist() * 3  # 768 entries
-            self._cached_u8_lut = (cache_key, lut_rgb)
+            with self._lock:
+                self._cached_u8_lut = (cache_key, lut_rgb)
 
         # Apply LUT via Pillow .point() — single C call, no large NumPy allocation
         rgb_img = self.original_image

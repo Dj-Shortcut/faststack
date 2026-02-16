@@ -37,7 +37,7 @@ class TestMetadata(unittest.TestCase):
             }
 
             mock_img._getexif.return_value = exif_dict
-            mock_open.return_value = mock_img
+            mock_open.return_value.__enter__.return_value = mock_img
 
             # Test
             result = get_exif_data(Path("dummy.jpg"))
@@ -95,7 +95,7 @@ class TestMetadata(unittest.TestCase):
     def test_get_exif_data_no_exif(self, mock_open):
         mock_img = MagicMock()
         mock_img._getexif.return_value = None
-        mock_open.return_value = mock_img
+        mock_open.return_value.__enter__.return_value = mock_img
 
         result = get_exif_data(Path("dummy.jpg"))
         self.assertEqual(result["summary"], {})

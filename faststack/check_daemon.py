@@ -14,5 +14,7 @@ def check_daemon():
     return threading.current_thread().daemon
 
 
-with ThreadPoolExecutor(max_workers=1, initializer=set_daemon) as executor:
-    print(f"Result: {executor.submit(check_daemon).result()}")
+if __name__ == "__main__":
+    with ThreadPoolExecutor(max_workers=1, initializer=set_daemon) as executor:
+        print(f"Result: {executor.submit(check_daemon).result()}")
+

@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
     QThread,
+    QTimer,
     Qt,
     Signal,
     Slot,
@@ -132,6 +133,7 @@ class ThumbnailModel(QAbstractListModel):
         parent=None,
     ):
         super().__init__(parent)
+        self._next_source_reason: Optional[str] = None
         self._base_directory = base_directory.resolve()
         self._current_directory = current_directory.resolve()
         self._get_metadata = get_metadata_callback
@@ -147,15 +149,9 @@ class ThumbnailModel(QAbstractListModel):
             []
         )  # current flag filters (e.g. ["uploaded", "stacked"])
 
-        # One-shot reason for logging
-        self._next_source_reason: Optional[str] = None
-
         # Mapping from thumbnail_id (without query params) to row index
         # id format: "{size}/{path_hash}/{mtime_ns}"
         self._id_to_row: Dict[str, int] = {}
-
-        # One-shot reason for logging
-        self._next_source_reason: Optional[str] = None
 
         # Connect our own signal to handle thumbnail ready events
         self.thumbnailReady.connect(self._on_thumbnail_ready)
@@ -206,8 +202,6 @@ class ThumbnailModel(QAbstractListModel):
             return entry.is_edited
         elif role == self.ThumbnailSourceRole:
             reason = self._next_source_reason or "scroll"
-            # Consume one-shot reason
-            self._next_source_reason = None
             return self._get_thumbnail_source(entry, reason=reason)
         elif role == self.FolderStatsRole:
             if entry.folder_stats:
@@ -424,6 +418,8 @@ class ThumbnailModel(QAbstractListModel):
         finally:
             self.endResetModel()
 
+        # Defer clear so QML's next render frame still sees the reason
+        QTimer.singleShot(0, self._clear_next_source_reason)
         self._folder_count = sum(1 for e in self._entries if e.is_folder)
         self.selectionChanged.emit()
         log.info(
@@ -568,6 +564,7 @@ class ThumbnailModel(QAbstractListModel):
         finally:
             self.endResetModel()
 
+        QTimer.singleShot(0, self._clear_next_source_reason)
         self._folder_count = sum(1 for e in self._entries if e.is_folder)
         self.selectionChanged.emit()
         log.info(
@@ -741,6 +738,10 @@ class ThumbnailModel(QAbstractListModel):
         self._last_selected_index = None
         self._next_source_reason = "jump"
         self.refresh()
+
+    def _clear_next_source_reason(self):
+        """Deferred clear of _next_source_reason (called via QTimer.singleShot)."""
+        self._next_source_reason = None
 
     # Selection methods
 

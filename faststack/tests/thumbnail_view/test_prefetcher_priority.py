@@ -14,7 +14,7 @@ def test_prefetcher_priority(cache):
     """Verify that high priority jobs jump ahead of medium priority ones."""
     finished_jobs = []
 
-    def mock_decode(path, path_hash, mtime_ns, size):
+    def mock_decode(path, path_hash, mtime_ns, size, *args, **kwargs):
         # Simulate some work
         time.sleep(0.1)
         finished_jobs.append(path.name)
@@ -65,7 +65,7 @@ def test_prefetcher_lifo_behavior(cache):
     """Verify that jobs within same priority have LIFO behavior (most recent first)."""
     finished_jobs = []
 
-    def mock_decode(path, path_hash, mtime_ns, size):
+    def mock_decode(path, path_hash, mtime_ns, size, *args, **kwargs):
         time.sleep(0.05)
         finished_jobs.append(path.name)
         return b"fake_data"

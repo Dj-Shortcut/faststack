@@ -419,6 +419,12 @@ class UIState(QObject):
             return ""
         return self.app_controller.get_current_metadata().get("filename", "")
 
+    @Property(str, notify=metadataChanged)
+    def exifBrief(self):
+        if not self.app_controller.image_files:
+            return ""
+        return self.app_controller.get_current_metadata().get("exif_brief", "")
+
     @Property(bool, notify=metadataChanged)
     def isStacked(self):
         if not self.app_controller.image_files:
@@ -566,7 +572,9 @@ class UIState(QObject):
     @Property(str, notify=variantSaveHintChanged)
     def variantSaveHint(self):
         """Returns a hint message when saving from a variant."""
-        return self.app_controller.get_variant_save_hint()
+        if hasattr(self.app_controller, "get_variant_save_hint"):
+            return self.app_controller.get_variant_save_hint()
+        return ""
 
     @Property(str, notify=filterStringChanged)
     def filterString(self):

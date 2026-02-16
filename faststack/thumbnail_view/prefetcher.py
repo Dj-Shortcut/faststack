@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from faststack.imaging.cache import ByteLRUCache
 
 import numpy as np
+import io
 from PIL import Image
 
 from faststack.util.executors import create_priority_executor
@@ -209,7 +210,6 @@ class ThumbnailPrefetcher:
 
             self._inflight[job_key] = (timer.rid if timer else 0, timer)
             thumb_debug.gauge("inflight", len(self._inflight))
-            thumb_debug.gauge("qdepth", len(self._inflight))
 
         # Submit decode job
         try:
@@ -221,8 +221,8 @@ class ThumbnailPrefetcher:
                 path_hash,
                 mtime_ns,
                 size,
-                timer=timer,
-                priority=priority,
+                timer,
+                priority,
             )
 
             with self._inflight_lock:
@@ -259,7 +259,8 @@ class ThumbnailPrefetcher:
         path_hash: str,
         mtime_ns: int,
         size: int,
-        timer: "thumb_debug.ThumbTimer",
+        timer: Optional["thumb_debug.ThumbTimer"] = None,
+        priority: int = PRIO_MED,
     ) -> Optional[bytes]:
         """Worker function to decode a thumbnail.
 
@@ -279,47 +280,61 @@ class ThumbnailPrefetcher:
                 return None
 
             # Check cancellation early if possible
-            if timer.cancelled or self._stop_event.is_set():
-                thumb_debug.log_trace(
-                    "cancel_honored", rid=timer.rid, stage="after_decode"
-                )
+            if (timer and timer.cancelled) or self._stop_event.is_set():
+                if timer:
+                    thumb_debug.log_trace(
+                        "cancel_honored", rid=timer.rid, stage="after_decode"
+                    )
                 return None
 
             # Get EXIF orientation and apply (single point of orientation)
-            with timer.stage("orientation"):
+            # Use stage only if timer exists
+            if timer:
+                with timer.stage("orientation"):
+                    orientation = get_exif_orientation(path)
+                    rgb_array = apply_orientation_to_np(rgb_array, orientation)
+            else:
                 orientation = get_exif_orientation(path)
                 rgb_array = apply_orientation_to_np(rgb_array, orientation)
 
             # Check cancellation again
-            if timer.cancelled or self._stop_event.is_set():
-                thumb_debug.log_trace(
-                    "cancel_honored", rid=timer.rid, stage="after_orientation"
-                )
+            if (timer and timer.cancelled) or self._stop_event.is_set():
+                if timer:
+                    thumb_debug.log_trace(
+                        "cancel_honored", rid=timer.rid, stage="after_orientation"
+                    )
                 return None
 
             # Encode to JPEG bytes for storage
-            with timer.stage("encode"):
+            # Use stage only if timer exists
+            if timer:
+                with timer.stage("encode"):
+                    pil_image = Image.fromarray(rgb_array, mode="RGB")
+                    buf = io.BytesIO()
+                    pil_image.save(buf, format="JPEG", quality=85)
+                    result = buf.getvalue()
+            else:
                 pil_image = Image.fromarray(rgb_array, mode="RGB")
-
-                # Use BytesIO to encode to JPEG
-                import io
-
                 buf = io.BytesIO()
                 pil_image.save(buf, format="JPEG", quality=85)
                 result = buf.getvalue()
 
-            if timer.cancelled:
+            if timer and timer.cancelled:
                 thumb_debug.log_trace("cancel_too_late", rid=timer.rid)
 
             return result
 
         except Exception as e:
-            thumb_debug.log_trace("worker_error", rid=timer.rid, error=str(e))
+            if timer:
+                thumb_debug.log_trace("worker_error", rid=timer.rid, error=str(e))
             log.debug("Failed to decode thumbnail for %s: %s", path, e)
             return None
 
     def _decode_image(
-        self, path: Path, target_size: int, timer: "thumb_debug.ThumbTimer"
+        self,
+        path: Path,
+        target_size: int,
+        timer: Optional["thumb_debug.ThumbTimer"] = None,
     ) -> Optional[np.ndarray]:
         """Decode image to numpy array at target size.
 
@@ -331,15 +346,33 @@ class ThumbnailPrefetcher:
         # Try TurboJPEG for JPEG files
         if HAS_TURBOJPEG and suffix in (".jpg", ".jpeg"):
             try:
-                with timer.stage("io"):
+                if timer:
+                    with timer.stage("io"):
+                        with open(path, "rb") as f:
+                            jpeg_data = f.read()
+
+                    with timer.stage("decode"):
+                        # Get dimensions first
+                        width, height, _, _ = _tj.decode_header(jpeg_data)
+
+                        # Calculate scale factor for turbojpeg (powers of 2: 1, 2, 4, 8)
+                        scale_factor = 1
+                        while (
+                            width // (scale_factor * 2) >= target_size
+                            and height // (scale_factor * 2) >= target_size
+                            and scale_factor < 8
+                        ):
+                            scale_factor *= 2
+
+                        # Decode with scaling
+                        scaling_factor = (1, scale_factor)
+                        rgb = _tj.decode(
+                            jpeg_data, pixel_format=TJPF_RGB, scaling_factor=scaling_factor
+                        )
+                else:
                     with open(path, "rb") as f:
                         jpeg_data = f.read()
-
-                with timer.stage("decode"):
-                    # Get dimensions first
                     width, height, _, _ = _tj.decode_header(jpeg_data)
-
-                    # Calculate scale factor for turbojpeg (powers of 2: 1, 2, 4, 8)
                     scale_factor = 1
                     while (
                         width // (scale_factor * 2) >= target_size
@@ -347,8 +380,6 @@ class ThumbnailPrefetcher:
                         and scale_factor < 8
                     ):
                         scale_factor *= 2
-
-                    # Decode with scaling
                     scaling_factor = (1, scale_factor)
                     rgb = _tj.decode(
                         jpeg_data, pixel_format=TJPF_RGB, scaling_factor=scaling_factor
@@ -357,7 +388,14 @@ class ThumbnailPrefetcher:
                 # Further resize with PIL if needed
                 h, w = rgb.shape[:2]
                 if w > target_size or h > target_size:
-                    with timer.stage("decode"):
+                    if timer:
+                        with timer.stage("resize"):
+                            pil_img = Image.fromarray(rgb)
+                            pil_img.thumbnail(
+                                (target_size, target_size), Image.Resampling.LANCZOS
+                            )
+                            rgb = np.array(pil_img)
+                    else:
                         pil_img = Image.fromarray(rgb)
                         pil_img.thumbnail(
                             (target_size, target_size), Image.Resampling.LANCZOS
@@ -373,13 +411,20 @@ class ThumbnailPrefetcher:
 
         # Fallback to PIL
         try:
-            with timer.stage("decode"):
+            if timer:
+                with timer.stage("decode"):
+                    pil_img = Image.open(path)
+                    # Convert to RGB if needed
+                    if pil_img.mode != "RGB":
+                        pil_img = pil_img.convert("RGB")
+
+                    # Resize
+                    pil_img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
+                    return np.array(pil_img)
+            else:
                 pil_img = Image.open(path)
-                # Convert to RGB if needed
                 if pil_img.mode != "RGB":
                     pil_img = pil_img.convert("RGB")
-
-                # Resize
                 pil_img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
                 return np.array(pil_img)
 
@@ -399,7 +444,6 @@ class ThumbnailPrefetcher:
         with self._inflight_lock:
             self._inflight.pop(job_key, None)
             thumb_debug.gauge("inflight", len(self._inflight))
-            thumb_debug.gauge("qdepth", len(self._inflight))
             if self._futures.get(job_key) is future:
                 del self._futures[job_key]
 

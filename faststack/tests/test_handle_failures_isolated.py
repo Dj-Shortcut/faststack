@@ -37,7 +37,7 @@ class MockController:
 @patch("faststack.app.confirm_permanent_delete", return_value=True)
 @patch("faststack.app.confirm_batch_permanent_delete", return_value=True)
 def test_handle_delete_failures_recycle_codes_isolation(
-    mock_confirm, mock_batch_confirm
+    mock_confirm_batch_permanent_delete, mock_confirm_permanent_delete
 ):
     controller = MockController()
 

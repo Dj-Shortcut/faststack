@@ -276,7 +276,8 @@ class Prefetcher:
 
         # Snapshoting and range computation inside lock
         with self._futures_lock:
-            n = len(self.image_files)
+            image_files = self.image_files
+            n = len(image_files)
             if n == 0:
                 return
             # Ensure current_index is clamped
@@ -347,15 +348,6 @@ class Prefetcher:
         if self._stop_event.is_set():
             return None
 
-        # Capture list snapshot and check bounds before accessing path
-        image_files = self.image_files
-        if index < 0 or index >= len(image_files):
-            return None
-
-        requested_path = (
-            override_path if override_path is not None else image_files[index].path
-        )
-
         if self.debug and priority:
             _t_start = time.perf_counter()
             print(
@@ -363,6 +355,15 @@ class Prefetcher:
             )
 
         with self._futures_lock:
+            # Bounds check must happen inside the lock to stay consistent
+            # with self.image_files (which set_image_files can replace under lock).
+            if index < 0 or index >= len(self.image_files):
+                return None
+
+            requested_path = (
+                override_path if override_path is not None else self.image_files[index].path
+            )
+
             # We track by index. If we already have a job for this index,
             # we must cancel it if the requested path is different
             # (e.g. switching between main and variants).
@@ -489,7 +490,7 @@ class Prefetcher:
                                                     274, 1
                                                 )
                                         except Exception:
-                                            pass
+                                            log.debug("Failed to read EXIF from mmap for %s", target_path, exc_info=True)
                         except Exception as e:
                             log.warning(
                                 "Decode failed (ICC path) index=%d path=%s: %s",
@@ -591,7 +592,7 @@ class Prefetcher:
                                         with PILImage.open(mmapped) as pil_img:
                                             orientation = pil_img.getexif().get(274, 1)
                                     except Exception:
-                                        pass
+                                        log.debug("Failed to read EXIF from mmap for %s", target_path, exc_info=True)
                     except Exception:
                         buffer = None
 
@@ -657,7 +658,7 @@ class Prefetcher:
 
         except Exception as e:
             # Downgraded from ERROR to prevent log noise on bad files
-            log.warning("Error in _decode_and_cache: %s", e)
+            log.warning("Error in _decode_and_cache: %s", e, exc_info=True)
             return None
 
     def _cleanup_future(self, index: int, future: Future):
