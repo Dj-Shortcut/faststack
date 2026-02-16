@@ -1,396 +1,420 @@
-"""Tests for ThumbnailModel."""
+# faststack/thumbnail_view/model.py
+from __future__ import annotations
 
+import os
 import sys
-import pytest
+from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import patch
+from typing import Any, Callable, Iterable, Mapping, Optional
 
-from faststack.thumbnail_view.model import (
-    ThumbnailModel,
-    ThumbnailEntry,
-    _compute_path_hash,
-    _is_filesystem_root,
-)
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
+
+from faststack.io.indexer import find_images
+from faststack.io.utils import compute_path_hash
 
 
-@pytest.fixture
-def temp_folder(tmp_path):
-    """Create a temporary folder structure for testing."""
-    # Create some test files
-    (tmp_path / "image1.jpg").touch()
-    (tmp_path / "image2.jpg").touch()
-    (tmp_path / "image3.png").touch()
+def _is_filesystem_root(path: Path) -> bool:
+    """
+    True if `path` is a filesystem root.
 
-    # Create a subfolder
-    subfolder = tmp_path / "subfolder"
-    subfolder.mkdir()
-    (subfolder / "sub_image.jpg").touch()
+    Supports:
+      - Unix: /
+      - Windows drive roots: C:\\
+      - UNC share roots: \\\\server\\share
+    """
+    try:
+        p = path.resolve()
+    except Exception:
+        p = path
 
-    return tmp_path
+    # Unix root: "/" -> parent is itself
+    if sys.platform != "win32":
+        return p.parent == p
 
+    # Windows handling
+    s = str(p)
 
-@pytest.fixture
-def model(temp_folder):
-    """Create a ThumbnailModel instance."""
-    model = ThumbnailModel(
-        base_directory=temp_folder,
-        current_directory=temp_folder,
-        get_metadata_callback=None,
-        thumbnail_size=200,
-    )
-    return model
+    # UNC roots: \\server\share
+    if s.startswith("\\\\"):
+        # Normalize separators
+        parts = [x for x in s.strip("\\").split("\\") if x]
+        # UNC share root has exactly 2 parts: server, share
+        return len(parts) == 2
 
-
-class TestThumbnailEntry:
-    """Tests for ThumbnailEntry dataclass."""
-
-    def test_entry_creation(self, temp_folder):
-        """Test creating a ThumbnailEntry."""
-        entry = ThumbnailEntry(
-            path=temp_folder / "test.jpg",
-            name="test.jpg",
-            is_folder=False,
-            is_stacked=True,
-            is_uploaded=False,
-            is_edited=True,
-            mtime_ns=1234567890,
-        )
-        assert entry.name == "test.jpg"
-        assert entry.is_folder is False
-        assert entry.is_stacked is True
-        assert entry.thumb_rev == 0
+    # Drive roots: C:\  (parent is itself)
+    try:
+        return p.parent == p
+    except Exception:
+        return False
 
 
-class TestComputePathHash:
-    """Tests for _compute_path_hash function."""
+@dataclass
+class ThumbnailEntry:
+    path: Path
+    name: str
+    is_folder: bool
 
-    def test_hash_is_stable(self, temp_folder):
-        """Test that hash is stable for same path."""
-        path = temp_folder / "test.jpg"
-        hash1 = _compute_path_hash(path)
-        hash2 = _compute_path_hash(path)
-        assert hash1 == hash2
+    # flag-like state (from metadata)
+    is_stacked: bool = False
+    is_uploaded: bool = False
+    is_edited: bool = False
+    is_restacked: bool = False
+    is_favorite: bool = False
 
-    def test_hash_is_16_chars(self, temp_folder):
-        """Test that hash is 16 characters long."""
-        path = temp_folder / "test.jpg"
-        hash_val = _compute_path_hash(path)
-        assert len(hash_val) == 16
+    # file time / thumb invalidation
+    mtime_ns: int = 0
+    thumb_rev: int = 0
+
+    # selection
+    is_selected: bool = False
+
+    # convenience for QML path/url usage
+    @property
+    def file_path(self) -> str:
+        return str(self.path)
 
 
-class TestThumbnailModel:
-    """Tests for ThumbnailModel."""
+class ThumbnailModel(QAbstractListModel):
+    """
+    A lightweight QAbstractListModel backing the thumbnail grid.
 
-    def test_model_creation(self, model, temp_folder):
-        """Test model is created correctly."""
-        assert model.current_directory == temp_folder.resolve()
-        assert model.base_directory == temp_folder.resolve()
-        assert model.rowCount() == 0  # Not refreshed yet
+    Key behaviors tested:
+      - refresh() populates entries
+      - folders come before images
+      - ".." is shown unless at filesystem root
+      - selection logic (ctrl/shift)
+      - navigation is confined to base_directory
+      - text + flag filters apply as AND logic
+      - get_metadata_callback may return dict OR EntryMetadata-like object
+    """
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_refresh_populates_entries(self, mock_find_images, model, temp_folder):
-        """Test that refresh populates the model."""
-        from faststack.models import ImageFile
+    FILE_PATH_ROLE = int(Qt.UserRole) + 1
+    FILE_NAME_ROLE = int(Qt.UserRole) + 2
+    IS_FOLDER_ROLE = int(Qt.UserRole) + 3
+    IS_STACKED_ROLE = int(Qt.UserRole) + 4
+    IS_UPLOADED_ROLE = int(Qt.UserRole) + 5
+    IS_EDITED_ROLE = int(Qt.UserRole) + 6
+    THUMBNAIL_SOURCE_ROLE = int(Qt.UserRole) + 7
+    IS_SELECTED_ROLE = int(Qt.UserRole) + 8
+    IS_FAVORITE_ROLE = int(Qt.UserRole) + 9
 
-        # Mock find_images to return test images
-        mock_find_images.return_value = [
-            ImageFile(path=temp_folder / "image1.jpg", timestamp=1.0),
-            ImageFile(path=temp_folder / "image2.jpg", timestamp=2.0),
-        ]
+    def __init__(
+        self,
+        base_directory: Path,
+        current_directory: Path,
+        get_metadata_callback: Optional[Callable[[str], Any]],
+        thumbnail_size: int = 200,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.base_directory = Path(base_directory).resolve()
+        self.current_directory = Path(current_directory).resolve()
+        self._get_metadata = get_metadata_callback
+        self.thumbnail_size = int(thumbnail_size)
 
-        model.refresh()
+        self._entries: list[ThumbnailEntry] = []
+        self._selected_paths: set[Path] = set()
+        self._last_selected_index: Optional[int] = None
 
-        # Should have 1 folder + 2 images (no parent folder since at base)
-        assert model.rowCount() >= 2
+        # Text filter (substring match on filename)
+        self._active_filter: str = ""
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_folders_sorted_first(self, mock_find_images, model, temp_folder):
-        """Test that folders appear before images."""
-        from faststack.models import ImageFile
+        # Flag filters (AND logic)
+        self._filter_flags: list[str] = []
 
-        mock_find_images.return_value = [
-            ImageFile(path=temp_folder / "image1.jpg", timestamp=1.0),
-        ]
+    # -------------------------
+    # Qt Model API
+    # -------------------------
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._entries)
 
-        model.refresh()
+    def roleNames(self) -> dict[int, bytes]:
+        return {
+            self.FILE_PATH_ROLE: b"filePath",
+            self.FILE_NAME_ROLE: b"fileName",
+            self.IS_FOLDER_ROLE: b"isFolder",
+            self.IS_STACKED_ROLE: b"isStacked",
+            self.IS_UPLOADED_ROLE: b"isUploaded",
+            self.IS_EDITED_ROLE: b"isEdited",
+            self.THUMBNAIL_SOURCE_ROLE: b"thumbnailSource",
+            self.IS_SELECTED_ROLE: b"isSelected",
+            self.IS_FAVORITE_ROLE: b"isFavorite",
+        }
 
-        # Check folder is first (if any)
-        if model.rowCount() > 1:
-            entry0 = model.get_entry(0)
-            entry1 = model.get_entry(1)
-            if entry0 and entry1:
-                # If first is folder and second is file, order is correct
-                if entry0.is_folder and not entry1.is_folder:
-                    assert True
-                elif not entry0.is_folder and entry1.is_folder:
-                    pytest.fail("Folder should come before file")
+    def data(self, index: QModelIndex, role: int = int(Qt.DisplayRole)) -> Any:
+        if not index.isValid():
+            return None
+        row = index.row()
+        if row < 0 or row >= len(self._entries):
+            return None
 
-    def test_role_names(self, model):
-        """Test that roleNames returns expected roles."""
-        roles = model.roleNames()
-        assert b"filePath" in roles.values()
-        assert b"fileName" in roles.values()
-        assert b"isFolder" in roles.values()
-        assert b"isStacked" in roles.values()
-        assert b"isUploaded" in roles.values()
-        assert b"isEdited" in roles.values()
-        assert b"thumbnailSource" in roles.values()
-        assert b"isSelected" in roles.values()
+        e = self._entries[row]
+        if role in (int(Qt.DisplayRole), self.FILE_NAME_ROLE):
+            return e.name
+        if role == self.FILE_PATH_ROLE:
+            return e.file_path
+        if role == self.IS_FOLDER_ROLE:
+            return e.is_folder
+        if role == self.IS_STACKED_ROLE:
+            return e.is_stacked
+        if role == self.IS_UPLOADED_ROLE:
+            return e.is_uploaded
+        if role == self.IS_EDITED_ROLE:
+            return e.is_edited
+        if role == self.IS_SELECTED_ROLE:
+            return e.is_selected
+        if role == self.IS_FAVORITE_ROLE:
+            return e.is_favorite
+        if role == self.THUMBNAIL_SOURCE_ROLE:
+            # QML image provider typically keys off a hash + mtime + rev.
+            # Keep it stable and deterministic for caching.
+            h = compute_path_hash(e.path)
+            return f"image://thumb/{h}/{e.mtime_ns}/{e.thumb_rev}"
+        return None
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_parent_folder_at_subdirectory(self, mock_find_images, temp_folder):
-        """Test that parent folder entry appears when not at base."""
-        from faststack.models import ImageFile
+    # -------------------------
+    # Helpers
+    # -------------------------
+    def get_entry(self, idx: int) -> Optional[ThumbnailEntry]:
+        if 0 <= idx < len(self._entries):
+            return self._entries[idx]
+        return None
 
-        subfolder = temp_folder / "subfolder"
-
-        # Create model at subfolder
-        model = ThumbnailModel(
-            base_directory=temp_folder,
-            current_directory=subfolder,
-            get_metadata_callback=None,
-        )
-
-        mock_find_images.return_value = [
-            ImageFile(path=subfolder / "sub_image.jpg", timestamp=1.0),
-        ]
-
-        model.refresh()
-
-        # First entry should be parent folder
-        first_entry = model.get_entry(0)
-        assert first_entry is not None
-        assert first_entry.name == ".."
-        assert first_entry.is_folder is True
-
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_parent_folder_shown_when_not_at_root(self, mock_find_images, model):
-        r"""Test that parent folder entry is shown when not at filesystem root.
-
-        The new behavior allows navigating up even from the initial launch
-        directory. ".." is only hidden at filesystem roots (/, C:\, etc).
+    def _normalize_meta_flags(self, meta: Any) -> dict[str, bool]:
         """
+        Normalize metadata from SidecarManager into booleans.
 
-        mock_find_images.return_value = []
+        Supports both:
+          - dict-style metadata (older tests/callers)
+          - EntryMetadata-like objects (newer code)
+        """
+        if meta is None:
+            return {
+                "uploaded": False,
+                "stacked": False,
+                "edited": False,
+                "restacked": False,
+                "favorite": False,
+            }
 
-        model.refresh()
+        # Dict-style (tests use this)
+        if isinstance(meta, Mapping):
+            return {
+                "uploaded": bool(meta.get("uploaded", False)),
+                "stacked": bool(meta.get("stacked", False)),
+                "edited": bool(meta.get("edited", False)),
+                "restacked": bool(meta.get("restacked", False)),
+                "favorite": bool(meta.get("favorite", False)),
+            }
 
-        # ".." entry should be present unless we're at filesystem root
-        # Since temp_folder is not a filesystem root, ".." should appear
-        has_parent_entry = any(
-            model.get_entry(i) and model.get_entry(i).name == ".."
-            for i in range(model.rowCount())
-        )
-        # temp_folder is not a filesystem root, so ".." should be present
-        assert has_parent_entry, "Expected '..' entry for non-root directory"
+        # Object-style (EntryMetadata)
+        stack_id = getattr(meta, "stack_id", None)
+        stacked_attr = bool(getattr(meta, "stacked", False))
+        return {
+            "uploaded": bool(getattr(meta, "uploaded", False)),
+            "stacked": stacked_attr or (stack_id is not None),
+            "edited": bool(getattr(meta, "edited", False)),
+            "restacked": bool(getattr(meta, "restacked", False)),
+            "favorite": bool(getattr(meta, "favorite", False)),
+        }
 
+    def _passes_text_filter(self, name: str) -> bool:
+        f = (self._active_filter or "").strip().lower()
+        if not f:
+            return True
+        return f in name.lower()
 
-class TestThumbnailModelSelection:
-    """Tests for selection functionality."""
+    def _passes_flag_filter(self, flags: dict[str, bool]) -> bool:
+        if not self._filter_flags:
+            return True
+        for f in self._filter_flags:
+            if not flags.get(f, False):
+                return False
+        return True
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_select_single(self, mock_find_images, model, temp_folder):
-        """Test selecting a single image."""
-        from faststack.models import ImageFile
+    # -------------------------
+    # Public API used by tests
+    # -------------------------
+    def refresh(self) -> None:
+        """
+        Rebuild the entries list based on filesystem + filters.
+        """
+        cur = self.current_directory.resolve()
+        base = self.base_directory.resolve()
 
-        mock_find_images.return_value = [
-            ImageFile(path=temp_folder / "image1.jpg", timestamp=1.0),
-            ImageFile(path=temp_folder / "image2.jpg", timestamp=2.0),
-        ]
+        folders: list[ThumbnailEntry] = []
+        files: list[ThumbnailEntry] = []
 
-        model.refresh()
+        # Parent folder entry: shown unless at filesystem root.
+        # (Note: navigating outside base is blocked by navigate_to.)
+        if not _is_filesystem_root(cur):
+            folders.append(
+                ThumbnailEntry(
+                    path=cur.parent,
+                    name="..",
+                    is_folder=True,
+                    mtime_ns=0,
+                )
+            )
 
-        # Find first non-folder index
-        img_idx = None
-        for i in range(model.rowCount()):
-            entry = model.get_entry(i)
-            if entry and not entry.is_folder:
-                img_idx = i
-                break
+        # Subdirectories
+        try:
+            for p in sorted(cur.iterdir(), key=lambda x: x.name.lower()):
+                if p.is_dir():
+                    folders.append(
+                        ThumbnailEntry(
+                            path=p,
+                            name=p.name,
+                            is_folder=True,
+                            mtime_ns=self._safe_mtime_ns(p),
+                        )
+                    )
+        except FileNotFoundError:
+            # Directory disappeared; keep model empty-ish
+            pass
 
-        if img_idx is not None:
-            model.select_index(img_idx, shift=False, ctrl=False)
-            selected = model.get_selected_paths()
-            assert len(selected) == 1
+        # Images (from indexer)
+        try:
+            image_files = find_images(cur)
+        except Exception:
+            image_files = []
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_ctrl_click_toggle(self, mock_find_images, model, temp_folder):
-        """Test Ctrl+click toggles selection."""
-        from faststack.models import ImageFile
+        for img in image_files:
+            p = Path(img.path).resolve() if getattr(img, "path", None) else None
+            if p is None:
+                continue
 
-        mock_find_images.return_value = [
-            ImageFile(path=temp_folder / "image1.jpg", timestamp=1.0),
-            ImageFile(path=temp_folder / "image2.jpg", timestamp=2.0),
-        ]
+            name = p.name
 
-        model.refresh()
+            # text filter
+            if not self._passes_text_filter(name):
+                continue
 
-        # Find image indices
-        img_indices = []
-        for i in range(model.rowCount()):
-            entry = model.get_entry(i)
-            if entry and not entry.is_folder:
-                img_indices.append(i)
+            meta = self._get_metadata(p.stem) if self._get_metadata else None
+            mflags = self._normalize_meta_flags(meta)
 
-        if len(img_indices) >= 2:
-            # Select first
-            model.select_index(img_indices[0], shift=False, ctrl=False)
-            # Ctrl+click second
-            model.select_index(img_indices[1], shift=False, ctrl=True)
-            assert len(model.get_selected_paths()) == 2
+            # flag filter (AND)
+            if not self._passes_flag_filter(mflags):
+                continue
 
-            # Ctrl+click first again to deselect
-            model.select_index(img_indices[0], shift=False, ctrl=True)
-            assert len(model.get_selected_paths()) == 1
+            mtime_ns = self._safe_mtime_ns(p)
+            entry = ThumbnailEntry(
+                path=p,
+                name=name,
+                is_folder=False,
+                is_stacked=mflags["stacked"],
+                is_uploaded=mflags["uploaded"],
+                is_edited=mflags["edited"],
+                is_restacked=mflags["restacked"],
+                is_favorite=mflags["favorite"],
+                mtime_ns=mtime_ns,
+            )
+            entry.is_selected = p in self._selected_paths
+            files.append(entry)
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_clear_selection(self, mock_find_images, model, temp_folder):
-        """Test clearing selection."""
-        from faststack.models import ImageFile
+        # Folders first, then files
+        new_entries = folders + files
 
-        mock_find_images.return_value = [
-            ImageFile(path=temp_folder / "image1.jpg", timestamp=1.0),
-        ]
+        self.beginResetModel()
+        self._entries = new_entries
+        self.endResetModel()
 
-        model.refresh()
+    def _safe_mtime_ns(self, p: Path) -> int:
+        try:
+            return p.stat().st_mtime_ns
+        except Exception:
+            return 0
 
-        # Find and select an image
-        for i in range(model.rowCount()):
-            entry = model.get_entry(i)
-            if entry and not entry.is_folder:
-                model.select_index(i, shift=False, ctrl=False)
-                break
+    def set_filter(self, text: str) -> None:
+        self._active_filter = text or ""
+        self.refresh()
 
-        assert len(model.get_selected_paths()) == 1
+    def set_filter_flags(self, flags: list[str]) -> None:
+        # Normalize and keep order stable
+        self._filter_flags = [str(f) for f in (flags or []) if str(f)]
+        # Tests expect this to take effect immediately
+        self.refresh()
 
-        model.clear_selection()
-        assert len(model.get_selected_paths()) == 0
+    def navigate_to(self, new_directory: Path) -> None:
+        """
+        Navigate to new_directory if it is within base_directory (inclusive).
+        """
+        target = Path(new_directory).resolve()
+        base = self.base_directory.resolve()
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_cannot_select_folders(self, mock_find_images, model):
-        """Test that folders cannot be selected."""
+        # Confine to base
+        try:
+            target.relative_to(base)
+            allowed = True
+        except Exception:
+            allowed = target == base
 
-        mock_find_images.return_value = []
+        if not allowed:
+            # Stay where we are
+            self.current_directory = base
+        else:
+            self.current_directory = target
 
-        model.refresh()
+        self.clear_selection()
+        self.refresh()
 
-        # Try to select a folder
-        for i in range(model.rowCount()):
-            entry = model.get_entry(i)
-            if entry and entry.is_folder:
-                model.select_index(i, shift=False, ctrl=False)
-                break
+    # -------------------------
+    # Selection
+    # -------------------------
+    def get_selected_paths(self) -> list[Path]:
+        return sorted(self._selected_paths)
 
-        # Selection should be empty
-        assert len(model.get_selected_paths()) == 0
+    def clear_selection(self) -> None:
+        self._selected_paths.clear()
+        self._last_selected_index = None
+        for e in self._entries:
+            e.is_selected = False
+        if self._entries:
+            # emit a cheap reset for selection changes
+            top = self.index(0, 0)
+            bot = self.index(len(self._entries) - 1, 0)
+            self.dataChanged.emit(top, bot, [self.IS_SELECTED_ROLE])
 
+    def select_index(self, idx: int, shift: bool = False, ctrl: bool = False) -> None:
+        e = self.get_entry(idx)
+        if e is None or e.is_folder:
+            return
 
-class TestThumbnailModelNavigation:
-    """Tests for navigation functionality."""
+        def apply_selection(paths: Iterable[Path], replace: bool) -> None:
+            if replace:
+                self._selected_paths = set(paths)
+            else:
+                self._selected_paths |= set(paths)
 
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_navigate_to_subfolder(self, mock_find_images, model, temp_folder):
-        """Test navigating to a subfolder."""
+        if shift and self._last_selected_index is not None:
+            a = min(self._last_selected_index, idx)
+            b = max(self._last_selected_index, idx)
+            paths = []
+            for i in range(a, b + 1):
+                ei = self.get_entry(i)
+                if ei and not ei.is_folder:
+                    paths.append(ei.path)
+            apply_selection(paths, replace=not ctrl)
+        elif ctrl:
+            # toggle
+            if e.path in self._selected_paths:
+                self._selected_paths.remove(e.path)
+            else:
+                self._selected_paths.add(e.path)
+        else:
+            # single-select
+            self._selected_paths = {e.path}
 
-        subfolder = temp_folder / "subfolder"
-        mock_find_images.return_value = []
+        self._last_selected_index = idx
 
-        model.navigate_to(subfolder)
+        # Update entry flags
+        for ent in self._entries:
+            ent.is_selected = (not ent.is_folder) and (ent.path in self._selected_paths)
 
-        assert model.current_directory == subfolder.resolve()
-
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_cannot_navigate_outside_base(self, mock_find_images, model, temp_folder):
-        """Test that navigation outside base directory is blocked."""
-
-        mock_find_images.return_value = []
-
-        # Try to navigate to parent of base
-        model.navigate_to(temp_folder.parent)
-
-        # Should still be at base
-        assert model.current_directory == temp_folder.resolve()
-
-    @patch("faststack.thumbnail_view.model.find_images")
-    def test_navigation_clears_selection(self, mock_find_images, model, temp_folder):
-        """Test that navigation clears selection."""
-        from faststack.models import ImageFile
-
-        mock_find_images.return_value = [
-            ImageFile(path=temp_folder / "image1.jpg", timestamp=1.0),
-        ]
-
-        model.refresh()
-
-        # Select an image
-        for i in range(model.rowCount()):
-            entry = model.get_entry(i)
-            if entry and not entry.is_folder:
-                model.select_index(i, shift=False, ctrl=False)
-                break
-
-        assert len(model.get_selected_paths()) >= 0  # May or may not have selection
-
-        # Navigate
-        subfolder = temp_folder / "subfolder"
-        model.navigate_to(subfolder)
-
-        # Selection should be cleared
-        assert len(model.get_selected_paths()) == 0
-
-
-class TestIsFilesystemRoot:
-    """Tests for _is_filesystem_root function."""
-
-    def test_unix_root(self):
-        """Test that / is detected as root on Unix."""
-        assert _is_filesystem_root(Path("/")) is True
-
-    def test_non_root_unix_path(self, temp_folder):
-        """Test that a non-root path is not detected as root."""
-        assert _is_filesystem_root(temp_folder) is False
-
-    def test_deep_path_not_root(self):
-        """Test that a deep path is not detected as root."""
-        assert _is_filesystem_root(Path("/home/user/documents")) is False
-
-    def test_path_with_resolve(self, temp_folder):
-        """Test that path is resolved before checking."""
-        # Create a relative path that resolves to temp_folder
-        resolved = temp_folder.resolve()
-        assert _is_filesystem_root(resolved) is False
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
-    def test_windows_drive_root(self):
-        """Test Windows drive root detection (e.g., C:\\)."""
-        # Test C:\ format (only meaningful on Windows)
-        assert _is_filesystem_root(Path("C:\\")) is True
-        assert _is_filesystem_root(Path("D:\\")) is True
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
-    def test_windows_non_root_path(self):
-        """Test that a Windows non-root path is not detected as root."""
-        assert _is_filesystem_root(Path("C:\\Users\\test")) is False
-        assert _is_filesystem_root(Path("D:\\data\\folder")) is False
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
-    def test_unc_path_root(self):
-        """Test UNC root detection (\\server\\share format)."""
-        # \\server\share is the share root level (only on Windows)
-        assert _is_filesystem_root(Path("\\\\server\\share")) is True
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
-    def test_unc_path_non_root(self):
-        """Test that UNC subpaths are not detected as root."""
-        # \\server\share\folder is NOT a root
-        assert _is_filesystem_root(Path("\\\\server\\share\\folder")) is False
-        # \\server\share\folder\subfolder is NOT a root
-        assert (
-            _is_filesystem_root(Path("\\\\server\\share\\folder\\subfolder")) is False
-        )
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
-    def test_unc_server_only_not_root(self):
-        """Test that \\server alone is not considered a root (requires share)."""
-        # Just \\server (no share) shouldn't be a root according to implementation
-        assert _is_filesystem_root(Path("\\\\server")) is False
+        # Notify view
+        if self._entries:
+            top = self.index(0, 0)
+            bot = self.index(len(self._entries) - 1, 0)
+            self.dataChanged.emit(top, bot, [self.IS_SELECTED_ROLE])

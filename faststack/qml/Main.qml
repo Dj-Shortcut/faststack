@@ -1,9 +1,9 @@
 import QtQuick
 import QtQuick.Window
+import QtQuick.Dialogs
 import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Dialogs
 import "."
 
 ApplicationWindow {
@@ -502,8 +502,23 @@ ApplicationWindow {
             ItemDelegate {
                 width: 220
                 height: 36
-                text: "Run Stacks"
-                onClicked: { if (uiState) uiState.launch_helicon(); actionsMenu.close() }
+                text: "Run Stacks (raw)"
+                onClicked: { if (uiState) uiState.launch_helicon(true); actionsMenu.close() }
+                background: Rectangle {
+                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: root.currentTextColor
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 10
+                }
+            }
+            ItemDelegate {
+                width: 220
+                height: 36
+                text: "Run Stacks (jpg)"
+                onClicked: { if (uiState) uiState.launch_helicon(false); actionsMenu.close() }
                 background: Rectangle {
                     color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
                 }
@@ -582,6 +597,78 @@ ApplicationWindow {
                 text: "Clear Filename Filter"
                 onClicked: {
                     if (controller) controller.clear_filter()
+                    actionsMenu.close()
+                }
+                background: Rectangle {
+                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: root.currentTextColor
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 10
+                }
+            }
+            ItemDelegate {
+                width: 220
+                height: 36
+                text: "Add Favorites to Batch"
+                onClicked: {
+                    if (uiState) uiState.addFavoritesToBatch()
+                    actionsMenu.close()
+                }
+                background: Rectangle {
+                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: root.currentTextColor
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 10
+                }
+            }
+            ItemDelegate {
+                width: 220
+                height: 36
+                text: "Add Uploaded to Batch"
+                onClicked: {
+                    if (uiState) uiState.addUploadedToBatch()
+                    actionsMenu.close()
+                }
+                background: Rectangle {
+                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: root.currentTextColor
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 10
+                }
+            }
+            ItemDelegate {
+                width: 220
+                height: 36
+                text: "Jump to Last Uploaded"
+                onClicked: {
+                    if (uiState) uiState.jumpToLastUploaded()
+                    actionsMenu.close()
+                }
+                background: Rectangle {
+                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: root.currentTextColor
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 10
+                }
+            }
+            ItemDelegate {
+                width: 220
+                height: 36
+                text: "Auto-Level Batch"
+                onClicked: {
+                    if (uiState) uiState.batchAutoLevels()
                     actionsMenu.close()
                 }
                 background: Rectangle {
@@ -820,6 +907,11 @@ ApplicationWindow {
                 text: uiState ? ` | Restacked on ${uiState.restackedDate}` : ""
                 color: "cyan"
                 visible: uiState ? (uiState.imageCount > 0 && uiState.isRestacked) : false
+            }
+            Label {
+                text: " | Favorite"
+                color: "gold"
+                visible: uiState ? (uiState.imageCount > 0 && uiState.isFavorite) : false
             }
             Label {
                 text: uiState ? ` | Filter: "${uiState.filterString}"` : ""
@@ -1080,6 +1172,7 @@ ApplicationWindow {
                           "&nbsp;&nbsp;J / Right Arrow: Next Image<br>" +
                           "&nbsp;&nbsp;K / Left Arrow: Previous Image<br>" +
                           "&nbsp;&nbsp;G: Jump to Image Number<br>" +
+                          "&nbsp;&nbsp;Alt+U: Jump to Last Uploaded<br>" +
                           "&nbsp;&nbsp;I: Show EXIF Data<br>" +
                           "&nbsp;&nbsp;T: Toggle Thumbnail Grid / Single Image View<br><br>" +
                           "<b>Thumbnail Grid View:</b><br>" +
@@ -1118,6 +1211,7 @@ ApplicationWindow {
                           "&nbsp;&nbsp;}: End current batch<br>" +
                           "&nbsp;&nbsp;\\: Clear all batches<br><br>" +
                           "<b>Flag Toggles:</b><br>" +
+                          "&nbsp;&nbsp;F: Toggle favorite flag<br>" +
                           "&nbsp;&nbsp;U: Toggle uploaded flag<br>" +
                           "&nbsp;&nbsp;Ctrl+E: Toggle edited flag<br>" +
                           "&nbsp;&nbsp;Ctrl+S: Toggle stacked flag<br><br>" +
@@ -1178,7 +1272,7 @@ ApplicationWindow {
         backgroundColor: root.currentBackgroundColor
         textColor: root.currentTextColor
         onAccepted: {
-            if (uiState) uiState.applyFilter(filterString)
+            if (uiState) uiState.applyFilter(filterString, filterFlags)
         }
     }
 
@@ -1228,6 +1322,12 @@ ApplicationWindow {
         textColor: root.currentTextColor
     }
 
+    BatchProgressDialog {
+        id: batchProgressDialog
+        backgroundColor: root.currentBackgroundColor
+        textColor: root.currentTextColor
+    }
+
     // Debug Cache Indicator (Yellow Square)
     Rectangle {
         id: debugIndicator
@@ -1252,24 +1352,27 @@ ApplicationWindow {
         title: "Clean up Recycle Bins?"
         x: (parent.width - width) / 2
         y: (parent.height - height) / 2
-        width: Math.min(550, parent.width * 0.85)
+        width: Math.min(600, parent.width * 0.9)
         modal: true
         standardButtons: Dialog.NoButton
         
+        // Ensure the dialog is fully opaque and has a solid background
         background: Rectangle {
-            color: root.isDarkTheme ? "#2d2d2d" : "#ffffff"
-            border.color: root.isDarkTheme ? "#555555" : "#cccccc"
-            radius: 8
+            color: root.isDarkTheme ? "#1e1e1e" : "#fdfdfd"
+            border.color: root.isDarkTheme ? "#444444" : "#dddddd"
+            border.width: 1
+            radius: 12
         }
         
         header: Rectangle {
-            implicitHeight: 50
-            color: root.isDarkTheme ? "#333333" : "#f0f0f0"
-            radius: 8
+            implicitHeight: 60
+            color: root.isDarkTheme ? "#252525" : "#f2f2f2"
+            radius: 12
+            // Bottom corners should not be rounded to merge with body
             Rectangle {
                 anchors.bottom: parent.bottom
                 width: parent.width
-                height: 8
+                height: 12
                 color: parent.color
             }
             Text {
@@ -1277,97 +1380,192 @@ ApplicationWindow {
                 text: "Clean up Recycle Bins?"
                 color: root.currentTextColor
                 font.bold: true
-                font.pixelSize: 18
+                font.pixelSize: 20
             }
         }
 
-        // Use Column inside the default content area
-        Column {
+        contentItem: Column {
             id: dialogContent
-            anchors.fill: parent
-            anchors.margins: 20
-            spacing: 12
+            width: recycleBinCleanupDialog.width
+            spacing: 20
+            topPadding: 10
+            bottomPadding: 10
+            leftPadding: 20
+            rightPadding: 20
             
-            Text {
-                width: parent.width
+            Label {
+                width: dialogContent.width - 40
                 text: uiState ? uiState.recycleBinStatsText : "Loading..."
-                color: root.currentTextColor
+                color: root.isDarkTheme ? "#efefef" : "#333333"
                 wrapMode: Text.WordWrap
-                font.pixelSize: 14
-                lineHeight: 1.4
+                font.pixelSize: 16
+                lineHeight: 1.3
             }
 
-            Text {
-                text: detailedSection.visible ? "▼ Hide File List" : "▶ Show File List"
-                color: "#4fb360"
-                font.pixelSize: 13
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: detailedSection.visible = !detailedSection.visible
+            property bool detailsExpanded: false
+
+            Row {
+                width: dialogContent.width - 40
+                spacing: 12
+                
+                Label {
+                    text: "Files to be removed:"
+                    color: "#81C784" // Soft green
+                    font.pixelSize: 15
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Rectangle {
+                    width: detailsToggleText.implicitWidth + 20
+                    height: 28
+                    radius: 14
+                    color: toggleMouseArea.containsMouse ? (root.isDarkTheme ? "#333333" : "#e0e0e0") : "transparent"
+                    border.color: root.isDarkTheme ? "#555555" : "#cccccc"
+                    border.width: 1
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        id: detailsToggleText
+                        anchors.centerIn: parent
+                        text: dialogContent.detailsExpanded ? "Hide Details" : "Show Details"
+                        color: root.currentTextColor
+                        font.pixelSize: 12
+                    }
+
+                    MouseArea {
+                        id: toggleMouseArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: dialogContent.detailsExpanded = !dialogContent.detailsExpanded
+                    }
                 }
             }
 
             Rectangle {
                 id: detailedSection
-                width: parent.width
-                height: visible ? 180 : 0
-                visible: false
-                color: root.isDarkTheme ? "#1a1a1a" : "#f5f5f5"
-                border.color: root.isDarkTheme ? "#444444" : "#cccccc"
+                width: dialogContent.width - 40
+                height: dialogContent.detailsExpanded ? Math.min(250, root.height * 0.4) : 0
+                visible: height > 0
+                color: root.isDarkTheme ? "#121212" : "#f9f9f9"
+                border.color: root.isDarkTheme ? "#333333" : "#eeeeee"
                 border.width: 1
-                radius: 4
+                radius: 8
                 clip: true
                 
-                Behavior on height { NumberAnimation { duration: 150 } }
-
-                Flickable {
+                Behavior on height { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                
+                ScrollView {
                     anchors.fill: parent
                     anchors.margins: 8
-                    contentWidth: detailsText.width
-                    contentHeight: detailsText.height
-                    clip: true
+
                     
-                    Text {
+                    TextArea {
                         id: detailsText
+                        width: parent.width
                         text: uiState ? uiState.recycleBinDetailedText : ""
-                        color: root.currentTextColor
-                        font.family: "Consolas"
-                        font.pixelSize: 12
+                        color: root.isDarkTheme ? "#efefef" : "#333333"
+                        font.family: "Consolas, 'Courier New', monospace"
+                        font.pixelSize: 13
+                        padding: 10
+                        wrapMode: Text.WrapAnywhere
+                        readOnly: true
+                        selectByMouse: true
+                        background: null
                     }
                 }
             }
             
-            // Spacer
-            Item { width: 1; height: 10 }
-            
-            // Buttons row
+            // Premium Pill Buttons
             Row {
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: 15
+                topPadding: 10
                 
-                Button {
-                    text: "Cancel"
-                    flat: true
-                    onClicked: recycleBinCleanupDialog.close()
-                }
-                Button {
-                    text: "Keep and Quit"
-                    onClicked: {
-                        allowCloseWithRecycleBins = true
-                        recycleBinCleanupDialog.close()
-                        Qt.quit()
+                // Cancel Button
+                Rectangle {
+                    width: cancelBtnText.implicitWidth + 40
+                    height: 44
+                    radius: 22
+                    color: "transparent"
+                    border.color: root.isDarkTheme ? "#555555" : "#cccccc"
+                    border.width: 1
+                    
+                    Text {
+                        id: cancelBtnText
+                        anchors.centerIn: parent
+                        text: "Cancel"
+                        color: root.currentTextColor
+                        font.pixelSize: 15
+                        font.bold: true
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: recycleBinCleanupDialog.close()
+                        cursorShape: Qt.PointingHandCursor
+                        onEntered: parent.color = root.isDarkTheme ? "#2a2a2a" : "#eeeeee"
+                        onExited: parent.color = "transparent"
                     }
                 }
-                Button {
-                    text: "Delete and Quit"
-                    highlighted: true
-                    Material.accent: "#e57373"
-                    onClicked: {
-                        if (uiState) uiState.cleanupRecycleBins()
-                        allowCloseWithRecycleBins = true
-                        recycleBinCleanupDialog.close()
-                        Qt.quit()
+
+                // Keep and Quit Button
+                Rectangle {
+                    width: keepBtnText.implicitWidth + 40
+                    height: 44
+                    radius: 22
+                    color: root.isDarkTheme ? "#333333" : "#e0e0e0"
+                    
+                    Text {
+                        id: keepBtnText
+                        anchors.centerIn: parent
+                        text: "Keep and Quit"
+                        color: root.currentTextColor
+                        font.pixelSize: 15
+                        font.bold: true
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            allowCloseWithRecycleBins = true
+                            recycleBinCleanupDialog.close()
+                            Qt.quit()
+                        }
+                        cursorShape: Qt.PointingHandCursor
+                        onEntered: parent.color = root.isDarkTheme ? "#444444" : "#d0d0d0"
+                        onExited: parent.color = root.isDarkTheme ? "#333333" : "#e0e0e0"
+                    }
+                }
+
+                // Delete and Quit Button (Primary Action)
+                Rectangle {
+                    width: deleteBtnText.implicitWidth + 40
+                    height: 44
+                    radius: 22
+                    color: "#ef5350" // Premium Red
+                    
+                    Text {
+                        id: deleteBtnText
+                        anchors.centerIn: parent
+                        text: "Delete and Quit"
+                        color: "white"
+                        font.pixelSize: 15
+                        font.bold: true
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            if (uiState) uiState.cleanupRecycleBins()
+                            allowCloseWithRecycleBins = true
+                            recycleBinCleanupDialog.close()
+                            Qt.quit()
+                        }
+                        cursorShape: Qt.PointingHandCursor
+                        onEntered: parent.color = "#f44336"
+                        onExited: parent.color = "#ef5350"
                     }
                 }
             }

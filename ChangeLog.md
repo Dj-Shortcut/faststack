@@ -2,14 +2,47 @@
 
 Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
 
+## 1.5.8 (2026-02-13)
+
+- Instant delete: move recycle/permanent delete to background thread; debounce refresh; improved undo handling.
+- Users can now filter by flags (uploaded/stacked/edited/restacked/favorite)
+- Fixed bugs in grid view
+- Added **Jump to Last Uploaded** (Alt+U + menu item) to jump to the most recently-uploaded photo in the folder.
+- Improved **shutdown safety**: saving and delete/recycle operations now finish cleanly on exit to avoid data loss.
+- Improved **thumbnail responsiveness**: visible thumbnails are now queued with higher priority than background prefetch.
+- Improved **prefetch stability/performance**: prefetch work runs on daemon threads and cleans up finished futures.
+- UI tweaks: recycle-bin details text is selectable and uses updated colors; metadata filename now shows RAW extension when present (e.g., `IMG_0001.JPG + ORF`).
+
+## 1.5.7 (2026-02-09)
+
+- Auto levels is now much faster!
+- Images can now be tagged as favorite, and there is a menu item to add favorited images to the batch.
+- Avoid full directory rescan after quick saves by inserting the backup file into the cached list via bisect using indexer sort rules.
+- Speed up AWB (Lab) by subsampling from editor float_image; add no-op thresholds + clearer “direction” labels.
+- Improve auto-levels/AWB UX: detailed status messages and per-stage timing logs (compute/save/list/total).
+- Track last auto-levels detail string for “saved” message reuse; minor import/indexer integration tweaks.
+- Centralize canonical image sort key in indexer; store developed adjacency name on ImageFile.
+- Sync filename filter to the thumbnail grid model (apply/clear) and cancel stale thumbnail prefetch jobs so filtered thumbnails load quickly.
+- Add debug timing logs for auto-levels and auto white balance (subsample/mask/Lab compute) to pinpoint slow stages.
+- Add debug-only timing breakdowns for image load, auto-levels percentile analysis, and save pipeline in `ImageEditor`.
+- Refactor `ThumbnailModel` filtering into `set_filter()` with an active filter state; assert refresh runs on the GUI thread to catch threading mistakes.`
+- Export performance: Skip the expensive sRGB→Linear→sRGB round-trip when no linear-space edits are active (WB/exposure/highlights/shadows/clarity/texture/sharpness), and clamp export output to [0,1] on that path.
+- Save performance: Avoid float_image.copy() during export when the edit set guarantees the pipeline won’t mutate the input buffer.
+- Load performance: Apply EXIF orientation on the 8-bit Pillow path before float conversion (rotate uint8), and only rotate the float buffer on the 16-bit OpenCV path.
+- Logging/robustness: Switch warnings/errors to lazy log formatting and improve load/save diagnostics.
+- Quick Auto Levels saves are faster for regular JPGs by using a lightweight “levels-only” save path when possible.
+- Folder refreshes from filesystem changes are now debounced (grouped together), so you get fewer slow rescans during saves.
+- Backup images (`*-backup.jpg`, `*-backup2.jpg`, etc.) are no longer shown in the image list.
+
+
 ## 1.5.6 (2026-02-08)
 
-#### Performance
+### Performance
 - Debounced `metadataChanged` / `highlightStateChanged` emissions to reduce UI overhead during rapid navigation.
 - Increased default prefetch radius to **6** and raised prefetch worker cap to **8** for smoother fast navigation.
 - Added optional `[DBGCACHE]` timing logs for image request/decode and UI refresh paths when `debug_cache` is enabled.
 
-#### Stability
+### Stability
 - Refactored shutdown into `shutdown_qt()` (main thread) and `shutdown_nonqt()` (background-safe), wired from `aboutToQuit` in `main()` with a timeout/stacks fallback to diagnose hangs.
 - Added cooperative cancellation and `cancel_futures=True` shutdown behavior to both main image and thumbnail prefetchers.
 - Ensured thumbnail “ready” callbacks run on the Qt thread when available; hardened cancellation/callback ordering to avoid deadlocks and worker-thread Qt warnings.

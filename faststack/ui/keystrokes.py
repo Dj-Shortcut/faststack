@@ -38,6 +38,7 @@ class Keybinder:
             Qt.Key_X: "remove_from_batch_or_stack",
             # Toggle flags
             Qt.Key_U: "toggle_uploaded",
+            Qt.Key_F: "toggle_favorite",
             Qt.Key_I: "show_exif_dialog",
             # Actions
             Qt.Key_Enter: "launch_helicon",
@@ -66,6 +67,7 @@ class Keybinder:
             (Qt.Key_2, Qt.ControlModifier): "zoom_200",
             (Qt.Key_3, Qt.ControlModifier): "zoom_300",
             (Qt.Key_4, Qt.ControlModifier): "zoom_400",
+            (Qt.Key_U, Qt.AltModifier): "jump_to_last_uploaded",
         }
 
     def _call(self, method_name: str):

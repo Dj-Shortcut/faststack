@@ -39,6 +39,7 @@ class TestEditorErrorHandling(unittest.TestCase):
         # Setup a fake state so save_image attempts to run
         editor.float_image = np.zeros((10, 10, 3), dtype=np.float32)
         editor.current_filepath = Path("fake_path.jpg")
+        editor.original_image = MagicMock()
 
         # Patch create_backup_file to succeed
         with patch(

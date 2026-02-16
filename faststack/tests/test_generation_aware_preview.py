@@ -20,6 +20,7 @@ class TestGenerationAwarePreview(unittest.TestCase):
         self.mock_controller.ui_state.isEditorOpen = True
         self.mock_controller.ui_state.isZoomed = False
         self.mock_controller.current_index = 0
+        self.mock_controller.debug_cache = False
 
         # Setup mock images
         self.mock_preview = MagicMock()

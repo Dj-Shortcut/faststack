@@ -1,12 +1,16 @@
 """QML Image Provider for thumbnail grid view."""
 
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage, QPixmap, QColor
 from PySide6.QtQuick import QQuickImageProvider
+
+from faststack.io.utils import compute_path_hash
+from faststack.models import DecodedImage
 
 if TYPE_CHECKING:
     from faststack.thumbnail_view.model import ThumbnailModel
@@ -165,7 +169,9 @@ class ThumbnailProvider(QQuickImageProvider):
         if self._path_resolver:
             path = self._path_resolver(path_hash)
             if path:
-                self._prefetcher.submit(path, mtime_ns, thumb_size)
+                self._prefetcher.submit(
+                    path, mtime_ns, thumb_size, priority=self._prefetcher.PRIO_HIGH
+                )
 
         # Return placeholder immediately (non-blocking)
         return self._placeholder
@@ -204,14 +210,17 @@ class PathResolver:
 
     def update_from_model(self, model: "ThumbnailModel"):
         """Update registrations from a ThumbnailModel."""
-        import hashlib
-
         self.clear()
+
+        t0 = time.perf_counter()
+
+        # Optimized update using fast string hashing (no filesystem calls)
         for i in range(model.rowCount()):
             entry = model.get_entry(i)
             if entry and not entry.is_folder:
-                # MD5 used for cache key only (non-cryptographic)
-                path_hash = hashlib.md5(  # noqa: S324
-                    str(entry.path.resolve()).encode("utf-8")
-                ).hexdigest()[:16]
+                # Use centralized hash helper to ensure match with ThumbnailModel
+                path_hash = compute_path_hash(entry.path)
                 self._hash_to_path[path_hash] = entry.path
+
+        dt = time.perf_counter() - t0
+        log.debug(f"PathResolver update took {dt*1000:.2f}ms for {model.rowCount()} items")

@@ -15,6 +15,7 @@ Item {
     property bool tileIsUploaded: false
     property bool tileIsEdited: false
     property bool tileIsRestacked: false
+    property bool tileIsFavorite: false
     property bool tileIsInBatch: false
     property bool tileIsCurrent: false
     property string tileThumbnailSource: ""
@@ -44,6 +45,7 @@ Item {
     property color uploadedColor: "#4CAF50"  // Green for uploaded (U)
     property color editedColor: "#FFEB3B"    // Yellow for edited (E)
     property color restackedColor: "#FF9800" // Orange for restacked (R)
+    property color favoriteColor: "#FFD700"  // Gold for favorite (F)
     property color batchColor: "#2196F3"     // Blue for batch (B)
     property color cursorColor: "#00BFFF"    // Cyan for keyboard cursor
     property color loadingColor: tile.isDarkTheme ? "#3c3c3c" : "#e0e0e0"
@@ -194,6 +196,22 @@ Item {
                         font.pixelSize: 11
                         font.bold: true
                         color: "white"
+                    }
+                }
+
+                // Favorite badge (F) - Gold
+                Rectangle {
+                    visible: tile.tileIsFavorite
+                    width: 18
+                    height: 18
+                    radius: 3
+                    color: favoriteColor
+                    Text {
+                        anchors.centerIn: parent
+                        text: "F"
+                        font.pixelSize: 11
+                        font.bold: true
+                        color: "black"
                     }
                 }
 
