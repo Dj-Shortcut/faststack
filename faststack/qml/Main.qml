@@ -16,6 +16,50 @@ ApplicationWindow {
     title: "FastStack - " + (uiState ? uiState.currentDirectory : "Loading...")
 
     property bool allowCloseWithRecycleBins: false
+    property bool fullScreenLoupe: false
+    property var savedWindowGeometry: ({})
+
+    function enterFullScreenLoupe() {
+        if (!uiState || uiState.isGridViewActive) return
+
+        savedWindowGeometry = {
+            x: root.x,
+            y: root.y,
+            width: root.width,
+            height: root.height,
+            visibility: root.visibility
+        }
+
+        fullScreenLoupe = true
+        root.showFullScreen()
+    }
+
+    function exitFullScreenLoupe() {
+        if (!fullScreenLoupe) return
+
+        fullScreenLoupe = false
+        
+        if (savedWindowGeometry.visibility === Window.Maximized) {
+            root.showMaximized()
+        } else {
+            root.showNormal()
+            if (savedWindowGeometry.visibility === Window.Windowed) {
+                root.x = savedWindowGeometry.x
+                root.y = savedWindowGeometry.y
+                root.width = savedWindowGeometry.width
+                root.height = savedWindowGeometry.height
+            }
+        }
+        root.requestActivate()
+    }
+
+    function toggleFullScreenLoupe() {
+        if (fullScreenLoupe) {
+            exitFullScreenLoupe()
+        } else {
+            enterFullScreenLoupe()
+        }
+    }
 
     onClosing: function(close) {
         if (allowCloseWithRecycleBins) {
@@ -67,6 +111,7 @@ ApplicationWindow {
         height: 40
         color: "transparent"
         z: 100  // Ensure it's above the content
+        visible: !root.fullScreenLoupe
 
         // Unified "menu active" flag to avoid flashing
         property bool menuActive: menuBarMouseArea.containsMouse
@@ -765,6 +810,21 @@ ApplicationWindow {
     }
 
     property int footerHeight: 60
+    property int effectiveFooterHeight: fullScreenLoupe ? 0 : footerHeight
+
+    Shortcut {
+        sequence: "F11"
+        context: Qt.ApplicationShortcut
+        enabled: uiState ? !uiState.isGridViewActive && !uiState.isDialogOpen : false
+        onActivated: root.toggleFullScreenLoupe()
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        context: Qt.ApplicationShortcut
+        enabled: root.fullScreenLoupe
+        onActivated: root.exitFullScreenLoupe()
+    }
 
     Shortcut {
         sequence: "E"
@@ -794,6 +854,43 @@ ApplicationWindow {
         }
     }
 
+    // Handle View Switching and Prefetch Gating
+    Connections {
+        target: uiState
+        function onIsGridViewActiveChanged() {
+            if (uiState.isGridViewActive && root.fullScreenLoupe) {
+                root.exitFullScreenLoupe()
+            }
+
+            var gridItem = gridViewLoader.item
+            if (!gridItem) return
+
+            if (uiState.isGridViewActive) {
+                // Switching TO grid:
+                // 1. Immediately disable prefetch to block transient top-of-list requests
+                //    that happen before the view layout/scroll is restored.
+                if (typeof gridItem.setPrefetchEnabled === "function") {
+                    gridItem.setPrefetchEnabled(false)
+                }
+
+                // 2. Re-enable on next event loop tick.
+                //    This allows the GridView to restore its currentIndex/contentY position.
+                Qt.callLater(function() {
+                    var it = gridViewLoader.item
+                    if (uiState.isGridViewActive && it && typeof it.setPrefetchEnabled === "function") {
+                        it.setPrefetchEnabled(true)
+                    }
+                })
+            } else {
+                // Switching AWAY from grid:
+                // Disable immediately to stop background work.
+                if (typeof gridItem.setPrefetchEnabled === "function") {
+                    gridItem.setPrefetchEnabled(false)
+                }
+            }
+        }
+    }
+
     // -------- MAIN VIEW --------
     // StackLayout to switch between loupe and grid view
     StackLayout {
@@ -812,10 +909,16 @@ ApplicationWindow {
                 anchors.fill: parent
                 source: "Components.qml"
                 focus: !uiState || !uiState.isGridViewActive
-                onLoaded: item.footerHeight = Qt.binding(function() { return root.footerHeight })
+                onLoaded: item.footerHeight = Qt.binding(function() { return root.effectiveFooterHeight })
 
                 // Key bindings implemented in old Main.qml
                 Keys.onPressed: function(event) {
+                    if (root.fullScreenLoupe && event.key === Qt.Key_Escape) {
+                        root.exitFullScreenLoupe()
+                        event.accepted = true
+                        return
+                    }
+
                     if (!uiState || !controller) {
                         return
                     }
@@ -845,6 +948,19 @@ ApplicationWindow {
                 visible: uiState && uiState.isGridViewActive
                 focus: uiState && uiState.isGridViewActive
 
+                onLoaded: {
+                    // Enable prefetch on startup if grid is active (single owner)
+                    var loadedItem = item
+                    if (uiState && uiState.isGridViewActive && loadedItem && typeof loadedItem.setPrefetchEnabled === "function") {
+                        // Delay to match the toggle behavior (allow layout to settle)
+                        Qt.callLater(function() {
+                            if (gridViewLoader.item === loadedItem && uiState.isGridViewActive) {
+                                loadedItem.setPrefetchEnabled(true)
+                            }
+                        })
+                    }
+                }
+
                 // Bind theme property to loaded item
                 Binding {
                     target: gridViewLoader.item
@@ -863,12 +979,13 @@ ApplicationWindow {
         id: footerRect
         // Keep footer height fixed so the main image area doesn't change size when
         // stack/batch labels appear or disappear (prevents cache invalidations).
-        height: root.footerHeight
-        implicitHeight: root.footerHeight
+        height: root.effectiveFooterHeight
+        implicitHeight: root.effectiveFooterHeight
         anchors.left: parent.left
         anchors.right: parent.right
         color: Qt.rgba(root.currentBackgroundColor.r, root.currentBackgroundColor.g, root.currentBackgroundColor.b, 0.8)
         clip: true
+        visible: !root.fullScreenLoupe
 
         RowLayout {
             id: footerRow
@@ -965,6 +1082,51 @@ ApplicationWindow {
                     font.pixelSize: 16
                 }
             }
+            // Variant badges (loupe view only, when multiple variants exist)
+            Row {
+                spacing: 4
+                visible: uiState && !uiState.isGridViewActive && uiState.variantBadges.length > 1
+
+                Repeater {
+                    model: uiState ? uiState.variantBadges : []
+
+                    delegate: Rectangle {
+                        width: badgeLabel.implicitWidth + 12
+                        height: 22
+                        radius: 3
+                        color: modelData.active ? "white" : "#555"
+                        border.color: modelData.active ? "#333" : "transparent"
+                        border.width: modelData.active ? 1 : 0
+
+                        Text {
+                            id: badgeLabel
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            font.pixelSize: 11
+                            font.bold: true
+                            color: modelData.active ? "black" : "white"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (uiState) uiState.setVariantOverride(modelData.path)
+                            }
+                        }
+                    }
+                }
+
+                Label {
+                    text: uiState ? uiState.variantSaveHint : ""
+                    color: root.isDarkTheme ? "#aaa" : "#666"
+                    font.pixelSize: 11
+                    font.italic: true
+                    visible: text !== ""
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+
             Rectangle {
                 Layout.fillWidth: true
                 color: "transparent"
@@ -1174,7 +1336,8 @@ ApplicationWindow {
                           "&nbsp;&nbsp;G: Jump to Image Number<br>" +
                           "&nbsp;&nbsp;Alt+U: Jump to Last Uploaded<br>" +
                           "&nbsp;&nbsp;I: Show EXIF Data<br>" +
-                          "&nbsp;&nbsp;T: Toggle Thumbnail Grid / Single Image View<br><br>" +
+                          "&nbsp;&nbsp;T: Toggle Thumbnail Grid / Single Image View<br>" +
+                          "&nbsp;&nbsp;F11: Toggle Fullscreen (Loupe View)<br><br>" +
                           "<b>Thumbnail Grid View:</b><br>" +
                           "&nbsp;&nbsp;Arrow Keys: Navigate between images<br>" +
                           "&nbsp;&nbsp;Enter: Open current image in single view<br>" +
@@ -1232,7 +1395,7 @@ ApplicationWindow {
                           "&nbsp;&nbsp;P: Edit in Photoshop<br>" +
                           "&nbsp;&nbsp;H: Toggle histogram window<br>" +
                           "&nbsp;&nbsp;Ctrl+C: Copy image path to clipboard<br>" +
-                          "&nbsp;&nbsp;Esc: Close dialog/editor, or switch to grid view"
+                          "&nbsp;&nbsp;Esc: Close dialog/editor, switch to grid view, or exit fullscreen"
                     padding: 10
                     wrapMode: Text.WordWrap
                     color: root.currentTextColor

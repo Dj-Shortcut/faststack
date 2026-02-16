@@ -31,6 +31,12 @@ Item {
     }
     
     Keys.onEscapePressed: (event) => {
+        if (root.fullScreenLoupe) {
+            root.exitFullScreenLoupe()
+            event.accepted = true
+            return
+        }
+
         if (uiState && uiState.isCropping) {
             if (mainMouseArea.isRotating) {
                 // Revert rotation
@@ -269,6 +275,7 @@ Item {
             Image {
                 id: mainImage
                 anchors.centerIn: parent
+                visible: uiState && !uiState.isGridViewActive
                 
                 // Image size is now updated atomically in updateRotatorGeometry to prevent distortion
                 // width: sourceSize.width

@@ -80,6 +80,8 @@ class ThumbnailEntry:
     is_restacked: bool = False
     is_favorite: bool = False
     folder_stats: Optional[FolderStats] = None
+    has_backups: bool = False
+    has_developed: bool = False
     mtime_ns: int = 0
     thumb_rev: int = 0  # Bumped when thumbnail is ready, forces QML refresh
 
@@ -111,6 +113,8 @@ class ThumbnailModel(QAbstractListModel):
     IsInBatchRole = Qt.ItemDataRole.UserRole + 15
     IsCurrentRole = Qt.ItemDataRole.UserRole + 16
     IsFavoriteRole = Qt.ItemDataRole.UserRole + 17
+    HasBackupsRole = Qt.ItemDataRole.UserRole + 18
+    HasDevelopedRole = Qt.ItemDataRole.UserRole + 19
 
     # Signal emitted when a thumbnail is ready (id = "{size}/{path_hash}/{mtime_ns}")
     thumbnailReady = Signal(str)
@@ -140,13 +144,24 @@ class ThumbnailModel(QAbstractListModel):
         self._last_selected_index: Optional[int] = None
         self._active_filter: str = ""  # current filename filter (set by AppController)
         self._active_filter_flags: list = []  # current flag filters (e.g. ["uploaded", "stacked"])
+        
+        # One-shot reason for logging
+        self._next_source_reason: Optional[str] = None
 
         # Mapping from thumbnail_id (without query params) to row index
         # id format: "{size}/{path_hash}/{mtime_ns}"
         self._id_to_row: Dict[str, int] = {}
+        
+        # One-shot reason for logging
+        self._next_source_reason: Optional[str] = None
 
         # Connect our own signal to handle thumbnail ready events
         self.thumbnailReady.connect(self._on_thumbnail_ready)
+
+    @property
+    def thumbnail_size(self) -> int:
+        """Target thumbnail size in pixels (read-only)."""
+        return self._thumbnail_size
 
     @property
     def current_directory(self) -> Path:
@@ -188,7 +203,10 @@ class ThumbnailModel(QAbstractListModel):
         elif role == self.IsEditedRole:
             return entry.is_edited
         elif role == self.ThumbnailSourceRole:
-            return self._get_thumbnail_source(entry)
+            reason = self._next_source_reason or "scroll"
+            # Consume one-shot reason
+            self._next_source_reason = None
+            return self._get_thumbnail_source(entry, reason=reason)
         elif role == self.FolderStatsRole:
             if entry.folder_stats:
                 return {
@@ -233,6 +251,10 @@ class ThumbnailModel(QAbstractListModel):
                 loupe_idx = self._get_loupe_index_for_entry(entry)
                 return loupe_idx is not None and loupe_idx == current_idx
             return False
+        elif role == self.HasBackupsRole:
+            return entry.has_backups
+        elif role == self.HasDevelopedRole:
+            return entry.has_developed
 
         return None
 
@@ -265,12 +287,14 @@ class ThumbnailModel(QAbstractListModel):
             self.IsInBatchRole: b"isInBatch",
             self.IsCurrentRole: b"isCurrent",
             self.IsFavoriteRole: b"isFavorite",
+            self.HasBackupsRole: b"hasBackups",
+            self.HasDevelopedRole: b"hasDeveloped",
         }
 
-    def _get_thumbnail_source(self, entry: ThumbnailEntry) -> str:
+    def _get_thumbnail_source(self, entry: ThumbnailEntry, reason: str = "scroll") -> str:
         """Build thumbnail URL for QML Image source.
 
-        Format: image://thumbnail/{size}/{path_hash}/{mtime_ns}?r={rev}
+        Format: image://thumbnail/{size}/{path_hash}/{mtime_ns}?r={rev}&reason={reason}
         Folders use: image://thumbnail/folder/{path_hash}/{mtime_ns}?r={rev}
         """
         path_hash = compute_path_hash(entry.path)
@@ -280,28 +304,21 @@ class ThumbnailModel(QAbstractListModel):
         if entry.is_folder:
             return f"image://thumbnail/folder/{path_hash}/{mtime_ns}?r={rev}"
         else:
-            return f"image://thumbnail/{self._thumbnail_size}/{path_hash}/{mtime_ns}?r={rev}"
+            return f"image://thumbnail/{self._thumbnail_size}/{path_hash}/{mtime_ns}?r={rev}&reason={reason}"
 
-    def set_filter(self, filter_string: str) -> None:
-        """Set the active filename filter and refresh the model.
-
-        Args:
-            filter_string: Filter to apply (case-insensitive substring match on stem).
-                           Pass empty string to clear the filter.
-        """
+    def set_filter(self, filter_string: str, refresh: bool = True) -> None:
+        """Set the active filename filter and optionally refresh the model."""
         self._active_filter = filter_string
-        self.refresh()
+        self._next_source_reason = "filter"
+        if refresh:
+            self.refresh()
 
-    def set_filter_flags(self, flags: list) -> None:
-        """Set the active flag filters and refresh the model.
-
-        Args:
-            flags: List of flag names to filter by (e.g. ["uploaded", "stacked"]).
-                   Images must have ALL listed flags set to True (AND logic).
-                   Pass empty list to clear flag filters.
-        """
+    def set_filter_flags(self, flags: list, refresh: bool = True) -> None:
+        """Set the active flag filters and optionally refresh the model."""
         self._active_filter_flags = list(flags)
-        self.refresh()
+        self._next_source_reason = "filter"
+        if refresh:
+            self.refresh()
 
     def _add_folders_to_entries(self):
         """Scan for folders and add them to self._entries."""
@@ -381,10 +398,16 @@ class ThumbnailModel(QAbstractListModel):
                 for img in images:
                     try:
                         meta = self._get_metadata(img.path.stem)
+                        if not isinstance(meta, dict):
+                            # Ensure it's a dict before .get()
+                            log.debug("Metadata for %s is not a dict: %r", img.path.stem, meta)
+                            continue
+                            
                         if all(meta.get(flag, False) for flag in flags):
                             filtered.append(img)
-                    except Exception:
-                        pass  # Skip images with metadata errors
+                    except Exception as e:
+                        log.debug("Error filtering image %s: %s", img.path, e)
+                        # Skip images with metadata errors
                 images = filtered
 
             self._add_images_to_entries(images)
@@ -472,6 +495,7 @@ class ThumbnailModel(QAbstractListModel):
         Folders are still scanned, but image entries are built from the
         provided objects.
         """
+        self._next_source_reason = "refresh"
         cur, own = QThread.currentThread(), self.thread()
         assert cur == own, f"ThumbnailModel refresh thread mismatch"
         
@@ -503,10 +527,16 @@ class ThumbnailModel(QAbstractListModel):
                             meta = self._get_metadata(img.path.stem)
                         else:
                             continue
+                            
+                        if not isinstance(meta, dict):
+                            log.debug("Metadata for %s is not a dict: %r", img.path.stem, meta)
+                            continue
+
                         if all(meta.get(flag, False) for flag in flags):
                             filtered.append(img)
-                    except Exception:
-                        pass  # Skip images with metadata errors
+                    except Exception as e:
+                        log.debug("Error filtering image %s: %s", img.path, e)
+                        # Skip images with metadata errors
                 images = filtered
 
             self._add_images_to_entries(images, metadata_map)
@@ -552,13 +582,19 @@ class ThumbnailModel(QAbstractListModel):
             elif self._get_metadata:
                 try:
                     meta = self._get_metadata(img.path.stem)
-                    is_stacked = meta.get("stacked", False)
-                    is_uploaded = meta.get("uploaded", False)
-                    is_edited = meta.get("edited", False)
-                    is_restacked = meta.get("restacked", False)
-                    is_favorite = meta.get("favorite", False)
-                except Exception:
-                    pass
+                    if isinstance(meta, dict):
+                        is_stacked = meta.get("stacked", False)
+                        is_uploaded = meta.get("uploaded", False)
+                        is_edited = meta.get("edited", False)
+                        is_restacked = meta.get("restacked", False)
+                        is_favorite = meta.get("favorite", False)
+                    else:
+                        log.debug("Metadata for %s is not a dict: %r", img.path.stem, meta)
+                except Exception as e:
+                    log.debug("Error getting metadata for %s: %s", img.path, e)
+
+            has_backups = getattr(img, 'has_backups', False)
+            has_developed = getattr(img, 'has_developed', False)
 
             self._entries.append(
                 ThumbnailEntry(
@@ -570,6 +606,8 @@ class ThumbnailModel(QAbstractListModel):
                     is_edited=is_edited,
                     is_restacked=is_restacked,
                     is_favorite=is_favorite,
+                    has_backups=has_backups,
+                    has_developed=has_developed,
                     mtime_ns=mtime_ns,
                 )
             )
@@ -597,6 +635,12 @@ class ThumbnailModel(QAbstractListModel):
     def _on_thumbnail_ready(self, thumbnail_id: str):
         """Handle thumbnail ready signal - bump revision and emit dataChanged."""
         if thumbnail_id not in self._id_to_row:
+            if log.isEnabledFor(logging.DEBUG):
+                actual_size = thumbnail_id.split("/", 1)[0] if "/" in thumbnail_id else "?"
+                log.debug(
+                    "thumbnail ready id not in model map: id=%s expected_size=%s actual_size=%s",
+                    thumbnail_id, self._thumbnail_size, actual_size,
+                )
             return
 
         row = self._id_to_row[thumbnail_id]
@@ -660,6 +704,7 @@ class ThumbnailModel(QAbstractListModel):
         self._current_directory = resolved
         self._selected_indices.clear()
         self._last_selected_index = None
+        self._next_source_reason = "jump"
         self.refresh()
 
     # Selection methods
