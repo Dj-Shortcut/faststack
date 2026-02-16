@@ -1,6 +1,13 @@
 # ChangeLog
 
-Todo:   Make it work on Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
+Todo:   More testing Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
+
+## 1.5.9 (2026-02-16)
+
+- Full Screen Mode: Press F11 to toggle fullscreen in loupe view 
+- Spark Line Display: Grid view now shows upload progress indicators per folder.
+- Optimized grid view performance and prefetch behavior.
+- Improved cache eviction and lock handling.
 
 ## 1.5.8 (2026-02-13)
 

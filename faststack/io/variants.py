@@ -14,7 +14,9 @@ log = logging.getLogger(__name__)
 
 # Token-boundary regex: match `-developed` as a real dash-delimited token.
 # Ensures "undeveloped" or "mydeveloped" do NOT match.
-_DEVELOPED_TOKEN_RE = re.compile(r"(?:^|(?<=-))[Dd][Ee][Vv][Ee][Ll][Oo][Pp][Ee][Dd](?=$|(?=-))")
+_DEVELOPED_TOKEN_RE = re.compile(
+    r"(?:^|(?<=-))[Dd][Ee][Vv][Ee][Ll][Oo][Pp][Ee][Dd](?=$|(?=-))"
+)
 
 # Trailing `-backup(\d+)?` token at end of (stripped) stem.
 _BACKUP_TRAILING_RE = re.compile(r"(?:^|-)([Bb][Aa][Cc][Kk][Uu][Pp])(\d+)?$")
@@ -185,7 +187,8 @@ def _select_backups(group: VariantGroup) -> None:
 
 
 def get_group_key_for_path(
-    path: Path, variant_map: Dict[str, VariantGroup],
+    path: Path,
+    variant_map: Dict[str, VariantGroup],
 ) -> Optional[str]:
     """Look up the casefolded group key for a file path."""
     group_key, _, _ = parse_variant_stem(path.stem)
@@ -205,18 +208,22 @@ def build_badge_list(group: VariantGroup) -> List[Dict]:
     norm = norm_path
 
     if group.main_path is not None:
-        badges.append({
-            "label": "Main",
-            "path": norm(group.main_path),
-            "kind": "main",
-        })
+        badges.append(
+            {
+                "label": "Main",
+                "path": norm(group.main_path),
+                "kind": "main",
+            }
+        )
 
     if group.developed_path is not None and group.developed_path != group.main_path:
-        badges.append({
-            "label": "D",
-            "path": norm(group.developed_path),
-            "kind": "developed",
-        })
+        badges.append(
+            {
+                "label": "D",
+                "path": norm(group.developed_path),
+                "kind": "developed",
+            }
+        )
 
     for n in sorted(group.backup_paths.keys()):
         bp = group.backup_paths[n]
@@ -224,11 +231,13 @@ def build_badge_list(group: VariantGroup) -> List[Dict]:
         if bp == group.main_path or bp == group.developed_path:
             continue
         label = "Bk" if n == 1 else f"Bk{n}"
-        badges.append({
-            "label": label,
-            "path": norm(bp),
-            "kind": "backup",
-        })
+        badges.append(
+            {
+                "label": label,
+                "path": norm(bp),
+                "kind": "backup",
+            }
+        )
 
     return badges
 

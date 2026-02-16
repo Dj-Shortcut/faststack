@@ -141,7 +141,7 @@ class ThumbnailProvider(QQuickImageProvider):
 
         # Strip query params
         id_clean = id_str.split("?")[0]
-        
+
         # Track total requests if logging enabled
         if thumb_debug.timing_enabled or thumb_debug.trace_enabled:
             thumb_debug.inc_request_count()
@@ -157,7 +157,7 @@ class ThumbnailProvider(QQuickImageProvider):
                 for param in query.split("&"):
                     if param.startswith("reason="):
                         reason = param.split("=")[1]
-            
+
             # Key/ID parts
             # Key format: {size}/{path_hash}/{mtime_ns}
             parts = id_clean.split("/")
@@ -181,7 +181,9 @@ class ThumbnailProvider(QQuickImageProvider):
             # Resolve path only if needed for trace
             path = self._path_resolver(path_hash) if self._path_resolver else None
             timer = thumb_debug.ThumbTimer(key=cache_key, path=path, reason=reason)
-            thumb_debug.log_trace("requested", rid=timer.rid, key=timer.key, src=timer.src, reason=reason)
+            thumb_debug.log_trace(
+                "requested", rid=timer.rid, key=timer.key, src=timer.src, reason=reason
+            )
         else:
             # Normal fast path — already have id_clean
             cache_key = id_clean
@@ -190,12 +192,14 @@ class ThumbnailProvider(QQuickImageProvider):
         t_cache_get_start = time.perf_counter()
         cached_bytes = self._cache.get(cache_key)
         dt_cache_get = (time.perf_counter() - t_cache_get_start) * 1000
-        
+
         if cached_bytes:
             if timer:
                 thumb_debug.inc("req_cache_hit")
-                thumb_debug.log_trace("cache_hit", rid=timer.rid, ms=f"{dt_cache_get:.3f}")
-            
+                thumb_debug.log_trace(
+                    "cache_hit", rid=timer.rid, ms=f"{dt_cache_get:.3f}"
+                )
+
             # Decode JPEG bytes to pixmap
             t_pixmap_start = time.perf_counter()
             pixmap = self._bytes_to_pixmap(cached_bytes)
@@ -203,14 +207,16 @@ class ThumbnailProvider(QQuickImageProvider):
 
             if pixmap and not pixmap.isNull():
                 if timer:
-                    thumb_debug.log_trace("delivered", rid=timer.rid, pixmap_ms=f"{dt_pixmap:.3f}")
+                    thumb_debug.log_trace(
+                        "delivered", rid=timer.rid, pixmap_ms=f"{dt_pixmap:.3f}"
+                    )
                     timer.log_timing(
-                        cache="hit", 
+                        cache="hit",
                         cache_get_ms=f"{dt_cache_get:.3f}",
-                        pixmap_ms=f"{dt_pixmap:.3f}"
+                        pixmap_ms=f"{dt_pixmap:.3f}",
                     )
                 return pixmap
-        
+
         if timer:
             thumb_debug.inc("req_cache_miss")
             thumb_debug.log_trace("cache_miss", rid=timer.rid, ms=f"{dt_cache_get:.3f}")
@@ -245,9 +251,11 @@ class ThumbnailProvider(QQuickImageProvider):
         path = self._path_resolver(path_hash) if self._path_resolver else None
         if path:
             self._prefetcher.submit(
-                path, mtime_ns, thumb_size, 
+                path,
+                mtime_ns,
+                thumb_size,
                 priority=self._prefetcher.PRIO_HIGH,
-                timer=timer
+                timer=timer,
             )
 
         # Return placeholder immediately (non-blocking)
@@ -300,4 +308,6 @@ class PathResolver:
                 self._hash_to_path[path_hash] = entry.path
 
         dt = time.perf_counter() - t0
-        log.debug(f"PathResolver update took {dt*1000:.2f}ms for {model.rowCount()} items")
+        log.debug(
+            f"PathResolver update took {dt*1000:.2f}ms for {model.rowCount()} items"
+        )

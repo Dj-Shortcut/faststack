@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Lock
 import threading
 from typing import Dict, Optional, Set, Tuple, Callable, TYPE_CHECKING
+
 if TYPE_CHECKING:
     from faststack.imaging.cache import ByteLRUCache
 
@@ -46,12 +47,6 @@ except ImportError:
     log.debug("TurboJPEG not available, using PIL for thumbnail decoding")
 
 
-
-
-
-
-
-
 class ThumbnailPrefetcher:
     """Background thumbnail decoder with ThreadPoolExecutor.
 
@@ -64,7 +59,7 @@ class ThumbnailPrefetcher:
 
     # Priority levels
     PRIO_HIGH = 0  # Visible items
-    PRIO_MED = 1   # Prefetch items
+    PRIO_MED = 1  # Prefetch items
 
     def __init__(
         self,
@@ -99,7 +94,9 @@ class ThumbnailPrefetcher:
         # Track in-flight jobs to avoid duplicates
         # Key: (size, path_hash, mtime_ns)
         # Value: (rid, ThumbTimer)
-        self._inflight: Dict[Tuple[int, str, int], Tuple[int, "thumb_debug.ThumbTimer"]] = {}
+        self._inflight: Dict[
+            Tuple[int, str, int], Tuple[int, "thumb_debug.ThumbTimer"]
+        ] = {}
         self._inflight_lock = Lock()
         self._debug_trace = debug_trace
 
@@ -112,8 +109,12 @@ class ThumbnailPrefetcher:
         if _HAS_QT and self._on_ready:
             try:
                 if QCoreApplication.instance() is not None:
-                    self._ready_emitter = _ReadyEmitter()  # created on constructing thread (should be Qt thread)
-                    self._ready_emitter.ready.connect(self._on_ready, Qt.QueuedConnection)
+                    self._ready_emitter = (
+                        _ReadyEmitter()
+                    )  # created on constructing thread (should be Qt thread)
+                    self._ready_emitter.ready.connect(
+                        self._on_ready, Qt.QueuedConnection
+                    )
             except Exception:
                 self._ready_emitter = None
 
@@ -128,9 +129,12 @@ class ThumbnailPrefetcher:
         )
 
     def submit(
-        self, path: Path, mtime_ns: int, size: int = None, 
+        self,
+        path: Path,
+        mtime_ns: int,
+        size: int = None,
         priority: int = PRIO_MED,
-        timer: Optional["thumb_debug.ThumbTimer"] = None
+        timer: Optional["thumb_debug.ThumbTimer"] = None,
     ) -> bool:
         """Submit a thumbnail decode job.
 
@@ -171,22 +175,37 @@ class ThumbnailPrefetcher:
                     # Capture where this request originated
                     existing_timer.coalesced_from = timer.reason
                     # Update effective priority if this requested one is higher
-                    if existing_timer.prio_effective is not None and priority < existing_timer.prio_effective:
+                    if (
+                        existing_timer.prio_effective is not None
+                        and priority < existing_timer.prio_effective
+                    ):
                         existing_timer.prio_effective = priority
                         if timer:
-                            thumb_debug.log_trace("prio_bump", rid=existing_timer.rid, new_prio=priority, triggered_by_rid=timer.rid)
-                
+                            thumb_debug.log_trace(
+                                "prio_bump",
+                                rid=existing_timer.rid,
+                                new_prio=priority,
+                                triggered_by_rid=timer.rid,
+                            )
+
                 if timer:
                     thumb_debug.inc("decode_coalesced")
-                    thumb_debug.log_trace("coalesced", rid=timer.rid, existing_rid=existing_rid)
+                    thumb_debug.log_trace(
+                        "coalesced", rid=timer.rid, existing_rid=existing_rid
+                    )
                 return False
-            
+
             if timer:
                 timer.t_queued = time.perf_counter()
                 timer.prio_submitted = priority
                 timer.prio_effective = priority
                 thumb_debug.inc("decode_submitted")
-                thumb_debug.log_trace("queued", rid=timer.rid, prio=priority, qdepth=len(self._inflight)+1)
+                thumb_debug.log_trace(
+                    "queued",
+                    rid=timer.rid,
+                    prio=priority,
+                    qdepth=len(self._inflight) + 1,
+                )
 
             self._inflight[job_key] = (timer.rid if timer else 0, timer)
             thumb_debug.gauge("inflight", len(self._inflight))
@@ -195,7 +214,7 @@ class ThumbnailPrefetcher:
         # Submit decode job
         try:
             self._submit_count += 1
-            
+
             future = self._executor.submit(
                 self._decode_worker,
                 path,
@@ -251,17 +270,19 @@ class ThumbnailPrefetcher:
             timer.started = True
             thumb_debug.inc("decode_started")
             thumb_debug.log_trace("worker_start", rid=timer.rid)
-        
+
         try:
             # Read and decode
             rgb_array = self._decode_image(path, size, timer=timer)
-            
+
             if rgb_array is None:
                 return None
 
             # Check cancellation early if possible
             if timer.cancelled or self._stop_event.is_set():
-                thumb_debug.log_trace("cancel_honored", rid=timer.rid, stage="after_decode")
+                thumb_debug.log_trace(
+                    "cancel_honored", rid=timer.rid, stage="after_decode"
+                )
                 return None
 
             # Get EXIF orientation and apply (single point of orientation)
@@ -271,7 +292,9 @@ class ThumbnailPrefetcher:
 
             # Check cancellation again
             if timer.cancelled or self._stop_event.is_set():
-                thumb_debug.log_trace("cancel_honored", rid=timer.rid, stage="after_orientation")
+                thumb_debug.log_trace(
+                    "cancel_honored", rid=timer.rid, stage="after_orientation"
+                )
                 return None
 
             # Encode to JPEG bytes for storage
@@ -284,10 +307,10 @@ class ThumbnailPrefetcher:
                 buf = io.BytesIO()
                 pil_image.save(buf, format="JPEG", quality=85)
                 result = buf.getvalue()
-            
+
             if timer.cancelled:
                 thumb_debug.log_trace("cancel_too_late", rid=timer.rid)
-            
+
             return result
 
         except Exception as e:
@@ -295,7 +318,9 @@ class ThumbnailPrefetcher:
             log.debug("Failed to decode thumbnail for %s: %s", path, e)
             return None
 
-    def _decode_image(self, path: Path, target_size: int, timer: "thumb_debug.ThumbTimer") -> Optional[np.ndarray]:
+    def _decode_image(
+        self, path: Path, target_size: int, timer: "thumb_debug.ThumbTimer"
+    ) -> Optional[np.ndarray]:
         """Decode image to numpy array at target size.
 
         Uses TurboJPEG if available for faster decoding.
@@ -363,7 +388,11 @@ class ThumbnailPrefetcher:
             return None
 
     def _on_decode_done(
-        self, future: Future, job_key: Tuple[int, str, int], cache_key: str, timer: "thumb_debug.ThumbTimer"
+        self,
+        future: Future,
+        job_key: Tuple[int, str, int],
+        cache_key: str,
+        timer: "thumb_debug.ThumbTimer",
     ):
         """Callback when decode completes."""
         # Always remove bookkeeping first to avoid stranding entries
@@ -389,7 +418,11 @@ class ThumbnailPrefetcher:
             if future.cancelled() or (timer and timer.cancelled):
                 if timer:
                     thumb_debug.inc("decode_cancelled")
-                    event = "cancelled_midflight" if timer.started else "cancelled_before_start"
+                    event = (
+                        "cancelled_midflight"
+                        if timer.started
+                        else "cancelled_before_start"
+                    )
                     thumb_debug.log_trace(event, rid=timer.rid)
                 return
 
@@ -397,7 +430,7 @@ class ThumbnailPrefetcher:
             if jpeg_bytes:
                 # Store in cache
                 self._cache.put(cache_key, jpeg_bytes)
-                
+
                 if timer:
                     thumb_debug.inc("decode_done_ok")
                     thumb_debug.log_trace("completed", rid=timer.rid)

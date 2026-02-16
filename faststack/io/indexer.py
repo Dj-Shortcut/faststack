@@ -88,7 +88,9 @@ def _build_image_list(
                 effective_name = base_name.casefold()
                 break
         img = ImageFile(
-            path=p, raw_pair=None, timestamp=effective_ts,
+            path=p,
+            raw_pair=None,
+            timestamp=effective_ts,
             sort_name_cf=effective_name,
         )
         image_entries.append((image_sort_key(img), img))
@@ -124,7 +126,8 @@ def find_images(directory: Path) -> List[ImageFile]:
 
     elapsed = time.perf_counter() - t_start
     paired_count = sum(
-        1 for im in image_files
+        1
+        for im in image_files
         if im.raw_pair and im.path.suffix.lower() in JPG_EXTENSIONS
     )
     raw_only_count = sum(
@@ -132,7 +135,9 @@ def find_images(directory: Path) -> List[ImageFile]:
     )
     log.info(
         "Found %d images (%d paired, %d raw-only).",
-        len(image_files), paired_count, raw_only_count,
+        len(image_files),
+        paired_count,
+        raw_only_count,
     )
     return image_files
 
@@ -184,7 +189,11 @@ def find_images_with_variants(
             filtered.append(img)
         else:
             # This is a developed file reachable via badge: remove from visible list
-            log.debug("Filtering out variant %s (main=%s)", img.path.name, group.main_path.name if group.main_path else "?")
+            log.debug(
+                "Filtering out variant %s (main=%s)",
+                img.path.name,
+                group.main_path.name if group.main_path else "?",
+            )
 
     # Annotate images with variant flags
     for img in filtered:
@@ -196,7 +205,10 @@ def find_images_with_variants(
         group = variant_map.get(key_cf)
         if group:
             img.has_backups = bool(group.backup_paths)
-            img.has_developed = group.developed_path is not None and group.developed_path != group.main_path
+            img.has_developed = (
+                group.developed_path is not None
+                and group.developed_path != group.main_path
+            )
 
     image_files = filtered
 

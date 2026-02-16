@@ -81,7 +81,9 @@ class ByteLRUCache(LRUCache):
                 # Fast check: iterate tombstones (usually very few)
                 # Remove expired tombstones lazily
                 now = time.monotonic()
-                expired = [p for p, expiry in self._tombstone_expiry.items() if now > expiry]
+                expired = [
+                    p for p, expiry in self._tombstone_expiry.items() if now > expiry
+                ]
                 for p in expired:
                     self._tombstones.discard(p)
                     del self._tombstone_expiry[p]
@@ -101,8 +103,10 @@ class ByteLRUCache(LRUCache):
             finally:
                 self._pending_callbacks = None
                 self._pending_callbacks_owner = None
-            
-            log.debug(f"Cached item '{key}'. Cache size: {self.currsize / 1024**2:.2f} MB")
+
+            log.debug(
+                f"Cached item '{key}'. Cache size: {self.currsize / 1024**2:.2f} MB"
+            )
 
         # Execute all captured eviction callbacks OUTSIDE the lock
         for callback in pending_callbacks:
@@ -140,7 +144,7 @@ class ByteLRUCache(LRUCache):
             log.debug(
                 f"Evicted item '{key}'. Cache size after eviction: {self.currsize / 1024**2:.2f} MB"
             )
-            
+
             # Create a bound callback for this specific item
             callback = None
             if self.on_evict:
@@ -149,9 +153,12 @@ class ByteLRUCache(LRUCache):
                 def _callback_func(k=key, v=value):
                     if self.on_evict:
                         self.on_evict(k, v)
-                
+
                 # If we are inside a __setitem__ call on the SAME thread, defer the callback
-                if self._pending_callbacks is not None and threading.get_ident() == self._pending_callbacks_owner:
+                if (
+                    self._pending_callbacks is not None
+                    and threading.get_ident() == self._pending_callbacks_owner
+                ):
                     self._pending_callbacks.append(_callback_func)
                     callback = None  # Already deferred
                 else:
@@ -216,7 +223,7 @@ class ByteLRUCache(LRUCache):
 
     def evict_paths(self, paths: list[Union[Path, str]]):
         """Targeted eviction of all keys starting with given paths.
-        
+
         Args:
             paths: List of Path objects or strings.
         """
@@ -232,7 +239,7 @@ class ByteLRUCache(LRUCache):
             else:
                 # String might be Windows-style, normalize to forward slashes
                 prefix = str(p).replace("\\", "/")
-            
+
             # Append separator to ensure we match directory/file boundary
             # e.g. "foo.jpg" -> "foo.jpg::"
             prefixes.append(f"{prefix}::")
@@ -251,7 +258,7 @@ class ByteLRUCache(LRUCache):
             # 3. Optimistic scan: iterate keys once and collect matches
             # Convert prefixes to tuple for fast startswith check
             prefix_tuple = tuple(prefixes)
-            
+
             keys_to_remove = []
             for key in list(self.keys()):
                 # Keys are strings like "path/to/file.jpg::0"
