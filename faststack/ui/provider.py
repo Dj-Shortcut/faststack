@@ -1439,16 +1439,7 @@ class UIState(QObject):
     @Slot()
     def gridRefresh(self):
         """Refresh the grid view."""
-        if (
-            hasattr(self.app_controller, "_thumbnail_model")
-            and self.app_controller._thumbnail_model
-        ):
-            self.app_controller._thumbnail_model.refresh()
-            # Also update path resolver
-            if hasattr(self.app_controller, "_path_resolver"):
-                self.app_controller._path_resolver.update_from_model(
-                    self.app_controller._thumbnail_model
-                )
+        self.app_controller.refresh_grid()
 
     @Property(bool, notify=gridCanGoBackChanged)
     def gridCanGoBack(self) -> bool:

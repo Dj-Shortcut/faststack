@@ -299,6 +299,11 @@ class AppController(QObject):
         self._grid_nav_history: list[Path] = (
             []
         )  # Stack of previous directories for back navigation
+
+        # -- Optimization & Instrumentation --
+        self._scan_count_variant = 0
+        self._grid_refreshes = 0
+        self._grid_model_dirty = True  # Start dirty to ensure initial load
         self._thumbnail_cache = ThumbnailCache(
             max_bytes=256 * 1024 * 1024,  # 256 MB
             max_items=5000,
@@ -538,9 +543,20 @@ class AppController(QObject):
 
         # Sync filter to grid view model;
         # cancel stale thumbnail jobs so the filtered view's thumbnails load quickly
-        self._thumbnail_prefetcher.cancel_all()
-        self._thumbnail_model.set_filter(filter_string)
-        self._thumbnail_model.set_filter_flags(flags)
+        if self._is_grid_view_active:
+            self._thumbnail_prefetcher.cancel_all()
+        # Silent updates - we will refresh manually via refresh_from_controller
+        if self._thumbnail_model:
+            self._thumbnail_model.set_filter(filter_string, refresh=False)
+            self._thumbnail_model.set_filter_flags(flags, refresh=False)
+
+        if self._is_grid_view_active and self._thumbnail_model:
+            self._grid_refreshes += 1
+            self._thumbnail_model.refresh_from_controller(self.image_files)
+            self._path_resolver.update_from_model(self._thumbnail_model)
+            self._grid_model_dirty = False
+        else:
+            self._grid_model_dirty = True
 
         # reset to start of filtered list
         self.current_index = 0
@@ -573,9 +589,20 @@ class AppController(QObject):
 
         # Sync filter to grid view model;
         # cancel stale thumbnail jobs so the new view's thumbnails load quickly
-        self._thumbnail_prefetcher.cancel_all()
-        self._thumbnail_model.set_filter("")
-        self._thumbnail_model.set_filter_flags([])
+        if self._is_grid_view_active:
+            self._thumbnail_prefetcher.cancel_all()
+        # Silent updates - we will refresh manually via refresh_from_controller
+        if self._thumbnail_model:
+            self._thumbnail_model.set_filter("", refresh=False)
+            self._thumbnail_model.set_filter_flags([], refresh=False)
+
+        if self._is_grid_view_active and self._thumbnail_model:
+            self._grid_refreshes += 1
+            self._thumbnail_model.refresh_from_controller(self.image_files)
+            self._path_resolver.update_from_model(self._thumbnail_model)
+            self._grid_model_dirty = False
+        else:
+            self._grid_model_dirty = True
 
         self.current_index = min(self.current_index, max(0, len(self.image_files) - 1))
         self.sync_ui_state()
@@ -758,12 +785,13 @@ class AppController(QObject):
             index, is_navigation=is_navigation, direction=direction
         )
 
-    def load(self, skip_thumbnail_refresh: bool = False):
-        """Loads images, sidecar data, and starts services.
+    def load(self):
+        """Loads images, sidecar data, and starts services."""
+        # Reset instrumentation for this load operation
+        self._scan_count_variant = 0
+        self._grid_refreshes = 0
+        self._grid_model_dirty = True
 
-        Args:
-            skip_thumbnail_refresh: If True, skip thumbnail model refresh (caller already did it).
-        """
         self.refresh_image_list()  # Initial scan from disk
         if not self.image_files:
             self.current_index = 0
@@ -779,13 +807,23 @@ class AppController(QObject):
         # Defer initial UI sync until after images are loaded
         self.sync_ui_state()
 
-        # Initialize grid view if starting in grid mode (unless already done)
-        if self._is_grid_view_active and not skip_thumbnail_refresh:
-            self._thumbnail_model.refresh()
-            self._path_resolver.update_from_model(self._thumbnail_model)
-            # Mark folder as loaded so QML can show "No images" message if truly empty
+        # Mark folder as loaded for UI
+        if self._is_grid_view_active:
             self._folder_loaded = True
             self.ui_state.isFolderLoadedChanged.emit()
+            
+            # Ensure grid model is populated if starting in grid mode
+            if self._thumbnail_model and self._grid_model_dirty and self._thumbnail_model.rowCount() == 0:
+                self._grid_refreshes += 1
+                self._thumbnail_model.refresh_from_controller(self.image_files)
+                self._path_resolver.update_from_model(self._thumbnail_model)
+                self._grid_model_dirty = False
+
+        log.info(
+            "Load summary: scans=variant:%d grid_refreshes:%d",
+            self._scan_count_variant,
+            self._grid_refreshes,
+        )
 
     def _request_watcher_refresh(self, path=None):
         """Thread-safe entry point for the filesystem watcher.
@@ -840,14 +878,21 @@ class AppController(QObject):
         # Clear folder stats cache so subfolder counts are fresh
         clear_raw_count_cache()
 
+        self._scan_count_variant += 1
         images, variant_map = find_images_with_variants(self.image_dir)
         self._all_images = images
         self._variant_map = variant_map
         self._apply_filter_to_cached_list()
 
-        # Refresh thumbnail model if it exists (for external file changes)
+        # Mark model as dirty since the underlying directory was rescanned
+        self._grid_model_dirty = True
+
+        # Refresh thumbnail model if it exists (for external file changes or startup)
         if self._thumbnail_model and self._is_grid_view_active:
-            self._thumbnail_model.refresh()
+            self._grid_refreshes += 1
+            self._thumbnail_model.refresh_from_controller(self.image_files)
+            self._path_resolver.update_from_model(self._thumbnail_model)
+            self._grid_model_dirty = False
 
     def _apply_filter_to_cached_list(self):
         """Applies current filter to cached image list without disk I/O."""
@@ -1632,6 +1677,18 @@ class AppController(QObject):
         """Toggle between grid view and loupe (single image) view."""
         self._set_grid_view_active(not self._is_grid_view_active)
 
+    @Slot()
+    def refresh_grid(self):
+        """Full manual refresh: Rescans the disk directory and rebuilds the grid view.
+        
+        This is a heavy operation that clears caches and rescans the filesystem.
+        Use this only when you need to pick up external changes that the watcher
+        might have missed.
+        """
+        log.info("Manual grid refresh requested (Full Rescan)")
+        # Ensure all images are rescanned from disk and the grid follows
+        self.refresh_image_list()
+
     def switch_to_grid_view(self):
         """Switch to grid view (from loupe view). Called by Esc key."""
         if not self._is_grid_view_active:
@@ -1645,10 +1702,17 @@ class AppController(QObject):
         self._is_grid_view_active = active
 
         if active:
-            # Entering grid view - refresh the model
-            self._thumbnail_model.refresh()
-            # Update path resolver for the current directory
-            self._path_resolver.update_from_model(self._thumbnail_model)
+            # Entering grid view - refresh the model if dirty or empty
+            needs_refresh = self._grid_model_dirty or self._thumbnail_model.rowCount() == 0
+            if needs_refresh:
+                self._grid_refreshes += 1
+                
+                # Always use controller's list, even if empty.
+                self._thumbnail_model.refresh_from_controller(self.image_files)
+                
+                # Update path resolver for the current directory
+                self._path_resolver.update_from_model(self._thumbnail_model)
+                self._grid_model_dirty = False
 
             # Find current loupe image in grid and scroll to it
             if self.image_files and 0 <= self.current_index < len(self.image_files):

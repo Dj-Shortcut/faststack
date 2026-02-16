@@ -306,17 +306,19 @@ class ThumbnailModel(QAbstractListModel):
         else:
             return f"image://thumbnail/{self._thumbnail_size}/{path_hash}/{mtime_ns}?r={rev}&reason={reason}"
 
-    def set_filter(self, filter_string: str) -> None:
-        """Set the active filename filter and refresh the model."""
+    def set_filter(self, filter_string: str, refresh: bool = True) -> None:
+        """Set the active filename filter and optionally refresh the model."""
         self._active_filter = filter_string
         self._next_source_reason = "filter"
-        self.refresh()
+        if refresh:
+            self.refresh()
 
-    def set_filter_flags(self, flags: list) -> None:
-        """Set the active flag filters and refresh the model."""
+    def set_filter_flags(self, flags: list, refresh: bool = True) -> None:
+        """Set the active flag filters and optionally refresh the model."""
         self._active_filter_flags = list(flags)
         self._next_source_reason = "filter"
-        self.refresh()
+        if refresh:
+            self.refresh()
 
     def _add_folders_to_entries(self):
         """Scan for folders and add them to self._entries."""
