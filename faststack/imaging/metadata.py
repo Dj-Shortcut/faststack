@@ -125,12 +125,14 @@ def format_shutter_speed_camera_style(exposure_value: Any) -> str:
 def get_exif_brief(path: Union[str, Path]) -> str:
     """Return a compact EXIF summary for the status bar.
 
-    Opens only the JPEG header (Pillow lazy-loads), extracts ISO, aperture,
+    Opens only the image header (Pillow lazy-loads), extracts ISO, aperture,
     shutter speed, and capture time.  Returns a pipe-separated string like
     ``"ISO 800 | f/2.8 | 1/500s | 14:30:25"`` or ``""`` if no EXIF is found.
+
+    Supported formats: JPEG, TIFF, HEIF.
     """
     path = Path(path)
-    if path.suffix.lower() not in {".jpg", ".jpeg", ".jpe"}:
+    if path.suffix.lower() not in {".jpg", ".jpeg", ".jpe", ".tif", ".tiff", ".heif", ".heic"}:
         return ""
     if not path.exists():
         return ""
@@ -138,13 +140,15 @@ def get_exif_brief(path: Union[str, Path]) -> str:
     try:
         with Image.open(path) as img:
             exif = img.getexif()
+            # getexif() nests EXIF sub-IFD tags; merge them for flat access
+            # Read them while file is open to avoid "I/O on closed file"
+            exif_ifd = dict(exif.get_ifd(ExifTags.IFD.Exif) if hasattr(ExifTags, "IFD") else {})
+        
         if not exif:
             return ""
     except Exception:
         return ""
 
-    # getexif() nests EXIF sub-IFD tags; merge them for flat access
-    exif_ifd = exif.get_ifd(ExifTags.IFD.Exif) if hasattr(ExifTags, "IFD") else {}
     tags = dict(exif)
     tags.update(exif_ifd)
 
@@ -164,16 +168,19 @@ def get_exif_brief(path: Union[str, Path]) -> str:
         try:
             val = float(f_number)
             parts.append(f"f/{val:.1f}")
-        except Exception:
-            pass
+        except (ValueError, TypeError) as e:
+            log.debug(f"Failed to convert f_number {f_number!r}: {e}", exc_info=True)
 
     # Shutter speed / ExposureTime (tag 0x829A)
     # Note: Pillow's ExifTags maps 0x829A to ExposureTime.
     exposure = tags.get(0x829A)
     if exposure is not None:
-        s = format_shutter_speed_camera_style(exposure)
-        if s:
-            parts.append(s)
+        try:
+            s = format_shutter_speed_camera_style(exposure)
+            if s:
+                parts.append(s)
+        except (ValueError, TypeError) as e:
+            log.debug(f"Failed to convert exposure {exposure!r}: {e}", exc_info=True)
 
     # Capture time / DateTimeOriginal (tag 0x9003), fallback DateTime (tag 0x0132)
     dt = tags.get(0x9003) or tags.get(0x0132)

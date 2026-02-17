@@ -381,14 +381,16 @@ class ThumbnailPrefetcher:
         # Fallback to PIL
         try:
             with timer.stage("decode") if timer else nullcontext():
-                pil_img = Image.open(path)
-                # Convert to RGB if needed
-                if pil_img.mode != "RGB":
-                    pil_img = pil_img.convert("RGB")
+                with Image.open(path) as pil_img:
+                    # Convert to RGB if needed
+                    if pil_img.mode != "RGB":
+                        pil_img = pil_img.convert("RGB")
 
-                # Resize
-                pil_img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
-                return np.array(pil_img)
+                    # Resize
+                    pil_img.thumbnail(
+                        (target_size, target_size), Image.Resampling.LANCZOS
+                    )
+                    return np.array(pil_img.copy())
 
         except Exception as e:
             log.debug("PIL decode failed for %s: %s", path, e)
@@ -399,7 +401,7 @@ class ThumbnailPrefetcher:
         future: Future,
         job_key: Tuple[int, str, int],
         cache_key: str,
-        timer: "thumb_debug.ThumbTimer",
+        timer: Optional["thumb_debug.ThumbTimer"],
     ):
         """Callback when decode completes."""
         # Always remove bookkeeping first to avoid stranding entries
@@ -466,8 +468,9 @@ class ThumbnailPrefetcher:
             thumb_debug.gauge("inflight", 0)
 
         for timer in inflight_timers:
-            timer.cancelled = True
-            thumb_debug.log_trace("cancel_requested", rid=timer.rid)
+            if timer is not None:
+                timer.cancelled = True
+                thumb_debug.log_trace("cancel_requested", rid=timer.rid)
 
         for f in futures:
             try:

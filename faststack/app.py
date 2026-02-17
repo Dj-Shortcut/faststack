@@ -225,6 +225,10 @@ class AppController(QObject):
         self._preview_executor = create_daemon_threadpool_executor(
             max_workers=1, thread_name_prefix="Preview"
         )
+        # EXIF Brief Offloading Setup (dedicated executor to avoid blocking histograms)
+        self._exif_executor = create_daemon_threadpool_executor(
+            max_workers=2, thread_name_prefix="EXIF"
+        )
         self._preview_inflight = False
         self._preview_pending = False
         self._preview_token = 0
@@ -2336,6 +2340,7 @@ class AppController(QObject):
             return
         exif_key = self._exif_source_key(self.current_index)
         if self._exif_pending_path is not None and self._exif_pending_path != exif_key:
+            self._exif_pending_path = None
             return  # Different image path pending, or we aren't tracking this key.
 
         if exif_key in self._exif_brief_cache:
@@ -2354,7 +2359,7 @@ class AppController(QObject):
             self._exif_brief_cache[exif_key] = ""
             self._exif_pending_path = None
             return
-        # Submit to histogram executor (daemon, 1 worker) to avoid blocking GUI
+        # Submit to dedicated EXIF executor to avoid blocking histograms
         signal = self._exifBriefReady
 
         def _worker(key=exif_key, p=str(source_path)):
@@ -2364,7 +2369,7 @@ class AppController(QObject):
             signal.emit(key, brief)
 
         try:
-            self._hist_executor.submit(_worker)
+            self._exif_executor.submit(_worker)
         except RuntimeError:
             pass  # executor shut down, ignore
 
@@ -3724,6 +3729,7 @@ class AppController(QObject):
             self._hist_executor,
             self._save_executor,
             self._preview_executor,
+            self._exif_executor,
         ]:
             if executor:
                 executor.shutdown(wait=False, cancel_futures=True)

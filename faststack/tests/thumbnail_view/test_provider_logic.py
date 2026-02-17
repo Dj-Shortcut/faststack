@@ -12,38 +12,38 @@ class TestProviderLogic:
 
     def test_parse_id_file_success(self, provider):
         id_str = "256/pathhash123/123456789?r=1&reason=scroll"
-        id_clean, parts, thumb_size, path_hash, mtime_ns, reason, is_folder, is_valid = provider._parse_id(id_str)
+        parsed = provider._parse_id(id_str)
         
-        assert id_clean == "256/pathhash123/123456789"
-        assert parts == ["256", "pathhash123", "123456789"]
-        assert thumb_size == 256
-        assert path_hash == "pathhash123"
-        assert mtime_ns == 123456789
-        assert reason == "scroll"
-        assert is_folder is False
-        assert is_valid is True
+        assert parsed.id_clean == "256/pathhash123/123456789"
+        assert parsed.parts == ["256", "pathhash123", "123456789"]
+        assert parsed.thumb_size == 256
+        assert parsed.path_hash == "pathhash123"
+        assert parsed.mtime_ns == 123456789
+        assert parsed.reason == "scroll"
+        assert parsed.is_folder is False
+        assert parsed.is_valid is True
 
     def test_parse_id_folder_success(self, provider):
         id_str = "folder/pathhash456/987654321?r=2"
-        id_clean, parts, thumb_size, path_hash, mtime_ns, reason, is_folder, is_valid = provider._parse_id(id_str)
+        parsed = provider._parse_id(id_str)
         
-        assert id_clean == "folder/pathhash456/987654321"
-        assert parts == ["folder", "pathhash456", "987654321"]
-        assert thumb_size == 200  # Default size
-        assert path_hash == "pathhash456"
-        assert mtime_ns == 987654321
-        assert reason == "unknown"
-        assert is_folder is True
-        assert is_valid is True
+        assert parsed.id_clean == "folder/pathhash456/987654321"
+        assert parsed.parts == ["folder", "pathhash456", "987654321"]
+        assert parsed.thumb_size == 200  # Default size
+        assert parsed.path_hash == "pathhash456"
+        assert parsed.mtime_ns == 987654321
+        assert parsed.reason == "unknown"
+        assert parsed.is_folder is True
+        assert parsed.is_valid is True
 
     def test_parse_id_invalid_format(self, provider):
         id_str = "invalid/id"
-        *_, is_valid = provider._parse_id(id_str)
+        parsed = provider._parse_id(id_str)
         
-        assert is_valid is False
+        assert parsed.is_valid is False
 
     def test_parse_id_invalid_number(self, provider):
         id_str = "abc/pathhash/123"
-        *_, is_valid = provider._parse_id(id_str)
+        parsed = provider._parse_id(id_str)
         
-        assert is_valid is False
+        assert parsed.is_valid is False

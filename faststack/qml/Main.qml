@@ -1001,7 +1001,7 @@ ApplicationWindow {
             }
             Label {
                 text: (uiState && uiState.imageCount > 0)
-                      ? (uiState.exifBrief || "—")
+                      ? (uiState.exifBrief || "N/A")
                       : "N/A"
                 color: root.currentTextColor
             }

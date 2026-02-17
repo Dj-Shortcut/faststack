@@ -82,7 +82,7 @@ def test_delete_uses_targeted_eviction():
 
         print("DEBUG: Calling _delete_indices")
         # Act
-        summary = app._delete_indices([0], "test")
+        app._delete_indices([0], "test")
         print("DEBUG: Returned from _delete_indices")
 
         # Assert
@@ -114,7 +114,7 @@ def test_evict_paths_windows_handling():
 
     # Create a real cache instance (mocking LRUCache methods if needed, but ByteLRUCache is simple)
     # Pass a simple size_of function to avoid dependency on get_decoded_image_size
-    cache = ByteLRUCache(1000, size_of=lambda x: 1)
+    cache = ByteLRUCache(1000, size_of=lambda _: 1)
 
     # Add entries with forward slashes (as build_cache_key does)
     key1 = "C:/images/img1.jpg::0"

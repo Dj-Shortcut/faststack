@@ -4,7 +4,7 @@ import logging
 import time
 from urllib.parse import unquote
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, NamedTuple
 
 import faststack.util.thumb_debug as thumb_debug
 
@@ -24,6 +24,19 @@ log = logging.getLogger(__name__)
 PLACEHOLDER_COLOR = QColor(60, 60, 60)  # Neutral gray for loading
 FOLDER_COLOR = QColor(80, 80, 80)  # Slightly different for folders
 ERROR_COLOR = QColor(80, 40, 40)  # Dark red for errors
+
+
+class ParsedId(NamedTuple):
+    """Container for parsed thumbnail ID fields."""
+
+    id_clean: str
+    parts: list[str]
+    thumb_size: Optional[int]
+    path_hash: Optional[str]
+    mtime_ns: Optional[int]
+    reason: str
+    is_folder: bool
+    is_valid: bool
 
 
 class ThumbnailProvider(QQuickImageProvider):
@@ -122,16 +135,14 @@ class ThumbnailProvider(QQuickImageProvider):
         painter.end()
         return image
 
-    def _parse_id(
-        self, id_str: str
-    ) -> tuple[str, list[str], Optional[int], Optional[str], Optional[int], str, bool, bool]:
+    def _parse_id(self, id_str: str) -> ParsedId:
         """Parse the thumbnail ID string.
 
         Format: {size}/{path_hash}/{mtime_ns}?r={rev}
         Or: folder/{path_hash}/{mtime_ns}?r={rev}
 
         Returns:
-            Tuple of (id_clean, parts, thumb_size, path_hash, mtime_ns, reason, is_folder, is_valid)
+            ParsedId named tuple with extracted fields.
         """
         # Split query params
         parts_query = id_str.split("?")
@@ -147,11 +158,11 @@ class ThumbnailProvider(QQuickImageProvider):
 
         parts = id_clean.split("/")
         if len(parts) < 3:
-            return id_clean, parts, None, None, None, reason, False, False
+            return ParsedId(id_clean, parts, None, None, None, reason, False, False)
 
         is_folder = parts[0] == "folder"
         try:
-            # If folder, we don't have a thumb_size in the first part, 
+            # If folder, we don't have a thumb_size in the first part,
             # but we need path_hash and mtime_ns.
             if is_folder:
                 thumb_size = self._default_size
@@ -161,9 +172,13 @@ class ThumbnailProvider(QQuickImageProvider):
                 thumb_size = int(parts[0])
                 path_hash = parts[1]
                 mtime_ns = int(parts[2])
-            return id_clean, parts, thumb_size, path_hash, mtime_ns, reason, is_folder, True
+            return ParsedId(
+                id_clean, parts, thumb_size, path_hash, mtime_ns, reason, is_folder, True
+            )
         except (ValueError, IndexError):
-            return id_clean, parts, None, None, None, reason, is_folder, False
+            return ParsedId(
+                id_clean, parts, None, None, None, reason, is_folder, False
+            )
 
     def requestImage(self, id_str: str, size: QSize, requestedSize: QSize) -> QImage:
         """Request an image for the given ID.
@@ -179,22 +194,13 @@ class ThumbnailProvider(QQuickImageProvider):
             QImage of the thumbnail or placeholder
         """
         # Parse the ID
-        (
-            id_clean,
-            parts,
-            thumb_size,
-            path_hash,
-            mtime_ns,
-            reason,
-            is_folder,
-            is_valid,
-        ) = self._parse_id(id_str)
+        parsed = self._parse_id(id_str)
 
-        if not is_valid:
+        if not parsed.is_valid:
             log.debug("Invalid thumbnail ID: %s", id_str)
             return self._error_placeholder
 
-        if is_folder:
+        if parsed.is_folder:
             return self._folder_placeholder
 
         # Track total requests if logging enabled
@@ -203,13 +209,19 @@ class ThumbnailProvider(QQuickImageProvider):
 
         # Deferred logging setup
         timer = None
-        cache_key = id_clean
+        cache_key = parsed.id_clean
         if thumb_debug.timing_enabled or thumb_debug.trace_enabled:
             # Resolve path only if needed for trace
-            path = self._path_resolver(path_hash) if self._path_resolver else None
-            timer = thumb_debug.ThumbTimer(key=cache_key, path=path, reason=reason)
+            path = self._path_resolver(parsed.path_hash) if self._path_resolver else None
+            timer = thumb_debug.ThumbTimer(
+                key=cache_key, path=path, reason=parsed.reason
+            )
             thumb_debug.log_trace(
-                "requested", rid=timer.rid, key=timer.key, src=timer.src, reason=reason
+                "requested",
+                rid=timer.rid,
+                key=timer.key,
+                src=timer.src,
+                reason=parsed.reason,
             )
 
         # Check cache (O(1) lookup)
@@ -246,12 +258,12 @@ class ThumbnailProvider(QQuickImageProvider):
             thumb_debug.log_trace("cache_miss", rid=timer.rid, ms=f"{dt_cache_get:.3f}")
 
         # Resolve path - we already have path_hash and mtime_ns
-        path = self._path_resolver(path_hash) if self._path_resolver else None
+        path = self._path_resolver(parsed.path_hash) if self._path_resolver else None
         if path:
             self._prefetcher.submit(
                 path,
-                mtime_ns,
-                thumb_size,
+                parsed.mtime_ns,
+                parsed.thumb_size,
                 priority=self._prefetcher.PRIO_HIGH,
                 timer=timer,
             )
@@ -259,16 +271,23 @@ class ThumbnailProvider(QQuickImageProvider):
         # Return placeholder immediately (non-blocking)
         return self._placeholder
 
-    def _bytes_to_image(self, jpeg_bytes: bytes) -> Optional[QImage]:
-        """Convert JPEG bytes to QImage."""
+    def _bytes_to_image(self, jpeg_bytes: bytes) -> QImage:
+        """Convert JPEG bytes to QImage.
+
+        Returns:
+            QImage of the decoded bytes, or self._error_placeholder on failure.
+        """
         try:
             image = QImage()
             if image.loadFromData(jpeg_bytes, "JPEG"):
                 return image
+            log.warning("JPEG decode failed for cached bytes; returning error placeholder")
         except Exception as e:
             log.debug("Failed to convert bytes to image: %s", e)
-        return None
-
+            log.warning(
+                "Exception during JPEG decode from cache: %s; returning error placeholder", e
+            )
+        return self._error_placeholder
 
 
 class PathResolver:

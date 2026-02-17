@@ -1,9 +1,11 @@
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
-from PIL import Image, ExifTags
+
+from PIL import ExifTags, Image
+
 from faststack.imaging.editor import ImageEditor, sanitize_exif_orientation
-import tempfile
-import shutil
 
 
 class TestDebugExif(unittest.TestCase):
