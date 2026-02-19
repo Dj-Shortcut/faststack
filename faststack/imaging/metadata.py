@@ -195,8 +195,8 @@ def get_exif_brief(path: Union[str, Path]) -> str:
                 parts.append(cleaned.split(" ", 1)[1])
             else:
                 parts.append(cleaned)
-        except Exception:
-            pass
+        except Exception as e:
+            log.error(f"Failed to parse EXIF datetime {dt!r}: {e}", exc_info=True)
 
     return " | ".join(parts)
 
@@ -221,7 +221,11 @@ def get_exif_data(path: Union[str, Path]) -> Dict[str, Any]:
             
             # Merge sub-IFD tags (ISO, Lens, etc.)
             exif_ifd = dict(exif_obj.get_ifd(ExifTags.IFD.Exif) if hasattr(ExifTags, "IFD") else {})
-            
+
+            # Fetch GPS sub-IFD while image is still open (Pillow ≥8.2
+            # stores GPSInfo as an integer IFD offset, not a dict)
+            gps_ifd = dict(exif_obj.get_ifd(0x8825)) if hasattr(ExifTags, "IFD") else {}
+
         # Normalize to a dict for consistency
         exif = dict(exif_obj)
         exif.update(exif_ifd)
@@ -333,8 +337,10 @@ def get_exif_data(path: Union[str, Path]) -> Dict[str, Any]:
         # We can just clean it for now.
         summary["Flash"] = clean_exif_value(flash)
 
-    # GPS
-    gps_info = get_val("GPSInfo")
+    # GPS — prefer the resolved sub-IFD dict; fall back to decoded tag only
+    # if it is already a mapping (older Pillow versions).
+    gps_raw = get_val("GPSInfo")
+    gps_info = gps_ifd if gps_ifd else (gps_raw if isinstance(gps_raw, dict) else None)
     if gps_info:
         try:
 
@@ -343,9 +349,6 @@ def get_exif_data(path: Union[str, Path]) -> Dict[str, Any]:
                 m = float(value[1])
                 s = float(value[2])
                 return d + (m / 60.0) + (s / 3600.0)
-
-            lat = None
-            lon = None
 
             # GPSInfo keys are integers.
             # 1: GPSLatitudeRef, 2: GPSLatitude
@@ -363,10 +366,6 @@ def get_exif_data(path: Union[str, Path]) -> Dict[str, Any]:
                 summary["GPS"] = f"{lat:.5f}, {lon:.5f}"
         except Exception as e:
             log.warning(f"Failed to parse GPS info: {e}")
-            # Fallback to cleaning the raw info if parsing fails
-            # But user specifically asked for decimal, so maybe just don't show if it fails or show raw?
-            # Let's show raw if parsing fails but cleaned
-            # summary["GPS"] = clean_exif_value(gps_info)
             pass
 
     # Convert all values in full dict to string to ensure JSON serializability for QML

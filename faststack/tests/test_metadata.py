@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
-from faststack.imaging.metadata import get_exif_data, clean_exif_value
+from faststack.imaging.metadata import get_exif_data, clean_exif_value, get_exif_brief
 from PIL import ExifTags
 
 
@@ -36,7 +36,11 @@ class TestMetadata(unittest.TestCase):
                 },
             }
 
-            mock_img.getexif.return_value = exif_dict
+            class MockExif(dict):
+                def get_ifd(self, tag):
+                    return {}
+
+            mock_img.getexif.return_value = MockExif(exif_dict)
             mock_open.return_value.__enter__.return_value = mock_img
 
             # Test
@@ -107,6 +111,32 @@ class TestMetadata(unittest.TestCase):
         result = get_exif_data(Path("non_existent_file.jpg"))
         self.assertEqual(result["summary"], {})
         self.assertEqual(result["full"], {})
+
+    @patch("pathlib.Path.exists", return_value=True)
+    @patch("faststack.imaging.metadata.log")
+    @patch("faststack.imaging.metadata.Image.open")
+    def test_get_exif_brief_failure(self, mock_open, mock_log, mock_exists):
+        # Setup mock image
+        mock_img = MagicMock()
+        
+        # Use MockExif similar to other tests
+        class MockExif(dict):
+            def get_ifd(self, tag): return {}
+            
+        # 36867 is DateTimeOriginal (0x9003)
+        mock_img.getexif.return_value = MockExif({36867: "2023:01:01 12:00:00"})
+        
+        mock_open.return_value.__enter__.return_value = mock_img
+        
+        # Patch clean_exif_value to raise Exception
+        with patch("faststack.imaging.metadata.clean_exif_value", side_effect=ValueError("Forced Error")):
+            get_exif_brief(Path("dummy.jpg"))
+            
+        # Verify log.error was called
+        mock_log.error.assert_called()
+        call_args = mock_log.error.call_args[0]
+        self.assertIn("Failed to parse EXIF datetime", call_args[0])
+        self.assertIn("Forced Error", call_args[0])
 
 
 if __name__ == "__main__":

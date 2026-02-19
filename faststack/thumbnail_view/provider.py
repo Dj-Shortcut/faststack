@@ -180,7 +180,7 @@ class ThumbnailProvider(QQuickImageProvider):
                 id_clean, parts, None, None, None, reason, is_folder, False
             )
 
-    def requestImage(self, id_str: str, size: QSize, requestedSize: QSize) -> QImage:
+    def requestImage(self, id_str: str, size: QSize, _requestedSize: QSize) -> QImage:
         """Request an image for the given ID.
 
         This method is O(1) - returns immediately with cached data or placeholder.
@@ -188,7 +188,7 @@ class ThumbnailProvider(QQuickImageProvider):
         Args:
             id_str: URL path after "image://thumbnail/"
             size: Output size reference (set by us)
-            requestedSize: Requested size from QML
+            _requestedSize: Requested size from QML (unused)
 
         Returns:
             QImage of the thumbnail or placeholder
@@ -219,7 +219,6 @@ class ThumbnailProvider(QQuickImageProvider):
         path = self._path_resolver(parsed.path_hash) if self._path_resolver else None
 
         if thumb_debug.timing_enabled or thumb_debug.trace_enabled:
-            # Resolve path only if needed for trace
             timer = thumb_debug.ThumbTimer(
                 key=cache_key, path=path, reason=parsed.reason
             )
@@ -297,7 +296,8 @@ class ThumbnailProvider(QQuickImageProvider):
                 return image
             log.warning("JPEG decode failed for cached bytes")
         except Exception as e:
-            log.warning("Exception during JPEG decode from cache: %s", e)
+            # Guard against Qt/C++ interop runtime errors or other failures during decode
+            log.warning("Exception during JPEG decode from cache: %s", e, exc_info=True)
         return None
 
 

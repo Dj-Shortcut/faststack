@@ -2367,7 +2367,11 @@ class AppController(QObject):
         def _worker(key=exif_key, p=str(source_path)):
             from faststack.imaging.metadata import get_exif_brief
 
-            brief = get_exif_brief(p)
+            try:
+                brief = get_exif_brief(p)
+            except Exception as e:
+                log.error(f"Failed to get EXIF brief for {p}: {e}", exc_info=True)
+                brief = ""
             signal.emit(key, brief)
 
         try:
@@ -3496,6 +3500,7 @@ class AppController(QObject):
         self._metadata_cache = {}
         self._metadata_cache_index = (-1, -1)
         self._exif_brief_cache.clear()
+        self._exif_pending_path = None
 
         # Clear batch indices cache (avoids stale batch membership checks)
         if hasattr(self, "_batch_indices_cache"):
@@ -3705,47 +3710,6 @@ class AppController(QObject):
             log.error("Failed to recycle %s: %s", src.name, e)
             return None
 
-    def _shutdown_executors(self) -> None:
-        """Shutdown thread pools and clean up pending jobs."""
-        log.info("Shutting down executors...")
-        self._shutting_down = True
-
-        # Clear pending jobs and remove associated undo placeholders
-        if self._pending_delete_jobs:
-            log.info(
-                "Clearing %d pending delete jobs on shutdown",
-                len(self._pending_delete_jobs),
-            )
-            pending_ids = set(self._pending_delete_jobs.keys())
-            self._pending_delete_jobs.clear()
-            self.undo_history = [
-                entry
-                for entry in self.undo_history
-                if not (entry[0] == "pending_delete" and entry[1] in pending_ids)
-            ]
-
-        # Shutdown all known executors
-        # Use wait=False to avoid hanging UI shutdown on long operations
-        for executor in [
-            self._delete_executor,
-            self._hist_executor,
-            self._save_executor,
-            self._preview_executor,
-            self._exif_executor,
-        ]:
-            if executor:
-                executor.shutdown(wait=False, cancel_futures=True)
-
-        # Shutdown prefetchers (they own their own thread pools)
-        try:
-            self.prefetcher.shutdown()
-        except Exception:
-            pass
-        try:
-            if getattr(self, "_thumbnail_prefetcher", None):
-                self._thumbnail_prefetcher.shutdown()
-        except Exception:
-            pass
 
     @staticmethod
     def _perm_delete_worker(
@@ -4910,11 +4874,34 @@ class AppController(QObject):
         """Shutdown non-Qt resources - safe to run in background thread."""
         log.info("Shutting down background resources.")
 
+        self._shutting_down = True  # gate async callbacks during shutdown_nonqt too
+        self._exif_pending_path = None  # optional but consistent with shutdown_qt
+
+
+        # Clear pending delete jobs and remove associated undo placeholders
+        if self._pending_delete_jobs:
+            log.info(
+                "Clearing %d pending delete jobs on shutdown",
+                len(self._pending_delete_jobs),
+            )
+            pending_ids = set(self._pending_delete_jobs.keys())
+            self._pending_delete_jobs.clear()
+            self.undo_history = [
+                entry
+                for entry in self.undo_history
+                if not (entry[0] == "pending_delete" and entry[1] in pending_ids)
+            ]
+
         # Shutdown thread pool executors
         try:
             log.info("Shutting down background executors...")
             self._hist_executor.shutdown(wait=False, cancel_futures=True)
             self._preview_executor.shutdown(wait=False, cancel_futures=True)
+
+            exif_exec = getattr(self, "_exif_executor", None)
+            if exif_exec:
+                exif_exec.shutdown(wait=False, cancel_futures=True)
+
             # wait=True ensures pending saves/deletes complete to avoid data loss/corruption
             self._save_executor.shutdown(wait=True, cancel_futures=False)
             self._delete_executor.shutdown(wait=True, cancel_futures=False)

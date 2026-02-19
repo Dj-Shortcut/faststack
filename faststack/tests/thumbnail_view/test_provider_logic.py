@@ -4,8 +4,9 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from faststack.thumbnail_view.provider import ThumbnailProvider
+from faststack.thumbnail_view.provider import ThumbnailProvider, PLACEHOLDER_COLOR, ERROR_COLOR
 from faststack.thumbnail_view.prefetcher import ThumbnailCache
+from PySide6.QtCore import QSize
 
 
 class TestProviderLogic:
@@ -107,14 +108,11 @@ class TestDecodeFailureRecovery:
         return provider, cache, prefetcher
 
     def test_bad_cached_bytes_returns_placeholder_not_error(self, wired_provider):
-        provider, cache, prefetcher = wired_provider
+        provider, cache, _prefetcher = wired_provider
 
         # Inject invalid JPEG bytes into the cache
         cache_key = "200/abc123/999"
         cache.put(cache_key, b"NOT-VALID-JPEG-DATA")
-
-        from PySide6.QtCore import QSize
-        from faststack.thumbnail_view.provider import PLACEHOLDER_COLOR, ERROR_COLOR
 
         out_size = QSize()
         result = provider.requestImage(f"{cache_key}?r=1", out_size, QSize())
@@ -140,7 +138,6 @@ class TestDecodeFailureRecovery:
         cache_key = "200/abc123/999"
         cache.put(cache_key, b"NOT-VALID-JPEG-DATA")
 
-        from PySide6.QtCore import QSize
         provider.requestImage(f"{cache_key}?r=1", QSize(), QSize())
 
         # The bad entry should have been evicted

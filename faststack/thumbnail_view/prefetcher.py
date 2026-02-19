@@ -531,7 +531,7 @@ class ThumbnailCache:
                 or len(self._cache) > self._max_items
             ):
                 # Pop oldest (first item)
-                oldest_key, oldest_val = self._cache.popitem(last=False)
+                _, oldest_val = self._cache.popitem(last=False)
                 self._current_bytes -= len(oldest_val)
 
     def discard(self, key: str) -> bool:
