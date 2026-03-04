@@ -4164,6 +4164,41 @@ class AppController(QObject):
         self._rebuild_path_to_index()
         self.sync_ui_state()
 
+    @staticmethod
+    def _recompute_batches_after_deletions(
+        saved_batches: List[List[int]], still_deleted: List[int]
+    ) -> List[List[int]]:
+        """Return a copy of saved_batches with index spans adjusted for still_deleted.
+
+        Used during partial rollbacks: start from the pre-delete snapshot and
+        re-apply only the deletions that were not reversed.
+        """
+        if not still_deleted:
+            return [b[:] for b in saved_batches]
+
+        deleted_set = set(still_deleted)
+
+        def _shift(orig_idx: int) -> int:
+            return orig_idx - sum(1 for d in still_deleted if d < orig_idx)
+
+        new_batches = []
+        for b_start, b_end in saved_batches:
+            first_ok = next(
+                (i for i in range(b_start, b_end + 1) if i not in deleted_set),
+                None,
+            )
+            if first_ok is None:
+                continue  # whole batch still deleted — drop it
+            last_ok = next(
+                (i for i in range(b_end, b_start - 1, -1) if i not in deleted_set),
+                None,
+            )
+            ns = _shift(first_ok)
+            ne = _shift(last_ok)
+            if ns <= ne:
+                new_batches.append([ns, ne])
+        return new_batches
+
     def _rollback_ui_items(self, items: List[Tuple[int, Any]], job: DeleteJob) -> None:
         """Restore items to the UI list in correct order."""
         # Sort reverse by index to insert correctly
@@ -4193,8 +4228,18 @@ class AppController(QObject):
 
         # Restore saved batch state if present
         if job.saved_batches and items:
-            self.batches = job.saved_batches
-            self.batch_start_index = job.saved_batch_start_index
+            original = {idx for idx, _ in job.removed_items}
+            restored = {idx for idx, _ in items}
+            if restored == original:
+                # Full rollback: restore pre-delete snapshot directly
+                self.batches = [b[:] for b in job.saved_batches]
+                self.batch_start_index = job.saved_batch_start_index
+            else:
+                # Partial rollback: re-apply the deletions that were not reversed
+                still_deleted = sorted(original - restored)
+                self.batches = self._recompute_batches_after_deletions(
+                    job.saved_batches, still_deleted
+                )
             self._invalidate_batch_cache()
 
     def _schedule_delete_refresh(self) -> None:
@@ -4286,6 +4331,7 @@ class AppController(QObject):
             for idx in sorted(sorted_indices)
             if 0 <= idx < len(self.image_files)
         ]
+        original_count = len(self.image_files)
         previous_index = self.current_index
 
         # Remove from in-memory list immediately for instant visual feedback
@@ -4294,7 +4340,8 @@ class AppController(QObject):
                 del self.image_files[idx]
 
         # Reposition current_index immediately (fast, in-memory only)
-        deleted_set = set(sorted_indices)
+        validated_sorted = sorted(i for i in sorted_indices if 0 <= i < original_count)
+        deleted_set = set(validated_sorted)
         if not self.image_files:
             self.current_index = 0
         elif previous_index in deleted_set:
@@ -4302,7 +4349,7 @@ class AppController(QObject):
             self.current_index = min(previous_index, len(self.image_files) - 1)
         else:
             # Current image survived → shift index down for each deletion before it
-            shift = sum(1 for d in sorted_indices if d < previous_index)
+            shift = sum(1 for d in validated_sorted if d < previous_index)
             self.current_index = max(0, min(previous_index - shift, len(self.image_files) - 1))
 
         # Save batch state before mutation so _rollback_ui_items can restore it
