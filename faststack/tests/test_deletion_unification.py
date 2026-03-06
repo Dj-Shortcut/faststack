@@ -453,3 +453,54 @@ def test_batch_restored_on_rollback(mock_controller):
     assert mock_controller.batch_start_index == 0
     # Images should be restored
     assert len(mock_controller.image_files) == 2
+
+
+
+def test_drag_exec_mutation_does_not_mark_index_derived_survivor(mock_controller, tmp_path):
+    """During drag.exec() list mutation must not cause survivor upload flags via index lookups."""
+    img_a = ImageFile(tmp_path / "A.jpg")
+    img_b = ImageFile(tmp_path / "B.jpg")
+    img_c = ImageFile(tmp_path / "C.jpg")
+    for img in (img_a, img_b, img_c):
+        img.path.write_bytes(b"x")
+
+    mock_controller.image_files = [img_a, img_b, img_c]
+    mock_controller.current_index = 0
+    mock_controller.batches = [[0, 1]]
+    mock_controller.main_window = Mock()
+
+    metadata = {}
+
+    def get_meta(stem):
+        meta = metadata.setdefault(stem, Mock(uploaded=False, uploaded_date=None))
+        return meta
+
+    mock_controller.sidecar.get_metadata.side_effect = get_meta
+    mock_controller.sidecar.save = Mock()
+
+    class FakeDrag:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def setMimeData(self, *_args, **_kwargs):
+            pass
+
+        def setPixmap(self, *_args, **_kwargs):
+            pass
+
+        def setHotSpot(self, *_args, **_kwargs):
+            pass
+
+        def exec(self, *_args, **_kwargs):
+            # Multiple concurrent mutations while drag is active.
+            mock_controller.image_files = [img_c, img_b]
+            mock_controller.current_index = 1
+            return 1  # Qt.CopyAction
+
+    with patch("faststack.app.QDrag", FakeDrag):
+        mock_controller.start_drag_current_image()
+
+    assert metadata["A"].uploaded is True
+    assert metadata["B"].uploaded is True
+    # C survives the drag mutation and must NOT be marked by stale index use.
+    assert "C" not in metadata or metadata["C"].uploaded is False

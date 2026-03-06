@@ -5205,29 +5205,27 @@ class AppController(QObject):
                 if 0 <= idx < len(self.image_files):
                     files_to_drag.add(idx)
 
-        # Convert to sorted list and get only existing paths
-        file_indices = sorted(files_to_drag)
-        existing_indices = [
-            idx for idx in file_indices if self.image_files[idx].path.exists()
-        ]
-
-        # Prefer dragging the developed JPG if it exists (for external export),
-        # but only when RAW mode is active or we are dragging a developed file itself.
-        file_paths = []
-        for idx in existing_indices:
+        # Single source of truth for all drag and post-drag metadata.
+        drag_snapshot = []
+        for idx in sorted(files_to_drag):
             img = self.image_files[idx]
+            if not img.path.exists():
+                continue
 
             # Suggestion: only prefer -developed.jpg when RAW mode is active
             # or when the current entry is itself the working/developed artifact.
             is_developed_artifact = img.path.stem.lower().endswith("-developed")
             in_raw_mode = getattr(self, "current_edit_source_mode", "jpeg") == "raw"
 
-            if (
-                in_raw_mode or is_developed_artifact
-            ) and img.developed_jpg_path.exists():
-                file_paths.append(img.developed_jpg_path)
-            else:
-                file_paths.append(img.path)
+            drag_path = (
+                img.developed_jpg_path
+                if (in_raw_mode or is_developed_artifact)
+                and img.developed_jpg_path.exists()
+                else img.path
+            )
+            drag_snapshot.append({"drag_path": drag_path, "stem": img.path.stem})
+
+        file_paths = [entry["drag_path"] for entry in drag_snapshot]
 
         if not file_paths:
             log.error("No valid files to drag")
@@ -5272,8 +5270,9 @@ class AppController(QObject):
 
             today = datetime.now().strftime("%Y-%m-%d")
 
-            for idx in existing_indices:
-                stem = self.image_files[idx].path.stem
+            # No list-index lookups after drag.exec due to concurrent list mutation risk.
+            for entry in drag_snapshot:
+                stem = entry["stem"]
                 meta = self.sidecar.get_metadata(stem)
                 meta.uploaded = True
                 meta.uploaded_date = today
@@ -5290,7 +5289,7 @@ class AppController(QObject):
             self.sync_ui_state()
             log.info(
                 "Marked %d file(s) as uploaded on %s. Cleared all batches.",
-                len(existing_indices),
+                len(drag_snapshot),
                 today,
             )
 
