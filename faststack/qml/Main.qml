@@ -68,6 +68,7 @@ ApplicationWindow {
         }
         if (uiState && uiState.hasRecycleBinItems) {
             close.accepted = false
+            uiState.refreshRecycleBinStats()
             recycleBinCleanupDialog.open()
         } else {
             close.accepted = true
@@ -1016,6 +1017,11 @@ ApplicationWindow {
                 visible: uiState ? (uiState.imageCount > 0 && uiState.isUploaded) : false
             }
             Label {
+                text: uiState ? (uiState.todoDate ? ` Todo since ${uiState.todoDate}` : " Todo") : ""
+                color: "#64B5F6"
+                visible: uiState ? (uiState.imageCount > 0 && uiState.isTodo) : false
+            }
+            Label {
                 text: uiState ? ` Edited on ${uiState.editedDate}` : ""
                 color: "lightgreen"
                 visible: uiState ? (uiState.imageCount > 0 && uiState.isEdited) : false
@@ -1374,6 +1380,7 @@ ApplicationWindow {
                           "&nbsp;&nbsp;}: End current batch<br>" +
                           "&nbsp;&nbsp;\\: Clear all batches<br><br>" +
                           "<b>Flag Toggles:</b><br>" +
+                          "&nbsp;&nbsp;D: Toggle todo flag<br>" +
                           "&nbsp;&nbsp;F: Toggle favorite flag<br>" +
                           "&nbsp;&nbsp;U: Toggle uploaded flag<br>" +
                           "&nbsp;&nbsp;Ctrl+E: Toggle edited flag<br>" +
@@ -1620,13 +1627,14 @@ ApplicationWindow {
                 Behavior on height { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
                 
                 ScrollView {
+                    id: detailsScrollView
                     anchors.fill: parent
                     anchors.margins: 8
 
-                    
+
                     TextArea {
                         id: detailsText
-                        width: parent.width
+                        width: detailsScrollView.availableWidth
                         text: uiState ? uiState.recycleBinDetailedText : ""
                         color: root.isDarkTheme ? "#efefef" : "#333333"
                         font.family: "Consolas, 'Courier New', monospace"
@@ -1635,7 +1643,9 @@ ApplicationWindow {
                         wrapMode: Text.WrapAnywhere
                         readOnly: true
                         selectByMouse: true
-                        background: null
+                        background: Rectangle {
+                            color: "transparent"
+                        }
                     }
                 }
             }

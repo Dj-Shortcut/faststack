@@ -455,6 +455,18 @@ class UIState(QObject):
             return ""
         return self.app_controller.get_current_metadata().get("uploaded_date", "")
 
+    @Property(bool, notify=metadataChanged)
+    def isTodo(self):
+        if not self.app_controller.image_files:
+            return False
+        return self.app_controller.get_current_metadata().get("todo", False)
+
+    @Property(str, notify=metadataChanged)
+    def todoDate(self):
+        if not self.app_controller.image_files:
+            return ""
+        return self.app_controller.get_current_metadata().get("todo_date", "")
+
     @Property(str, notify=metadataChanged)
     def batchInfoText(self):
         if not self.app_controller.image_files:
@@ -1605,10 +1617,14 @@ class UIState(QObject):
         return len(stats) > 0
 
     @Slot()
-    def cleanupRecycleBins(self):
-        """Deletes all tracked recycle bins."""
-        self.app_controller.cleanup_recycle_bins()
-
+    def refreshRecycleBinStats(self):
+        """Notify QML that recycle-bin properties should be re-read."""
         self.recycleBinStatsTextChanged.emit()
         self.recycleBinDetailedTextChanged.emit()
         self.hasRecycleBinItemsChanged.emit()
+
+    @Slot()
+    def cleanupRecycleBins(self):
+        """Deletes all tracked recycle bins."""
+        self.app_controller.cleanup_recycle_bins()
+        self.refreshRecycleBinStats()

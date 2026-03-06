@@ -16,6 +16,7 @@ import shutil
 import uuid
 import bisect
 import functools
+from collections import deque
 
 # Must set before importing PySide6
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.mime.warning=false"
@@ -268,7 +269,7 @@ class AppController(QObject):
         # Cache Warning State
         self._last_cache_warning_time = 0
         self._eviction_lock = threading.Lock()
-        self._eviction_timestamps = []  # List of eviction timestamps for rate detection
+        self._eviction_timestamps: deque[float] = deque()  # Rolling window for rate detection
         self.display_ready = False  # Track if display size has been reported
         self.pending_prefetch_index: Optional[int] = None  # Deferred prefetch index
 
@@ -2076,6 +2077,7 @@ class AppController(QObject):
                 "edited": getattr(meta, "edited", False),
                 "restacked": getattr(meta, "restacked", False),
                 "favorite": getattr(meta, "favorite", False),
+                "todo": getattr(meta, "todo", False),
             }
         except Exception as e:  # Broad catch for UI plumbing - don't crash grid view
             log.debug("Failed to get metadata for %s: %s", stem, e)
@@ -2085,6 +2087,7 @@ class AppController(QObject):
                 "edited": False,
                 "restacked": False,
                 "favorite": False,
+                "todo": False,
             }
 
     def _get_bulk_metadata_map(self) -> Dict[str, dict]:
@@ -2099,6 +2102,7 @@ class AppController(QObject):
                     "edited": getattr(meta, "edited", False),
                     "restacked": getattr(meta, "restacked", False),
                     "favorite": getattr(meta, "favorite", False),
+                    "todo": getattr(meta, "todo", False),
                 }
         except Exception as e:
             log.warning("Failed to build bulk metadata map: %s", e)
@@ -2161,6 +2165,31 @@ class AppController(QObject):
         status = "uploaded" if meta.uploaded else "not uploaded"
         self.update_status_message(f"Marked as {status}")
         log.info("Toggled uploaded flag to %s for %s", meta.uploaded, stem)
+
+    def toggle_todo(self):
+        """Toggle todo flag for current image."""
+        if not self.image_files or self.current_index >= len(self.image_files):
+            return
+
+        from datetime import datetime
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        stem = self.image_files[self.current_index].path.stem
+        meta = self.sidecar.get_metadata(stem)
+
+        meta.todo = not getattr(meta, "todo", False)
+        if meta.todo:
+            meta.todo_date = today
+        else:
+            meta.todo_date = None
+
+        self.sidecar.save()
+        self._metadata_cache_index = (-1, -1)
+        self.dataChanged.emit()
+        self.sync_ui_state()
+        status = "todo" if meta.todo else "not todo"
+        self.update_status_message(f"Marked as {status}")
+        log.info("Toggled todo flag to %s for %s", meta.todo, stem)
 
     def toggle_edited(self):
         """Toggle edited flag for current image."""
@@ -2308,6 +2337,8 @@ class AppController(QObject):
             "restacked": meta.restacked,
             "restacked_date": meta.restacked_date or "",
             "favorite": meta.favorite,
+            "todo": getattr(meta, "todo", False),
+            "todo_date": getattr(meta, "todo_date", None) or "",
             "stack_info_text": stack_info,
             "batch_info_text": batch_info,
         }
@@ -4164,6 +4195,41 @@ class AppController(QObject):
         self._rebuild_path_to_index()
         self.sync_ui_state()
 
+    @staticmethod
+    def _recompute_batches_after_deletions(
+        saved_batches: List[List[int]], still_deleted: List[int]
+    ) -> List[List[int]]:
+        """Return a copy of saved_batches with index spans adjusted for still_deleted.
+
+        Used during partial rollbacks: start from the pre-delete snapshot and
+        re-apply only the deletions that were not reversed.
+        """
+        if not still_deleted:
+            return [b[:] for b in saved_batches]
+
+        deleted_set = set(still_deleted)
+
+        def _shift(orig_idx: int) -> int:
+            return orig_idx - sum(1 for d in still_deleted if d < orig_idx)
+
+        new_batches = []
+        for b_start, b_end in saved_batches:
+            first_ok = next(
+                (i for i in range(b_start, b_end + 1) if i not in deleted_set),
+                None,
+            )
+            if first_ok is None:
+                continue  # whole batch still deleted — drop it
+            last_ok = next(
+                (i for i in range(b_end, b_start - 1, -1) if i not in deleted_set),
+                None,
+            )
+            ns = _shift(first_ok)
+            ne = _shift(last_ok)
+            if ns <= ne:
+                new_batches.append([ns, ne])
+        return new_batches
+
     def _rollback_ui_items(self, items: List[Tuple[int, Any]], job: DeleteJob) -> None:
         """Restore items to the UI list in correct order."""
         # Sort reverse by index to insert correctly
@@ -4193,8 +4259,18 @@ class AppController(QObject):
 
         # Restore saved batch state if present
         if job.saved_batches and items:
-            self.batches = job.saved_batches
-            self.batch_start_index = job.saved_batch_start_index
+            original = {idx for idx, _ in job.removed_items}
+            restored = {idx for idx, _ in items}
+            if restored == original:
+                # Full rollback: restore pre-delete snapshot directly
+                self.batches = [b[:] for b in job.saved_batches]
+                self.batch_start_index = job.saved_batch_start_index
+            else:
+                # Partial rollback: re-apply the deletions that were not reversed
+                still_deleted = sorted(original - restored)
+                self.batches = self._recompute_batches_after_deletions(
+                    job.saved_batches, still_deleted
+                )
             self._invalidate_batch_cache()
 
     def _schedule_delete_refresh(self) -> None:
@@ -4286,6 +4362,7 @@ class AppController(QObject):
             for idx in sorted(sorted_indices)
             if 0 <= idx < len(self.image_files)
         ]
+        original_count = len(self.image_files)
         previous_index = self.current_index
 
         # Remove from in-memory list immediately for instant visual feedback
@@ -4294,10 +4371,65 @@ class AppController(QObject):
                 del self.image_files[idx]
 
         # Reposition current_index immediately (fast, in-memory only)
+        validated_sorted = sorted(i for i in sorted_indices if 0 <= i < original_count)
+        deleted_set = set(validated_sorted)
         if not self.image_files:
             self.current_index = 0
-        else:
+        elif previous_index in deleted_set:
+            # Current image was deleted → stay at same position (shows next image) or clamp
             self.current_index = min(previous_index, len(self.image_files) - 1)
+        else:
+            # Current image survived → shift index down for each deletion before it
+            shift = sum(1 for d in validated_sorted if d < previous_index)
+            self.current_index = max(0, min(previous_index - shift, len(self.image_files) - 1))
+
+        # Save batch state before mutation so _rollback_ui_items can restore it
+        # for any delete type (loupe, grid, batch).  batch delete_batch_images()
+        # will overwrite saved_batches with the same pre-mutation value anyway.
+        pre_batch_snapshot = [b[:] for b in self.batches] if self.batches else None
+        pre_batch_start_snapshot = self.batch_start_index if self.batches else None
+
+        # Adjust batch index ranges to account for removed entries.
+        # Deleting index d shifts every index > d down by one.  Without this,
+        # batches that sit above any deleted image reference the wrong files.
+        if self.batches:
+            deleted_ascending = sorted(validated_sorted)
+
+            def _shift(orig_idx: int) -> int:
+                return orig_idx - sum(1 for d in deleted_ascending if d < orig_idx)
+
+            new_batches = []
+            for b_start, b_end in self.batches:
+                # Anchor on the first and last *surviving* indices in the range.
+                # If every image in the batch was deleted, discard it entirely so
+                # it cannot migrate onto unrelated images.
+                first_ok = next(
+                    (i for i in range(b_start, b_end + 1) if i not in deleted_set),
+                    None,
+                )
+                if first_ok is None:
+                    continue  # whole batch deleted — drop it
+                last_ok = next(
+                    (i for i in range(b_end, b_start - 1, -1) if i not in deleted_set),
+                    None,
+                )
+                ns = _shift(first_ok)
+                ne = _shift(last_ok)
+                if ns <= ne:
+                    new_batches.append([ns, ne])
+            if new_batches != self.batches:
+                self.batches = new_batches
+                self._invalidate_batch_cache()
+
+            # Adjust batch_start_index for removed entries
+            if pre_batch_start_snapshot is not None:
+                if pre_batch_start_snapshot in deleted_set:
+                    self.batch_start_index = None
+                else:
+                    shifted = _shift(pre_batch_start_snapshot)
+                    if shifted != self.batch_start_index:
+                        self.batch_start_index = shifted
+                        self._invalidate_batch_cache()
 
         # Update UI immediately - this is fast since it just reads from memory
         # Check for existence, not truthiness (empty cache is falsy)
@@ -4375,6 +4507,8 @@ class AppController(QObject):
             cancel_event=cancel_event,
             previous_index=previous_index,
             images_to_delete=images_to_delete,
+            saved_batches=pre_batch_snapshot,
+            saved_batch_start_index=pre_batch_start_snapshot,
         )
 
         # Add single placeholder undo entry per job
@@ -4463,7 +4597,7 @@ class AppController(QObject):
                     indices_to_delete.add(i)
 
         # 2. Save batch state for rollback, then clear optimistically
-        saved_batches = list(self.batches)
+        saved_batches = [b[:] for b in self.batches]
         saved_batch_start = self.batch_start_index
 
         # 3. Call unified engine
@@ -4669,6 +4803,11 @@ class AppController(QObject):
                 if self.image_files:
                     self.prefetcher.update_prefetch(self.current_index)
                 self._rebuild_path_to_index()
+                # Restore batch state that was shifted during _delete_indices
+                if job.saved_batches and removed_items:
+                    self.batches = job.saved_batches
+                    self.batch_start_index = job.saved_batch_start_index
+                    self._invalidate_batch_cache()
                 self.sync_ui_state()
 
                 count = len(removed_items)
@@ -4870,6 +5009,16 @@ class AppController(QObject):
             log.info("Detaching QML engine.")
             self.engine = None
 
+    @staticmethod
+    def _safe_shutdown_executor(executor, name, *, wait=False, cancel_futures=True):
+        """Shut down a single executor, logging and swallowing any error."""
+        if executor is None:
+            return
+        try:
+            executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+        except Exception as e:
+            log.warning("Error shutting down %s executor: %s", name, e, exc_info=True)
+
     def shutdown_nonqt(self):
         """Shutdown non-Qt resources - safe to run in background thread."""
         log.info("Shutting down background resources.")
@@ -4892,21 +5041,17 @@ class AppController(QObject):
                 if not (entry[0] == "pending_delete" and entry[1] in pending_ids)
             ]
 
-        # Shutdown thread pool executors
-        try:
-            log.info("Shutting down background executors...")
-            self._hist_executor.shutdown(wait=False, cancel_futures=True)
-            self._preview_executor.shutdown(wait=False, cancel_futures=True)
-
-            exif_exec = getattr(self, "_exif_executor", None)
-            if exif_exec:
-                exif_exec.shutdown(wait=False, cancel_futures=True)
-
-            # wait=True ensures pending saves/deletes complete to avoid data loss/corruption
-            self._save_executor.shutdown(wait=True, cancel_futures=False)
-            self._delete_executor.shutdown(wait=True, cancel_futures=False)
-        except Exception as e:
-            log.warning("Error shutting down executors: %s", e)
+        # Shutdown thread pool executors — each isolated so one failure can't
+        # prevent the others (especially save/delete) from shutting down.
+        log.info("Shutting down background executors...")
+        self._safe_shutdown_executor(self._hist_executor, "histogram", wait=False)
+        self._safe_shutdown_executor(self._preview_executor, "preview", wait=False)
+        self._safe_shutdown_executor(
+            getattr(self, "_exif_executor", None), "exif", wait=False,
+        )
+        # wait=True ensures pending saves/deletes complete to avoid data loss/corruption
+        self._safe_shutdown_executor(self._save_executor, "save", wait=True, cancel_futures=False)
+        self._safe_shutdown_executor(self._delete_executor, "delete", wait=True, cancel_futures=False)
 
         # Shutdown prefetcher
         try:
@@ -4972,17 +5117,55 @@ class AppController(QObject):
         clear_raw_count_cache()
         log.info("Emptied recycle bins and cleared delete history")
 
-    def _on_cache_evict(self, key, value):
-        """Callback for when the image cache evicts an item."""
+    def _on_cache_evict(self, key, value, info):
+        """Callback for when the image cache evicts an item.
+
+        Args:
+            key: Cache key that was evicted.
+            value: Cached value that was evicted.
+            info: Dict with eviction context captured at eviction time:
+                  reason ("pressure"|"replace"|"manual"), usage_bytes, max_bytes,
+                  entry_count, thread_id.
+        """
+        reason = info.get("reason", "unknown")
+
+        # Only count capacity-pressure evictions toward thrashing detection.
+        # Replacements and manual removals (pop_path, popitem resize) are not
+        # indicators of cache size being too small.
+        if reason != "pressure":
+            if self.debug_cache:
+                log.debug(
+                    "Cache evict (skipped for thrash): reason=%s key=%s",
+                    reason,
+                    key,
+                )
+            return
+
+        # Use usage captured at eviction time (inside the lock), not current
+        # currsize which may be stale if clear()/evict_paths() ran between
+        # the eviction and this callback executing outside the lock.
+        eviction_usage = info.get("usage_bytes", 0)
+        eviction_max = info.get("max_bytes", 1)
+
+        if self.debug_cache:
+            log.debug(
+                "Cache evict (pressure): key=%s usage=%.2fMB/%.2fMB "
+                "entries=%d thread=%s",
+                key,
+                eviction_usage / (1024**2),
+                eviction_max / (1024**2),
+                info.get("entry_count", -1),
+                info.get("thread_id", "?"),
+            )
+
         now = time.time()
 
         with self._eviction_lock:
-            # 1. Record eviction timestamp / prune
+            # 1. Record eviction timestamp / prune oldest outside window
             self._eviction_timestamps.append(now)
             cutoff = now - CACHE_THRASH_WINDOW_SECS
-            self._eviction_timestamps = [
-                t for t in self._eviction_timestamps if t > cutoff
-            ]
+            while self._eviction_timestamps and self._eviction_timestamps[0] <= cutoff:
+                self._eviction_timestamps.popleft()
 
             # 2. Check for thrashing (e.g., > threshold evictions in window)
             if len(self._eviction_timestamps) > CACHE_THRASH_THRESHOLD:
@@ -4991,11 +5174,11 @@ class AppController(QObject):
                     self._last_cache_warning_time = now
                     self._has_warned_cache_full = True
 
-                    # UI update logic
-                    used_gb = self.image_cache.currsize / (1024**3)
-                    max_gb = self.image_cache.max_bytes / (1024**3)
+                    # Use captured usage from eviction time for accurate reporting
+                    used_gb = eviction_usage / (1024**3)
+                    max_gb = eviction_max / (1024**3)
 
-                    # Include key/value summary to fix lint error and provide context
+                    # Include key/value summary for context
                     val_summary = ""
                     if hasattr(value, "width") and hasattr(value, "height"):
                         val_summary = f" ({value.width}x{value.height})"
@@ -6304,7 +6487,7 @@ class AppController(QObject):
     @Slot()
     def auto_levels(self):
         """Calculates and applies auto levels (preview only). Returns False if skipped."""
-        if not self.image_files:
+        if not self.image_files or self.current_index >= len(self.image_files):
             self.update_status_message("No image to adjust")
             return False
 
