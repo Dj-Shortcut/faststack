@@ -1,6 +1,8 @@
 import pytest
 from unittest.mock import Mock, patch
 from pathlib import Path
+from types import SimpleNamespace
+
 from faststack.app import AppController
 from faststack.models import ImageFile
 from faststack.deletion_types import DeletionErrorCodes
@@ -212,6 +214,57 @@ def test_delete_schedules_refresh(mock_controller):
 
     # Job should be pending (async)
     assert len(mock_controller._pending_delete_jobs) == 1
+
+
+def test_drag_uploaded_marks_only_dragged_item_when_stems_collide(mock_controller, tmp_path):
+    """Regression: duplicate stems across different source paths should not over-mark uploads."""
+
+    path_a = tmp_path / "set_a" / "IMG_0001.jpg"
+    path_b = tmp_path / "set_b" / "IMG_0001.jpg"
+    path_a.parent.mkdir(parents=True)
+    path_b.parent.mkdir(parents=True)
+    path_a.touch()
+    path_b.touch()
+
+    mock_controller.image_files = [ImageFile(path_a), ImageFile(path_b)]
+    mock_controller.current_index = 0
+    mock_controller.batches = []
+    mock_controller.main_window = Mock()
+    mock_controller.ui_state.resetZoomPan = Mock()
+
+    meta_a = SimpleNamespace(uploaded=False, uploaded_date=None)
+    meta_b = SimpleNamespace(uploaded=False, uploaded_date=None)
+    metadata_calls = []
+
+    def get_metadata(stem):
+        metadata_calls.append(stem)
+        if len(metadata_calls) == 1:
+            return meta_a
+        return meta_b
+
+    mock_controller.sidecar.get_metadata.side_effect = get_metadata
+
+    fake_drag = Mock()
+    from faststack.app import Qt
+
+    fake_drag.exec.return_value = Qt.CopyAction
+
+    fake_mime = Mock()
+
+    fake_pixmap = Mock()
+    fake_pixmap.isNull.return_value = True
+
+    with (
+        patch("faststack.app.QDrag", return_value=fake_drag),
+        patch("faststack.app.QMimeData", return_value=fake_mime),
+        patch("faststack.app.QPixmap", return_value=fake_pixmap),
+    ):
+        mock_controller.start_drag_current_image()
+
+    assert len(metadata_calls) == 1
+    assert metadata_calls == ["IMG_0001"]
+    assert meta_a.uploaded is True
+    assert meta_b.uploaded is False
 
 
 # ── Undo tests ───────────────────────────────────────────────────────
