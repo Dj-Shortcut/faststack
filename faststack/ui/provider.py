@@ -1627,7 +1627,4 @@ class UIState(QObject):
     def cleanupRecycleBins(self):
         """Deletes all tracked recycle bins."""
         self.app_controller.cleanup_recycle_bins()
-
-        self.recycleBinStatsTextChanged.emit()
-        self.recycleBinDetailedTextChanged.emit()
-        self.hasRecycleBinItemsChanged.emit()
+        self.refreshRecycleBinStats()

@@ -1017,7 +1017,7 @@ ApplicationWindow {
                 visible: uiState ? (uiState.imageCount > 0 && uiState.isUploaded) : false
             }
             Label {
-                text: uiState ? ` Todo since ${uiState.todoDate}` : ""
+                text: uiState ? (uiState.todoDate ? ` Todo since ${uiState.todoDate}` : " Todo") : ""
                 color: "#64B5F6"
                 visible: uiState ? (uiState.imageCount > 0 && uiState.isTodo) : false
             }
