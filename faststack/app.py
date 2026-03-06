@@ -5211,6 +5211,10 @@ class AppController(QObject):
             idx for idx in file_indices if self.image_files[idx].path.exists()
         ]
 
+        # Snapshot the dragged entries up-front so post-drag bookkeeping is stable
+        # even if self.image_files changes while the drag operation is active.
+        dragged_stems_snapshot = [self.image_files[idx].path.stem for idx in existing_indices]
+
         # Prefer dragging the developed JPG if it exists (for external export),
         # but only when RAW mode is active or we are dragging a developed file itself.
         file_paths = []
@@ -5272,8 +5276,7 @@ class AppController(QObject):
 
             today = datetime.now().strftime("%Y-%m-%d")
 
-            for idx in existing_indices:
-                stem = self.image_files[idx].path.stem
+            for stem in dragged_stems_snapshot:
                 meta = self.sidecar.get_metadata(stem)
                 meta.uploaded = True
                 meta.uploaded_date = today
@@ -5290,7 +5293,7 @@ class AppController(QObject):
             self.sync_ui_state()
             log.info(
                 "Marked %d file(s) as uploaded on %s. Cleared all batches.",
-                len(existing_indices),
+                len(dragged_stems_snapshot),
                 today,
             )
 

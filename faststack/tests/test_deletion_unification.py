@@ -453,3 +453,84 @@ def test_batch_restored_on_rollback(mock_controller):
     assert mock_controller.batch_start_index == 0
     # Images should be restored
     assert len(mock_controller.image_files) == 2
+
+
+# ── Drag/drop snapshot bookkeeping tests ─────────────────────────────
+
+
+def test_drag_drop_uses_snapshot_for_upload_count_and_batch_clear(mock_controller, tmp_path):
+    """Successful drop derives upload count and batch clearing from drag snapshot."""
+    from PySide6.QtCore import Qt
+    from faststack.models import EntryMetadata
+
+    img1 = ImageFile(tmp_path / "img1.jpg")
+    img2 = ImageFile(tmp_path / "img2.jpg")
+    img3 = ImageFile(tmp_path / "img3.jpg")
+    for img in (img1, img2, img3):
+        img.path.write_text("x")
+
+    mock_controller.image_files = [img1, img2, img3]
+    mock_controller.current_index = 0
+    mock_controller.batches = [[1, 2]]
+    mock_controller.batch_start_index = 1
+    mock_controller.main_window = Mock()
+    mock_controller.ui_state.resetZoomPan = Mock()
+
+    metadata_by_stem = {img.path.stem: EntryMetadata() for img in (img1, img2, img3)}
+    mock_controller.sidecar.get_metadata.side_effect = lambda stem: metadata_by_stem[stem]
+
+    def mutate_image_files(_actions):
+        mock_controller.image_files = [ImageFile(tmp_path / "later.jpg")]
+        return Qt.CopyAction
+
+    with patch("faststack.app.QDrag") as mock_qdrag, patch("faststack.app.QPixmap"):
+        drag_instance = mock_qdrag.return_value
+        drag_instance.exec.side_effect = mutate_image_files
+
+        mock_controller.start_drag_current_image()
+
+    uploaded_count = sum(1 for meta in metadata_by_stem.values() if meta.uploaded)
+    assert uploaded_count == len(metadata_by_stem)
+    assert mock_controller.sidecar.get_metadata.call_count == len(metadata_by_stem)
+
+    # Batch-clearing remains tied to successful Copy/Move drops only.
+    assert mock_controller.batches == []
+    assert mock_controller.batch_start_index is None
+
+
+def test_drag_drop_failed_action_keeps_upload_marks_and_batches(mock_controller, tmp_path):
+    """Failed drop keeps upload flags and batch state unchanged even if list mutates."""
+    from PySide6.QtCore import Qt
+    from faststack.models import EntryMetadata
+
+    img1 = ImageFile(tmp_path / "img1.jpg")
+    img2 = ImageFile(tmp_path / "img2.jpg")
+    for img in (img1, img2):
+        img.path.write_text("x")
+
+    mock_controller.image_files = [img1, img2]
+    mock_controller.current_index = 0
+    mock_controller.batches = [[0, 1]]
+    mock_controller.batch_start_index = 0
+    mock_controller.main_window = Mock()
+    mock_controller.ui_state.resetZoomPan = Mock()
+
+    metadata_by_stem = {img.path.stem: EntryMetadata() for img in (img1, img2)}
+    mock_controller.sidecar.get_metadata.side_effect = lambda stem: metadata_by_stem[stem]
+
+    original_batches = [batch[:] for batch in mock_controller.batches]
+
+    def mutate_image_files(_actions):
+        mock_controller.image_files = [ImageFile(tmp_path / "later.jpg")]
+        return Qt.IgnoreAction
+
+    with patch("faststack.app.QDrag") as mock_qdrag, patch("faststack.app.QPixmap"):
+        drag_instance = mock_qdrag.return_value
+        drag_instance.exec.side_effect = mutate_image_files
+
+        mock_controller.start_drag_current_image()
+
+    assert all(not meta.uploaded for meta in metadata_by_stem.values())
+    assert mock_controller.sidecar.get_metadata.call_count == 0
+    assert mock_controller.batches == original_batches
+    assert mock_controller.batch_start_index == 0
