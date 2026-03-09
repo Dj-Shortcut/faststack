@@ -2,6 +2,19 @@
 
 Todo:   More testing Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
 
+## 1.6.0 (2026-03-06) 
+
+- Added a "Todo" flag: toggle with D, filterable in Filter dialog, shown on thumbnails (badge, tile visuals, red on sparkline), and displayed as "Todo since {date}" in the UI.
+- Fixed batch range alignment after deletions to prevent stale/misaligned UI state.
+- Improved cross‑platform thumbnail path matching, more robust shutdown/teardown, and reduced eviction-related UI races.
+- Fixed image list refresh after filesystem watcher events so the current image stays selected when possible.
+- Fixed undo and rollback so deleted images are restored to the correct positions.
+- Fixed stack state being lost or shifted incorrectly after delete and undo operations.
+- Improved display cache invalidation so zoom, resize, filter, and edit changes refresh the correct image version.
+- Improved prefetch behavior when zooming or resizing to reduce stale background work.
+- Improved thumbnail lookup speed by adding a faster path-to-row mapping.
+- Reduced chances of UI state getting out of sync after external file changes.
+
 ## 1.5.9 (2026-02-16)
 
 - Full-Screen Mode: Press F11 to toggle fullscreen in loupe view 
