@@ -2378,17 +2378,17 @@ class AppController(QObject):
         self._metadata_cache = {
             "filename": filename,
             "exif_brief": exif_brief,
-            "stacked": meta.stacked,
-            "stacked_date": meta.stacked_date or "",
-            "uploaded": meta.uploaded,
-            "uploaded_date": meta.uploaded_date or "",
-            "edited": meta.edited,
-            "edited_date": meta.edited_date or "",
-            "restacked": meta.restacked,
-            "restacked_date": meta.restacked_date or "",
-            "favorite": meta.favorite,
-            "todo": getattr(meta, "todo", False),
-            "todo_date": getattr(meta, "todo_date", None) or "",
+            "stacked": meta.get("stacked", False) if isinstance(meta, dict) else getattr(meta, "stacked", False),
+            "stacked_date": (meta.get("stacked_date") if isinstance(meta, dict) else getattr(meta, "stacked_date", None)) or "",
+            "uploaded": meta.get("uploaded", False) if isinstance(meta, dict) else getattr(meta, "uploaded", False),
+            "uploaded_date": (meta.get("uploaded_date") if isinstance(meta, dict) else getattr(meta, "uploaded_date", None)) or "",
+            "edited": meta.get("edited", False) if isinstance(meta, dict) else getattr(meta, "edited", False),
+            "edited_date": (meta.get("edited_date") if isinstance(meta, dict) else getattr(meta, "edited_date", None)) or "",
+            "restacked": meta.get("restacked", False) if isinstance(meta, dict) else getattr(meta, "restacked", False),
+            "restacked_date": (meta.get("restacked_date") if isinstance(meta, dict) else getattr(meta, "restacked_date", None)) or "",
+            "favorite": meta.get("favorite", False) if isinstance(meta, dict) else getattr(meta, "favorite", False),
+            "todo": meta.get("todo", False) if isinstance(meta, dict) else getattr(meta, "todo", False),
+            "todo_date": (meta.get("todo_date") if isinstance(meta, dict) else getattr(meta, "todo_date", None)) or "",
             "stack_info_text": stack_info,
             "batch_info_text": batch_info,
         }
@@ -2613,7 +2613,7 @@ class AppController(QObject):
         indices_to_add = []
         for i, img in enumerate(self.image_files):
             meta = self.sidecar.get_metadata(img.path.stem, create=False)
-            if meta.favorite:
+            if meta.get("favorite", False) if isinstance(meta, dict) else getattr(meta, "favorite", False):
                 indices_to_add.append(i)
 
         if not indices_to_add:
@@ -7375,7 +7375,7 @@ class AppController(QObject):
             return False
         stem = self.image_files[self.current_index].path.stem
         meta = self.sidecar.get_metadata(stem, create=False)
-        return meta.stacked
+        return meta.get("stacked", False) if isinstance(meta, dict) else getattr(meta, "stacked", False)
 
     def _update_cache_stats(self):
         if self.debug_cache:
