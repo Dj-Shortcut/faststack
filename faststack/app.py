@@ -1793,7 +1793,7 @@ class AppController(QObject):
         for idx in range(len(self.image_files) - 1, -1, -1):
             img = self.image_files[idx]
             # Dynamic look-up of self.sidecar as requested (important for mocks in tests)
-            meta = self.sidecar.get_metadata(img.path.stem)
+            meta = self.sidecar.get_metadata(img.path.stem, create=False)
 
             # Robust extraction of 'uploaded' flag: handle both object and dict formats.
             # Mock-safety: must evaluate False if it's a MagicMock (test requirement).
@@ -2120,7 +2120,7 @@ class AppController(QObject):
     def _get_metadata_dict(self, stem: str) -> dict:
         """Get metadata for a file stem as a dict for thumbnail model."""
         try:
-            meta = self.sidecar.get_metadata(stem)
+            meta = self.sidecar.get_metadata(stem, create=False)
             return {
                 "stacked": getattr(meta, "stacked", False),
                 "uploaded": getattr(meta, "uploaded", False),
@@ -2351,7 +2351,7 @@ class AppController(QObject):
 
         # Compute and cache
         stem = self.image_files[self.current_index].path.stem
-        meta = self.sidecar.get_metadata(stem)
+        meta = self.sidecar.get_metadata(stem, create=False)
         stack_info = self._get_stack_info(self.current_index)
         batch_info = self._get_batch_info(self.current_index)
 
@@ -2612,7 +2612,7 @@ class AppController(QObject):
         # Find indices of all favorited images
         indices_to_add = []
         for i, img in enumerate(self.image_files):
-            meta = self.sidecar.get_metadata(img.path.stem)
+            meta = self.sidecar.get_metadata(img.path.stem, create=False)
             if meta.favorite:
                 indices_to_add.append(i)
 
@@ -2667,7 +2667,7 @@ class AppController(QObject):
         # Find indices of all uploaded images
         indices_to_add = []
         for i, img in enumerate(self.image_files):
-            meta = self.sidecar.get_metadata(img.path.stem)
+            meta = self.sidecar.get_metadata(img.path.stem, create=False)
             if not meta:
                 continue
             uploaded = (
@@ -7374,7 +7374,7 @@ class AppController(QObject):
         if not self.image_files or self.current_index >= len(self.image_files):
             return False
         stem = self.image_files[self.current_index].path.stem
-        meta = self.sidecar.get_metadata(stem)
+        meta = self.sidecar.get_metadata(stem, create=False)
         return meta.stacked
 
     def _update_cache_stats(self):
