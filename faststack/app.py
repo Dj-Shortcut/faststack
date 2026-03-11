@@ -2381,8 +2381,8 @@ class AppController(QObject):
             "restacked": meta.restacked,
             "restacked_date": meta.restacked_date or "",
             "favorite": meta.favorite,
-            "todo": meta.todo,
-            "todo_date": meta.todo_date or "",
+            "todo": getattr(meta, "todo", False),
+            "todo_date": getattr(meta, "todo_date", "") or "",
             "stack_info_text": stack_info,
             "batch_info_text": batch_info,
         }
