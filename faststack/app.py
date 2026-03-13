@@ -270,7 +270,9 @@ class AppController(QObject):
         # Cache Warning State
         self._last_cache_warning_time = 0
         self._eviction_lock = threading.Lock()
-        self._eviction_timestamps: deque[float] = deque()  # Rolling window for rate detection
+        self._eviction_timestamps: deque[float] = (
+            deque()
+        )  # Rolling window for rate detection
         self.display_ready = False  # Track if display size has been reported
         self.pending_prefetch_index: Optional[int] = None  # Deferred prefetch index
 
@@ -395,7 +397,9 @@ class AppController(QObject):
         self._metadata_cache = {}
         self._metadata_cache_index = (-1, -1)
         self._exif_brief_cache: dict = {}  # normalized path key → formatted EXIF string
-        self._exif_pending_path: Optional[str] = None  # path currently awaiting EXIF read
+        self._exif_pending_path: Optional[str] = (
+            None  # path currently awaiting EXIF read
+        )
         with self._last_image_lock:
             self.last_displayed_image = None
         self._logged_empty_metadata = False
@@ -997,15 +1001,15 @@ class AppController(QObject):
             else:
                 # Image gone — clear stale variant override
                 self._clear_variant_override()
-                self.current_index = min(
-                    self.current_index, len(self.image_files) - 1
-                )
+                self.current_index = min(self.current_index, len(self.image_files) - 1)
         else:
             # List empty or no preserved path — clear stale variant override
             self._clear_variant_override()
-            self.current_index = max(0, min(
-                self.current_index, len(self.image_files) - 1
-            )) if self.image_files else 0
+            self.current_index = (
+                max(0, min(self.current_index, len(self.image_files) - 1))
+                if self.image_files
+                else 0
+            )
 
         self._do_prefetch(self.current_index)
         self.sync_ui_state()
@@ -3787,7 +3791,6 @@ class AppController(QObject):
             log.error("Failed to recycle %s: %s", src.name, e)
             return None
 
-
     @staticmethod
     def _perm_delete_worker(
         job_id: int,
@@ -4459,7 +4462,9 @@ class AppController(QObject):
         else:
             # Current image survived → shift index down for each deletion before it
             shift = sum(1 for d in validated_sorted if d < previous_index)
-            self.current_index = max(0, min(previous_index - shift, len(self.image_files) - 1))
+            self.current_index = max(
+                0, min(previous_index - shift, len(self.image_files) - 1)
+            )
 
         # Save batch/stack state before mutation so rollback can restore it.
         pre_batch_snapshot = [b[:] for b in self.batches]
@@ -5144,7 +5149,6 @@ class AppController(QObject):
         self._shutting_down = True  # gate async callbacks during shutdown_nonqt too
         self._exif_pending_path = None  # optional but consistent with shutdown_qt
 
-
         # Clear pending delete jobs and remove associated undo placeholders
         if self._pending_delete_jobs:
             log.info(
@@ -5165,11 +5169,17 @@ class AppController(QObject):
         self._safe_shutdown_executor(self._hist_executor, "histogram", wait=False)
         self._safe_shutdown_executor(self._preview_executor, "preview", wait=False)
         self._safe_shutdown_executor(
-            getattr(self, "_exif_executor", None), "exif", wait=False,
+            getattr(self, "_exif_executor", None),
+            "exif",
+            wait=False,
         )
         # wait=True ensures pending saves/deletes complete to avoid data loss/corruption
-        self._safe_shutdown_executor(self._save_executor, "save", wait=True, cancel_futures=False)
-        self._safe_shutdown_executor(self._delete_executor, "delete", wait=True, cancel_futures=False)
+        self._safe_shutdown_executor(
+            self._save_executor, "save", wait=True, cancel_futures=False
+        )
+        self._safe_shutdown_executor(
+            self._delete_executor, "delete", wait=True, cancel_futures=False
+        )
 
         # Shutdown prefetcher
         try:
