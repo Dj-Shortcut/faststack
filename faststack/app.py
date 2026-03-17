@@ -5507,6 +5507,11 @@ class AppController(QObject):
         if not self.image_files or self.current_index >= len(self.image_files):
             return
 
+        def _snapshot_drag_key(path: Path) -> Tuple[str, str]:
+            """Create a stable key for drag snapshot matching."""
+            abs_source = path.resolve(strict=False)
+            return (path.stem, normalize_path_key(abs_source))
+
         # Collect all files: current + any in defined batches
         files_to_drag = set()
         files_to_drag.add(self.current_index)
@@ -5526,6 +5531,7 @@ class AppController(QObject):
         # Prefer dragging the developed JPG if it exists (for external export),
         # but only when RAW mode is active or we are dragging a developed file itself.
         file_paths = []
+        drag_snapshot_items = []
         for idx in existing_indices:
             img = self.image_files[idx]
 
@@ -5537,9 +5543,35 @@ class AppController(QObject):
             if (
                 in_raw_mode or is_developed_artifact
             ) and img.developed_jpg_path.exists():
-                file_paths.append(img.developed_jpg_path)
+                drag_path = img.developed_jpg_path
             else:
-                file_paths.append(img.path)
+                drag_path = img.path
+
+            source_path = img.path
+            snapshot_key = _snapshot_drag_key(source_path)
+            file_paths.append(drag_path)
+            drag_snapshot_items.append(
+                {
+                    "key": snapshot_key,
+                    "source_path": source_path,
+                    "drag_path": drag_path,
+                }
+            )
+
+        stems_in_snapshot: Dict[str, List[str]] = {}
+        for item in drag_snapshot_items:
+            stem, source_key = item["key"]
+            stems_in_snapshot.setdefault(stem, []).append(source_key)
+        duplicate_stems = {
+            stem: sorted(source_keys)
+            for stem, source_keys in stems_in_snapshot.items()
+            if len(source_keys) > 1
+        }
+        if duplicate_stems:
+            log.debug(
+                "Drag snapshot contains duplicate stems; unique key matching enabled: %s",
+                duplicate_stems,
+            )
 
         if not file_paths:
             log.error("No valid files to drag")
@@ -5582,8 +5614,17 @@ class AppController(QObject):
         if result in (Qt.CopyAction, Qt.MoveAction):
             today = datetime.now().strftime("%Y-%m-%d")
 
-            for idx in existing_indices:
-                stem = self.image_files[idx].path.stem
+            current_snapshot_key_to_item = {
+                _snapshot_drag_key(img.path): img for img in self.image_files
+            }
+
+            for item in drag_snapshot_items:
+                matched_image = current_snapshot_key_to_item.get(item["key"])
+                stem = (
+                    matched_image.path.stem
+                    if matched_image is not None
+                    else item["source_path"].stem
+                )
                 meta = self.sidecar.get_metadata(stem)
                 meta.uploaded = True
                 meta.uploaded_date = today
