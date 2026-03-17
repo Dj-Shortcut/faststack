@@ -61,7 +61,7 @@ def test_sidecar_save(mock_sidecar_dir):
 
     # Modify data
     sm.set_last_index(10)
-    meta = sm.get_metadata("IMG_TEST")
+    meta = sm.get_metadata(Path("IMG_TEST.jpg"))
     # Modify a valid field
     meta.stack_id = 99
 
@@ -78,8 +78,8 @@ def test_sidecar_get_metadata_creates_new(mock_sidecar_dir):
     """Tests that get_metadata creates a new entry if one doesn't exist."""
     d = mock_sidecar_dir()
     sm = SidecarManager(d, None)
-    assert "NEW_IMG" not in sm.data.entries
-    meta = sm.get_metadata("NEW_IMG")
+    assert "NEW_IMG.jpg" not in sm.data.entries
+    meta = sm.get_metadata(Path("NEW_IMG.jpg"))
 
     # EntryMetadata may be a runtime class OR a typing alias, depending on refactors.
     if isinstance(EntryMetadata, type):
@@ -96,7 +96,7 @@ def test_favorite_toggle_sets_json(mock_sidecar_dir):
     """Tests that toggling favorite writes true/false to JSON."""
     d = mock_sidecar_dir()
     sm = SidecarManager(d, None)
-    meta = sm.get_metadata("IMG_FAV")
+    meta = sm.get_metadata(Path("IMG_FAV.jpg"))
 
     # Initially false
     assert meta.favorite is False
@@ -120,12 +120,12 @@ def test_favorite_loads_from_sidecar(mock_sidecar_dir):
         "version": 2,
         "last_index": 0,
         "entries": {
-            "IMG_FAV": {"favorite": True},
+            "IMG_FAV.jpg": {"favorite": True},
         },
     }
     d = mock_sidecar_dir(content)
     sm = SidecarManager(d, None)
-    meta = sm.get_metadata("IMG_FAV")
+    meta = sm.get_metadata(Path("IMG_FAV.jpg"))
     assert meta.favorite is True
 
 
@@ -133,7 +133,7 @@ def test_favorite_toggle_roundtrip(mock_sidecar_dir):
     """Tests that toggling twice restores original JSON (round-trip)."""
     d = mock_sidecar_dir()
     sm = SidecarManager(d, None)
-    meta = sm.get_metadata("IMG_FAV")
+    meta = sm.get_metadata(Path("IMG_FAV.jpg"))
 
     # Capture original state
     assert meta.favorite is False
@@ -145,5 +145,82 @@ def test_favorite_toggle_roundtrip(mock_sidecar_dir):
 
     # Reload and verify
     sm2 = SidecarManager(d, None)
-    meta2 = sm2.get_metadata("IMG_FAV")
+    meta2 = sm2.get_metadata(Path("IMG_FAV.jpg"))
     assert meta2.favorite is False
+
+
+def test_legacy_stem_entry_migrates_to_path_key(mock_sidecar_dir):
+    """Legacy stem-keyed entries should migrate on first concrete path lookup."""
+    content = {
+        "version": 2,
+        "entries": {
+            "IMG_0001": {"uploaded": True},
+        },
+    }
+    d = mock_sidecar_dir(content)
+    sm = SidecarManager(d, None)
+
+    meta = sm.get_metadata(Path("IMG_0001.jpg"), create=False)
+
+    assert meta is not None
+    assert meta.uploaded is True
+    assert "IMG_0001" in sm.data.entries
+    assert "IMG_0001.jpg" not in sm.data.entries
+    assert sm.metadata_key_for_path(Path("IMG_0001.jpg")) == "IMG_0001"
+
+
+def test_raw_only_entry_survives_transition_to_visible_jpg(mock_sidecar_dir):
+    """RAW-only metadata must remain visible after a matching JPG appears."""
+    d = mock_sidecar_dir()
+    sm = SidecarManager(d, None)
+
+    raw_meta = sm.get_metadata(Path("photo.CR2"))
+    raw_meta.favorite = True
+    raw_meta.uploaded = True
+
+    jpg_meta = sm.get_metadata(Path("photo.jpg"), create=False)
+
+    assert jpg_meta is raw_meta
+    assert jpg_meta.favorite is True
+    assert jpg_meta.uploaded is True
+    assert list(sm.data.entries) == ["photo"]
+
+
+def test_regressed_filename_key_migrates_to_stable_stem_key(mock_sidecar_dir):
+    """Entries created by the filename-key regression should migrate back."""
+    content = {
+        "version": 2,
+        "entries": {
+            "photo.CR2": {"favorite": True},
+        },
+    }
+    d = mock_sidecar_dir(content)
+    sm = SidecarManager(d, None)
+
+    meta = sm.get_metadata(Path("photo.jpg"), create=False)
+
+    assert meta is not None
+    assert meta.favorite is True
+    assert "photo" in sm.data.entries
+    assert "photo.CR2" not in sm.data.entries
+    assert "photo.jpg" not in sm.data.entries
+
+
+def test_same_stem_in_different_subfolders_do_not_collide(mock_sidecar_dir):
+    """Relative parent path must namespace same-stem files in different folders."""
+    d = mock_sidecar_dir()
+    sm = SidecarManager(d, None)
+
+    first = sm.get_metadata(Path("a") / "photo.CR2")
+    first.favorite = True
+
+    second = sm.get_metadata(Path("b") / "photo.jpg")
+    second.uploaded = True
+
+    assert first is not second
+    assert sm.metadata_key_for_path(Path("a") / "photo.CR2") == "a/photo"
+    assert sm.metadata_key_for_path(Path("b") / "photo.jpg") == "b/photo"
+    assert sm.data.entries["a/photo"].favorite is True
+    assert sm.data.entries["a/photo"].uploaded is False
+    assert sm.data.entries["b/photo"].favorite is False
+    assert sm.data.entries["b/photo"].uploaded is True
