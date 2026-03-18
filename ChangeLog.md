@@ -2,6 +2,15 @@
 
 Todo:   More testing Linux / Mac.   Create Windows .exe.   Write better documentation / help.   Add splash screen / icon.   Fix raw image support.
 
+## 1.6.1 (2026-03-13)
+
+- Added a slim custom title bar with hover-revealed menus.
+- Added custom minimize, maximize, and close buttons for the frameless window.
+- Added a zoom indicator in the title bar and the current directory path in the status bar.
+- Moved menu activation from hovering over the image to hovering over the title bar.
+- Expand the default prefetch window from a radius of 4 to 12 images.
+- Introduce directional awareness to task cancellation logic, making the prefetcher a lot faster.
+
 ## 1.6.0 (2026-03-06) 
 
 - Added a "Todo" flag: toggle with D, filterable in Filter dialog, shown on thumbnails (badge, tile visuals, red on sparkline), and displayed as "Todo since {date}" in the UI.
@@ -14,6 +23,10 @@ Todo:   More testing Linux / Mac.   Create Windows .exe.   Write better document
 - Improved prefetch behavior when zooming or resizing to reduce stale background work.
 - Improved thumbnail lookup speed by adding a faster path-to-row mapping.
 - Reduced chances of UI state getting out of sync after external file changes.
+- Added `@overload` type hints to `SidecarManager.get_metadata` to provide strict static typing based on the state of the `create` parameter.
+- Modified `SidecarManager.get_metadata` to accept a `create` boolean parameter. When `create=False`, the method now returns `None` instead of instantiating and saving an empty metadata entry.
+- Updated `AppController` read-only operations (such as thumbnail dictionary generation, status checks, and batching) to request metadata with `create=False`.
+- Refactored `AppController` flag extraction (e.g., `uploaded`, `favorite`) to explicitly handle `None` values, replacing older, bulky type-checking logic that looked for both `dict` and `object` structures.
 
 ## 1.5.9 (2026-02-16)
 

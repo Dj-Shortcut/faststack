@@ -368,7 +368,9 @@ class Prefetcher:
                 return None
 
             requested_path = (
-                override_path if override_path is not None else self.image_files[index].path
+                override_path
+                if override_path is not None
+                else self.image_files[index].path
             )
 
             # We track by index. If we already have a job for this index,
@@ -387,14 +389,22 @@ class Prefetcher:
             if priority:
                 cancelled_count = 0
                 safe_radius = 2
+                direction = self._last_navigation_direction
 
                 for task_index, future in list(self.futures.items()):
                     if task_index == index or abs(task_index - index) <= safe_radius:
                         continue
 
+                    # Don't cancel tasks ahead of travel direction — we'll need them
+                    if direction > 0 and task_index > index:
+                        continue
+                    if direction < 0 and task_index < index:
+                        continue
+
                     if not future.done() and future.cancel():
                         cancelled_count += 1
                         self.futures.pop(task_index, None)
+                        self.future_paths.pop(task_index, None)
                 if cancelled_count > 0:
                     log.debug(
                         "Cancelled %d pending prefetch tasks to prioritize index %d",
@@ -497,7 +507,11 @@ class Prefetcher:
                                                     274, 1
                                                 )
                                         except Exception:
-                                            log.debug("Failed to read EXIF from mmap for %s", target_path, exc_info=True)
+                                            log.debug(
+                                                "Failed to read EXIF from mmap for %s",
+                                                target_path,
+                                                exc_info=True,
+                                            )
                         except Exception as e:
                             log.warning(
                                 "Decode failed (ICC path) index=%d path=%s: %s",
@@ -599,7 +613,11 @@ class Prefetcher:
                                         with PILImage.open(mmapped) as pil_img:
                                             orientation = pil_img.getexif().get(274, 1)
                                     except Exception:
-                                        log.debug("Failed to read EXIF from mmap for %s", target_path, exc_info=True)
+                                        log.debug(
+                                            "Failed to read EXIF from mmap for %s",
+                                            target_path,
+                                            exc_info=True,
+                                        )
                     except Exception:
                         buffer = None
 
