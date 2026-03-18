@@ -3,6 +3,7 @@
 import logging
 import logging.handlers
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -12,10 +13,10 @@ def _is_writable_dir(path: Path) -> bool:
         return False
 
     try:
-        probe = path / ".write_test"
-        with probe.open("w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path, prefix="faststack-write-", delete=True
+        ) as f:
             f.write("ok")
-        probe.unlink(missing_ok=True)
         return True
     except OSError:
         return False
@@ -31,6 +32,8 @@ def _can_create_dir(path: Path) -> bool:
         parent = next_parent
 
     return parent.is_dir() and os.access(parent, os.W_OK)
+
+
 def get_app_data_dir() -> Path:
     """Return a writable application data directory, with fallbacks."""
     candidates = []
@@ -54,9 +57,8 @@ def get_app_data_dir() -> Path:
         if _can_create_dir(candidate):
             return candidate
 
-    # Final fallback: return the first candidate even if unwritable so callers
-    # still get a deterministic location for error reporting.
-    return candidates[0] if candidates else Path.cwd() / "var" / "appdata"
+    # Final fallback: system temp is the most reliable writable location.
+    return Path(tempfile.gettempdir()) / "faststack"
 
 
 def setup_logging(debug: bool = False):
@@ -66,7 +68,11 @@ def setup_logging(debug: bool = False):
         debug: If True, sets log level to DEBUG. Otherwise, sets to WARNING to reduce noise.
     """
     log_dir = get_app_data_dir() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        log_dir = Path(tempfile.gettempdir()) / "faststack" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "app.log"
 
     # File handler

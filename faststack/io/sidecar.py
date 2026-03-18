@@ -7,9 +7,11 @@ import time
 from pathlib import Path
 from typing import Literal, Optional, Union, overload
 
+from faststack.io.indexer import JPG_EXTENSIONS, RAW_EXTENSIONS
 from faststack.models import Sidecar, EntryMetadata
 
 log = logging.getLogger(__name__)
+KNOWN_IMAGE_EXTENSIONS = frozenset(ext.lower() for ext in JPG_EXTENSIONS | RAW_EXTENSIONS)
 
 
 def _entrymetadata_from_json(meta: dict) -> EntryMetadata:
@@ -146,6 +148,10 @@ class SidecarManager:
         if no entry exists — callers must handle the None case explicitly.
         """
         stable_key, candidate_keys = self._lookup_keys(image_ref)
+        if not stable_key:
+            if create:
+                raise ValueError(f"image_ref must not be empty: {image_ref!r}")
+            return None
 
         meta = self.data.entries.get(stable_key)
         if meta is None:
@@ -180,10 +186,12 @@ class SidecarManager:
     def metadata_key_for_path(self, image_path: Union[str, Path]) -> str:
         """Return the stable sidecar key for a concrete image path."""
         path = Path(image_path)
+        if not path.name:
+            return ""
         if not path.is_absolute():
             path = self.directory / path
-        base_dir = Path(os.path.abspath(str(self.directory)))
-        abs_path = Path(os.path.abspath(str(path)))
+        base_dir = Path(os.path.normcase(os.path.abspath(str(self.directory))))
+        abs_path = Path(os.path.normcase(os.path.abspath(str(path))))
 
         try:
             relative = abs_path.relative_to(base_dir)
@@ -196,6 +204,8 @@ class SidecarManager:
     def _lookup_keys(self, image_ref: Union[str, Path]) -> tuple[str, list[str]]:
         """Return (stable_key, migration_candidate_keys) for a metadata lookup."""
         if isinstance(image_ref, Path):
+            if not image_ref.name:
+                return "", []
             stable_key = self.metadata_key_for_path(image_ref)
             full_name_key = self._metadata_filename_key(image_ref)
             return stable_key, [full_name_key, image_ref.stem]
@@ -204,21 +214,34 @@ class SidecarManager:
         if not value:
             return "", []
 
-        if os.path.sep in value or "/" in value or "\\" in value or "." in Path(value).name:
+        if (
+            os.path.sep in value
+            or "/" in value
+            or "\\" in value
+            or Path(value).suffix.lower() in KNOWN_IMAGE_EXTENSIONS
+        ):
             path = Path(value)
             stable_key = self.metadata_key_for_path(path)
             full_name_key = self._metadata_filename_key(path)
             return stable_key, [full_name_key, path.stem]
+
+        candidate_path = self.directory / value
+        if candidate_path.exists():
+            stable_key = self.metadata_key_for_path(candidate_path)
+            full_name_key = self._metadata_filename_key(candidate_path)
+            return stable_key, [full_name_key, value]
 
         return value, [value]
 
     def _metadata_filename_key(self, image_path: Union[str, Path]) -> str:
         """Return the extension-preserving key used by the regressed patch."""
         path = Path(image_path)
+        if not path.name:
+            return ""
         if not path.is_absolute():
             path = self.directory / path
-        base_dir = Path(os.path.abspath(str(self.directory)))
-        abs_path = Path(os.path.abspath(str(path)))
+        base_dir = Path(os.path.normcase(os.path.abspath(str(self.directory))))
+        abs_path = Path(os.path.normcase(os.path.abspath(str(path))))
 
         try:
             relative = abs_path.relative_to(base_dir)
@@ -230,8 +253,16 @@ class SidecarManager:
         """Convert any historical sidecar key form into today's stable key."""
         if not key:
             return ""
-        if os.path.sep in key or "/" in key or "\\" in key or "." in Path(key).name:
+        if (
+            os.path.sep in key
+            or "/" in key
+            or "\\" in key
+            or Path(key).suffix.lower() in KNOWN_IMAGE_EXTENSIONS
+        ):
             return self.metadata_key_for_path(Path(key))
+        candidate_path = self.directory / key
+        if candidate_path.exists():
+            return self.metadata_key_for_path(candidate_path)
         return key
 
     def set_last_index(self, index: int):
