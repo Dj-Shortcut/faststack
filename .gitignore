@@ -35,6 +35,8 @@ __pycache__/
 .ruff_cache/
 
 # Test caches / coverage
+.pytest-local/
+.pytest-tmp/
 .pytest_cache/
 .coverage
 coverage.xml
@@ -51,7 +53,9 @@ dist/
 # ----------------------------
 # Runtime / generated data
 # ----------------------------
+tmp/
 var/
+var/pytest-temp/
 
 # ----------------------------
 # Logs
