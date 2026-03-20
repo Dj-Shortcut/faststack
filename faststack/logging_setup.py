@@ -4,7 +4,7 @@ import logging
 import logging.handlers
 import os
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, gettempdir
 
 
 def _is_writable_directory(path: Path) -> bool:
@@ -19,8 +19,16 @@ def _is_writable_directory(path: Path) -> bool:
         return False
 
 
+def _can_create_directory(path: Path) -> bool:
+    """Return True when the target directory can be created without creating it yet."""
+    parent = path.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    return _is_writable_directory(parent)
+
+
 def get_app_data_dir() -> Path:
-    """Returns the application data directory."""
+    """Returns a writable application data directory path."""
     candidates = []
 
     app_data = os.getenv("APPDATA")
@@ -28,18 +36,13 @@ def get_app_data_dir() -> Path:
         candidates.append(Path(app_data) / "faststack")
 
     candidates.append(Path.home() / ".faststack")
+    candidates.append(Path(gettempdir()) / "faststack")
 
     for candidate in candidates:
-        if _is_writable_directory(candidate):
-            return candidate
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            continue
-        if _is_writable_directory(candidate):
+        if _is_writable_directory(candidate) or _can_create_directory(candidate):
             return candidate
 
-    return Path.home() / ".faststack"
+    return Path.cwd() / ".faststack"
 
 
 def setup_logging(debug: bool = False):

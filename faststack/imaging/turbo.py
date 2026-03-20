@@ -13,13 +13,15 @@ except ImportError:  # pragma: no cover - exercised via create_turbojpeg
     TurboJPEG = None
 
 
-def _candidate_library_paths() -> list[str]:
-    """Return candidate libjpeg-turbo library paths to try."""
-    candidates: list[str] = []
+def _candidate_library_paths() -> list[Optional[str]]:
+    """Return candidate libjpeg-turbo library paths to try in priority order."""
+    candidates: list[Optional[str]] = []
 
     explicit = os.getenv("FASTSTACK_TURBOJPEG_LIB")
     if explicit:
         candidates.append(explicit)
+    else:
+        candidates.append(None)
 
     if os.name == "nt":
         common_roots = [
@@ -51,6 +53,9 @@ def _candidate_library_paths() -> list[str]:
                 )
             )
 
+        if explicit:
+            candidates.append(None)
+
     # De-duplicate while keeping order.
     return list(dict.fromkeys(candidates))
 
@@ -61,32 +66,22 @@ def create_turbojpeg() -> Tuple[Optional[object], bool]:
         log.warning("PyTurboJPEG not found. Falling back to Pillow for JPEG decoding.")
         return None, False
 
-    try:
-        decoder = TurboJPEG()
-    except Exception as exc:
-        log.debug("Default TurboJPEG initialization failed: %s", exc)
-    else:
-        log.info("PyTurboJPEG is available. Using it for JPEG decoding.")
-        return decoder, True
-
     failures: list[str] = []
     for candidate in _candidate_library_paths():
         try:
-            decoder = TurboJPEG(candidate)
+            decoder = TurboJPEG() if candidate is None else TurboJPEG(candidate)
         except Exception as exc:
-            failures.append(f"{candidate}: {exc}")
+            source = "default loader" if candidate is None else candidate
+            failures.append(f"{source}: {exc}")
+            continue
+
+        if candidate is None:
+            log.info("PyTurboJPEG is available. Using it for JPEG decoding.")
         else:
             log.info("Loaded TurboJPEG library from %s", candidate)
-            return decoder, True
+        return decoder, True
 
-    if failures:
-        for failure in failures:
-            log.warning("TurboJPEG load attempt failed: %s", failure)
-        log.warning(
-            "TurboJPEG initialization failed for all configured locations. "
-            "Falling back to Pillow."
-        )
-    else:
-        log.warning("TurboJPEG initialization failed. Falling back to Pillow.")
-
+    for failure in failures:
+        log.warning("TurboJPEG load attempt failed: %s", failure)
+    log.warning("TurboJPEG initialization failed for all attempted locations. Falling back to Pillow.")
     return None, False

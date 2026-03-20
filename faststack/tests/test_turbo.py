@@ -5,18 +5,16 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 
-def test_create_turbojpeg_uses_explicit_env_path(monkeypatch):
+def test_create_turbojpeg_prefers_explicit_env_path(monkeypatch):
     turbo = importlib.import_module("faststack.imaging.turbo")
 
     calls = []
 
     def fake_decoder(path=None):
         calls.append(path)
-        if path is None:
-            raise RuntimeError("default load failed")
         if path == "C:/turbo/bin/turbojpeg.dll":
             return SimpleNamespace(source=path)
-        raise RuntimeError("unexpected path")
+        raise RuntimeError(f"boom:{path}")
 
     monkeypatch.setattr(turbo, "TurboJPEG", fake_decoder)
     monkeypatch.setenv("FASTSTACK_TURBOJPEG_LIB", "C:/turbo/bin/turbojpeg.dll")
@@ -25,7 +23,7 @@ def test_create_turbojpeg_uses_explicit_env_path(monkeypatch):
 
     assert available is True
     assert decoder.source == "C:/turbo/bin/turbojpeg.dll"
-    assert calls == [None, "C:/turbo/bin/turbojpeg.dll"]
+    assert calls == ["C:/turbo/bin/turbojpeg.dll"]
 
 
 def test_create_turbojpeg_logs_failed_candidates(monkeypatch, caplog):
@@ -38,7 +36,7 @@ def test_create_turbojpeg_logs_failed_candidates(monkeypatch, caplog):
     monkeypatch.setattr(
         turbo,
         "_candidate_library_paths",
-        lambda: ["C:/one/turbojpeg.dll", "C:/two/turbojpeg.dll"],
+        lambda: [None, "C:/one/turbojpeg.dll", "C:/two/turbojpeg.dll"],
     )
 
     with caplog.at_level(logging.WARNING):
@@ -46,6 +44,7 @@ def test_create_turbojpeg_logs_failed_candidates(monkeypatch, caplog):
 
     assert decoder is None
     assert available is False
+    assert "default loader" in caplog.text
     assert "C:/one/turbojpeg.dll" in caplog.text
     assert "C:/two/turbojpeg.dll" in caplog.text
     assert "Falling back to Pillow" in caplog.text
@@ -57,23 +56,37 @@ def test_get_app_data_dir_falls_back_when_appdata_is_not_creatable(monkeypatch, 
     home_dir = tmp_path / "home"
     home_dir.mkdir()
     fallback_dir = home_dir / ".faststack"
-    fallback_dir.mkdir()
+    blocked_candidate = tmp_path / "blocked" / "faststack"
 
-    blocked_root = tmp_path / "blocked"
-    appdata_target = blocked_root / "faststack"
-
-    original_mkdir = Path.mkdir
-
-    def fake_mkdir(self, *args, **kwargs):
-        if self == appdata_target:
-            raise OSError("nope")
-        return original_mkdir(self, *args, **kwargs)
-
-    monkeypatch.setenv("APPDATA", str(blocked_root))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "blocked"))
     monkeypatch.setattr(Path, "home", lambda: home_dir)
-    monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+    monkeypatch.setattr(
+        logging_setup,
+        "_can_create_directory",
+        lambda path: False if path == blocked_candidate else True,
+    )
 
     assert logging_setup.get_app_data_dir() == fallback_dir
+
+
+def test_get_app_data_dir_falls_back_to_tempdir(monkeypatch, tmp_path):
+    logging_setup = importlib.import_module("faststack.logging_setup")
+
+    home_dir = tmp_path / "home"
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    home_candidate = home_dir / ".faststack"
+
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home_dir)
+    monkeypatch.setattr(logging_setup, "gettempdir", lambda: str(temp_dir))
+    monkeypatch.setattr(
+        logging_setup,
+        "_can_create_directory",
+        lambda path: False if path == home_candidate else logging_setup._is_writable_directory(path.parent),
+    )
+
+    assert logging_setup.get_app_data_dir() == temp_dir / "faststack"
 
 
 def test_is_writable_directory_does_not_create_missing_dir(tmp_path):
