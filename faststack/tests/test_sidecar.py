@@ -358,5 +358,4 @@ def test_metadata_key_for_path_normalizes_case_on_windows(mock_sidecar_dir):
     if os.name == "nt":
         assert key_upper == key_lower
     else:
-        assert key_upper != ""
-        assert key_lower != ""
+        assert key_upper != key_lower

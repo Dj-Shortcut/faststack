@@ -357,6 +357,7 @@ class AppController(QObject):
             get_metadata_callback=self._get_metadata_dict,
             get_batch_indices_callback=self._get_batch_indices,
             get_current_index_callback=self._get_current_loupe_index,
+            metadata_key_fn=self.sidecar.metadata_key_for_path,
             thumbnail_size=200,
             parent=self,  # Ensure proper Qt ownership to prevent GC issues
         )
@@ -2166,7 +2167,7 @@ class AppController(QObject):
                 meta = entries.get(key)
                 if meta is None:
                     continue
-                bulk_map[normalize_path_key(img.path)] = {
+                bulk_map[key] = {
                     "stacked": getattr(meta, "stacked", False),
                     "uploaded": getattr(meta, "uploaded", False),
                     "edited": getattr(meta, "edited", False),

@@ -3,6 +3,7 @@
 import logging
 import logging.handlers
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def _can_create_dir(path: Path) -> bool:
             return False
         parent = next_parent
 
-    return parent.is_dir() and os.access(parent, os.W_OK)
+    return parent.is_dir()
 
 
 def get_app_data_dir() -> Path:
@@ -85,6 +86,11 @@ def setup_logging(debug: bool = False):
             log_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             log_dir = None
+
+    if log_dir is None:
+        sys.stderr.write(
+            "WARNING: Could not create log directory; logs will not be persisted.\n"
+        )
 
     if log_dir is not None:
         log_file = log_dir / "app.log"

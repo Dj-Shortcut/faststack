@@ -171,7 +171,7 @@ class SidecarManager:
             for existing_key, existing_meta in list(self.data.entries.items()):
                 if existing_key == stable_key:
                     continue
-                if self._stable_key_from_key(existing_key) != stable_key:
+                if self._stable_key_from_key(existing_key, check_fs=True) != stable_key:
                     continue
                 meta = existing_meta
                 self.data.entries[stable_key] = existing_meta
@@ -242,8 +242,15 @@ class SidecarManager:
         except ValueError:
             return str(abs_path).replace("\\", "/")
 
-    def _stable_key_from_key(self, key: str) -> str:
-        """Convert any historical sidecar key form into today's stable key."""
+    def _stable_key_from_key(self, key: str, check_fs: bool = False) -> str:
+        """Convert any historical sidecar key form into today's stable key.
+
+        Args:
+            key: The sidecar key to normalize.
+            check_fs: If True, check the filesystem for bare-stem keys that
+                match an existing file. Set to True during one-time migration
+                scans; leave False on hot paths to avoid filesystem I/O.
+        """
         if not key:
             return ""
         if (
@@ -253,9 +260,10 @@ class SidecarManager:
             or Path(key).suffix.lower() in KNOWN_IMAGE_EXTENSIONS
         ):
             return self.metadata_key_for_path(Path(key))
-        candidate_path = self.directory / key
-        if candidate_path.exists():
-            return self.metadata_key_for_path(candidate_path)
+        if check_fs:
+            candidate_path = self.directory / key
+            if candidate_path.exists():
+                return self.metadata_key_for_path(candidate_path)
         return key
 
     def set_last_index(self, index: int):

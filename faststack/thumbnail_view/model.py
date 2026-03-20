@@ -131,6 +131,7 @@ class ThumbnailModel(QAbstractListModel):
         get_metadata_callback: Optional[Callable[[Path | str], dict]] = None,
         get_batch_indices_callback: Optional[Callable[[], Set[int]]] = None,
         get_current_index_callback: Optional[Callable[[], int]] = None,
+        metadata_key_fn: Optional[Callable[[Path], str]] = None,
         thumbnail_size: int = 200,
         parent=None,
     ):
@@ -141,6 +142,7 @@ class ThumbnailModel(QAbstractListModel):
         self._get_metadata = get_metadata_callback
         self._get_batch_indices = get_batch_indices_callback
         self._get_current_index = get_current_index_callback
+        self._metadata_key_fn = metadata_key_fn
         self._thumbnail_size = thumbnail_size
         self._entries: List[ThumbnailEntry] = []
         self._folder_count: int = 0  # cached; updated on mutation
@@ -547,8 +549,8 @@ class ThumbnailModel(QAbstractListModel):
                 filtered = []
                 for img in images:
                     try:
-                        if metadata_map:
-                            meta = metadata_map.get(normalize_path_key(img.path), {})
+                        if metadata_map and self._metadata_key_fn:
+                            meta = metadata_map.get(self._metadata_key_fn(img.path), {})
                         elif self._get_metadata:
                             meta = self._get_metadata(img.path)
                         else:
@@ -609,8 +611,8 @@ class ThumbnailModel(QAbstractListModel):
             is_favorite = False
             is_todo = False
 
-            if metadata_map:
-                meta = metadata_map.get(normalize_path_key(img.path), {})
+            if metadata_map and self._metadata_key_fn:
+                meta = metadata_map.get(self._metadata_key_fn(img.path), {})
                 is_stacked = meta.get("stacked", False)
                 is_uploaded = meta.get("uploaded", False)
                 is_edited = meta.get("edited", False)
