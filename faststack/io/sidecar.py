@@ -214,22 +214,15 @@ class SidecarManager:
         if not value:
             return "", []
 
-        if (
-            os.path.sep in value
-            or "/" in value
-            or "\\" in value
-            or Path(value).suffix.lower() in KNOWN_IMAGE_EXTENSIONS
-        ):
+        # Only treat string as a path if it contains explicit path separators.
+        # Dotted strings (even with image extensions like "photo.CR2") are
+        # treated as exact keys — migration of legacy filename keys is handled
+        # by the _stable_key_from_key scan in get_metadata.
+        if os.path.sep in value or "/" in value or "\\" in value:
             path = Path(value)
             stable_key = self.metadata_key_for_path(path)
             full_name_key = self._metadata_filename_key(path)
             return stable_key, [full_name_key, path.stem]
-
-        candidate_path = self.directory / value
-        if candidate_path.exists():
-            stable_key = self.metadata_key_for_path(candidate_path)
-            full_name_key = self._metadata_filename_key(candidate_path)
-            return stable_key, [full_name_key, value]
 
         return value, [value]
 

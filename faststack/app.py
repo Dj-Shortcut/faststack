@@ -1040,9 +1040,11 @@ class AppController(QObject):
         # Apply flag-based filtering (AND logic: image must have ALL checked flags)
         if self._filter_enabled and self._filter_flags:
             flags = self._filter_flags
+            entries = self.sidecar.data.entries
             result = []
             for img in filtered:
-                meta = self.sidecar.get_metadata(img.path, create=False)
+                key = self.sidecar.metadata_key_for_path(img.path)
+                meta = entries.get(key)
                 if not meta:
                     continue
 
@@ -2157,9 +2159,11 @@ class AppController(QObject):
     def _get_bulk_metadata_map(self) -> Dict[str, dict]:
         """Get flattened metadata map for all images (for efficient grid refresh)."""
         bulk_map = {}
+        entries = self.sidecar.data.entries
         try:
             for img in self.image_files:
-                meta = self.sidecar.get_metadata(img.path, create=False)
+                key = self.sidecar.metadata_key_for_path(img.path)
+                meta = entries.get(key)
                 if meta is None:
                     continue
                 bulk_map[normalize_path_key(img.path)] = {
@@ -2615,9 +2619,11 @@ class AppController(QObject):
             return
 
         # Find indices of all favorited images
+        entries = self.sidecar.data.entries
         indices_to_add = []
         for i, img in enumerate(self.image_files):
-            meta = self.sidecar.get_metadata(img.path, create=False)
+            key = self.sidecar.metadata_key_for_path(img.path)
+            meta = entries.get(key)
             if meta and meta.favorite:
                 indices_to_add.append(i)
 
@@ -2670,9 +2676,11 @@ class AppController(QObject):
             return
 
         # Find indices of all uploaded images
+        entries = self.sidecar.data.entries
         indices_to_add = []
         for i, img in enumerate(self.image_files):
-            meta = self.sidecar.get_metadata(img.path, create=False)
+            key = self.sidecar.metadata_key_for_path(img.path)
+            meta = entries.get(key)
             if meta and meta.uploaded:
                 indices_to_add.append(i)
 

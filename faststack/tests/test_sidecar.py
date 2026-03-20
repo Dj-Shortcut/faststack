@@ -248,6 +248,65 @@ def test_semantic_dot_key_is_not_treated_as_path(mock_sidecar_dir):
     assert "sample" not in sm.data.entries
 
 
+def test_dotted_string_with_image_extension_stays_exact(mock_sidecar_dir):
+    """String key 'photo.CR2' must not be path-normalized to 'photo'."""
+    d = mock_sidecar_dir()
+    sm = SidecarManager(d, None)
+    legacy = EntryMetadata(favorite=True)
+    sm.data.entries["photo.CR2"] = legacy
+
+    meta = sm.get_metadata("photo.CR2", create=False)
+
+    assert meta is legacy
+    assert "photo.CR2" in sm.data.entries
+    assert "photo" not in sm.data.entries
+
+
+def test_dotted_string_with_jpg_extension_stays_exact(mock_sidecar_dir):
+    """String key 'IMG_0001.jpg' must not be path-normalized when used as string."""
+    d = mock_sidecar_dir()
+    sm = SidecarManager(d, None)
+    legacy = EntryMetadata(uploaded=True)
+    sm.data.entries["IMG_0001.jpg"] = legacy
+
+    meta = sm.get_metadata("IMG_0001.jpg", create=False)
+
+    assert meta is legacy
+    assert "IMG_0001.jpg" in sm.data.entries
+
+
+def test_string_with_path_separator_is_path_normalized(mock_sidecar_dir):
+    """String containing a path separator should be treated as a path."""
+    d = mock_sidecar_dir()
+    sm = SidecarManager(d, None)
+
+    meta = sm.get_metadata("subdir/photo.CR2")
+    expected_key = sm.metadata_key_for_path(Path("subdir/photo.CR2"))
+
+    assert expected_key in sm.data.entries
+    assert expected_key == "subdir/photo"
+
+
+def test_legacy_filename_key_migrates_via_path_lookup(mock_sidecar_dir):
+    """Legacy 'photo.CR2' entry migrates when looked up via Path('photo.jpg')."""
+    content = {
+        "version": 2,
+        "entries": {
+            "photo.CR2": {"favorite": True},
+        },
+    }
+    d = mock_sidecar_dir(content)
+    sm = SidecarManager(d, None)
+
+    # Path-based lookup should find and migrate the legacy key
+    meta = sm.get_metadata(Path("photo.jpg"), create=False)
+
+    assert meta is not None
+    assert meta.favorite is True
+    assert "photo" in sm.data.entries
+    assert "photo.CR2" not in sm.data.entries
+
+
 def test_empty_string_create_false_returns_none(mock_sidecar_dir):
     """Empty string refs must not create a sidecar entry."""
     d = mock_sidecar_dir()
