@@ -115,12 +115,12 @@ def test_setup_logging_keeps_console_handler_when_file_logging_fails(monkeypatch
         Mock(side_effect=OSError("disk full")),
     )
 
-    logging_setup.setup_logging(debug=True)
-
     root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
     try:
+        logging_setup.setup_logging(debug=True)
         assert any(
             isinstance(handler, logging.StreamHandler) for handler in root_logger.handlers
         )
     finally:
-        root_logger.handlers.clear()
+        root_logger.handlers = original_handlers
