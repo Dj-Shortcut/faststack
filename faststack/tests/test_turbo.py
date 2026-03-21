@@ -121,6 +121,26 @@ def test_get_app_data_dir_falls_back_to_tempdir(monkeypatch, tmp_path):
     assert logging_setup.get_app_data_dir() == temp_dir / "faststack"
 
 
+def test_get_app_data_dir_skips_existing_file_candidate(monkeypatch, tmp_path):
+    logging_setup = importlib.import_module("faststack.logging_setup")
+
+    appdata_root = tmp_path / "appdata"
+    appdata_root.mkdir()
+    bad_candidate = appdata_root / "faststack"
+    bad_candidate.write_text("not a directory", encoding="utf-8")
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    fallback_dir = home_dir / ".faststack"
+
+    monkeypatch.delenv("FASTSTACK_APPDATA", raising=False)
+    monkeypatch.setenv("APPDATA", str(appdata_root))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home_dir)
+
+    assert logging_setup.get_app_data_dir() == fallback_dir
+
+
 def test_is_writable_directory_does_not_create_missing_dir(tmp_path):
     logging_setup = importlib.import_module("faststack.logging_setup")
 

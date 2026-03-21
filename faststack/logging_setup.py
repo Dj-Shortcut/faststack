@@ -21,6 +21,8 @@ def _is_writable_directory(path: Path) -> bool:
 
 def _can_create_directory(path: Path) -> bool:
     """Return True when the target directory can be created without creating it yet."""
+    if path.exists():
+        return False
     parent = path.parent
     while not parent.exists() and parent != parent.parent:
         parent = parent.parent
