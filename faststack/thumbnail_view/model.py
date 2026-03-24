@@ -128,9 +128,10 @@ class ThumbnailModel(QAbstractListModel):
         self,
         base_directory: Path,
         current_directory: Path,
-        get_metadata_callback: Optional[Callable[[str], dict]] = None,
+        get_metadata_callback: Optional[Callable[[Path | str], dict]] = None,
         get_batch_indices_callback: Optional[Callable[[], Set[int]]] = None,
         get_current_index_callback: Optional[Callable[[], int]] = None,
+        metadata_key_fn: Optional[Callable[[Path], str]] = None,
         thumbnail_size: int = 200,
         parent=None,
     ):
@@ -141,6 +142,7 @@ class ThumbnailModel(QAbstractListModel):
         self._get_metadata = get_metadata_callback
         self._get_batch_indices = get_batch_indices_callback
         self._get_current_index = get_current_index_callback
+        self._metadata_key_fn = metadata_key_fn
         self._thumbnail_size = thumbnail_size
         self._entries: List[ThumbnailEntry] = []
         self._folder_count: int = 0  # cached; updated on mutation
@@ -406,12 +408,10 @@ class ThumbnailModel(QAbstractListModel):
                 filtered = []
                 for img in images:
                     try:
-                        meta = self._get_metadata(img.path.stem)
+                        meta = self._get_metadata(img.path)
                         if not isinstance(meta, dict):
                             # Ensure it's a dict before .get()
-                            log.debug(
-                                "Metadata for %s is not a dict: %r", img.path.stem, meta
-                            )
+                            log.debug("Metadata for %s is not a dict: %r", img.path, meta)
                             continue
 
                         if all(meta.get(flag, False) for flag in flags):
@@ -549,16 +549,16 @@ class ThumbnailModel(QAbstractListModel):
                 filtered = []
                 for img in images:
                     try:
-                        if metadata_map:
-                            meta = metadata_map.get(img.path.stem, {})
+                        if metadata_map and self._metadata_key_fn:
+                            meta = metadata_map.get(self._metadata_key_fn(img.path), {})
                         elif self._get_metadata:
-                            meta = self._get_metadata(img.path.stem)
+                            meta = self._get_metadata(img.path)
                         else:
                             continue
 
                         if not isinstance(meta, dict):
                             log.debug(
-                                "Metadata for %s is not a dict: %r", img.path.stem, meta
+                                "Metadata for %s is not a dict: %r", img.path, meta
                             )
                             continue
 
@@ -611,8 +611,8 @@ class ThumbnailModel(QAbstractListModel):
             is_favorite = False
             is_todo = False
 
-            if metadata_map:
-                meta = metadata_map.get(img.path.stem, {})
+            if metadata_map and self._metadata_key_fn:
+                meta = metadata_map.get(self._metadata_key_fn(img.path), {})
                 is_stacked = meta.get("stacked", False)
                 is_uploaded = meta.get("uploaded", False)
                 is_edited = meta.get("edited", False)
@@ -621,7 +621,7 @@ class ThumbnailModel(QAbstractListModel):
                 is_todo = meta.get("todo", False)
             elif self._get_metadata:
                 try:
-                    meta = self._get_metadata(img.path.stem)
+                    meta = self._get_metadata(img.path)
                     if isinstance(meta, dict):
                         is_stacked = meta.get("stacked", False)
                         is_uploaded = meta.get("uploaded", False)
@@ -631,7 +631,7 @@ class ThumbnailModel(QAbstractListModel):
                         is_todo = meta.get("todo", False)
                     else:
                         log.debug(
-                            "Metadata for %s is not a dict: %r", img.path.stem, meta
+                            "Metadata for %s is not a dict: %r", img.path, meta
                         )
                 except Exception as e:
                     log.debug("Error getting metadata for %s: %s", img.path, e)
