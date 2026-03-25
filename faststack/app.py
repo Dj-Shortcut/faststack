@@ -3740,7 +3740,11 @@ class AppController(QObject):
         return 0
 
     @staticmethod
-    def _move_to_recycle(src: Path, _created_bins: set | None = None) -> Optional[Path]:
+    def _move_to_recycle(
+        src: Path,
+        _created_bins: set | None = None,
+        unique_tag: str | None = None,
+    ) -> Optional[Path]:
         """Moves a file to the recycle bin safely. Thread-safe, no Qt access.
 
         Uses uuid-based destination names to avoid collision checks.
@@ -3749,6 +3753,9 @@ class AppController(QObject):
         Args:
             src: Source file path.
             _created_bins: Optional set of already-created recycle bin dirs (cache).
+            unique_tag: Optional shared UUID tag. When recycling paired files
+                (JPG + RAW), pass the same tag so stems still match in the
+                recycle bin and find_images() can re-pair them.
 
         Returns:
             Destination path in recycle bin, or None on failure.
@@ -3768,9 +3775,12 @@ class AppController(QObject):
                 log.error("Failed to create recycle bin: %s", e)
                 return None
 
-        # Use uuid suffix to guarantee unique name without existence checks
-        unique_tag = uuid.uuid4().hex[:8]
-        dest = recycle_bin / f"{src.stem}.{unique_tag}{src.suffix}"
+        # Use uuid suffix to guarantee unique name without existence checks.
+        # Paired files (JPG + RAW) share the same tag so their stems match
+        # in the recycle bin and find_images() can re-pair them.
+        if unique_tag is None:
+            unique_tag = uuid.uuid4().hex[:8]
+        dest = recycle_bin / f"{src.stem}._fs_{unique_tag}{src.suffix}"
 
         try:
             # Fast path: rename within same filesystem (no data copy)
@@ -3890,7 +3900,12 @@ class AppController(QObject):
             actual_raw_exists = bool(raw_path and raw_path.exists())
 
             try:
-                recycled_jpg = AppController._move_to_recycle(jpg_path, created_bins)
+                # Share the same UUID tag for JPG + RAW so their stems
+                # still match in the recycle bin (enables re-pairing).
+                shared_tag = uuid.uuid4().hex[:8]
+                recycled_jpg = AppController._move_to_recycle(
+                    jpg_path, created_bins, unique_tag=shared_tag
+                )
                 if not recycled_jpg:
                     failures.append(
                         {
@@ -3905,7 +3920,7 @@ class AppController(QObject):
                 if actual_raw_exists:
                     try:
                         recycled_raw = AppController._move_to_recycle(
-                            raw_path, created_bins
+                            raw_path, created_bins, unique_tag=shared_tag
                         )
                         if not recycled_raw:
                             raise OSError("RAW move failed")
@@ -4555,8 +4570,9 @@ class AppController(QObject):
             # Use new targeted eviction with tombstones
             self.image_cache.evict_paths(paths_to_evict)
 
-        # Cancel any pending prefetch tasks (crucial to stop re-caching deleted items)
+        # Sync prefetcher's image list and cancel pending tasks
         if self.prefetcher:
+            self.prefetcher.set_image_files(self.image_files)
             self.prefetcher.cancel_all()
 
         # Update ID mapping (now fast due to string hashing)
@@ -4915,6 +4931,7 @@ class AppController(QObject):
                         if img.raw_pair:
                             paths_to_evict.append(img.raw_pair)
                     self.image_cache.evict_paths(paths_to_evict)
+                self.prefetcher.set_image_files(self.image_files)
                 self.prefetcher.cancel_all()
                 if self.image_files:
                     self.prefetcher.update_prefetch(self.current_index)
@@ -5320,42 +5337,6 @@ class AppController(QObject):
                     # QTimer.singleShot(0, ...) is thread-safe entry to main loop
                     QTimer.singleShot(0, lambda: self.update_status_message(msg))
                     log.warning(msg)
-
-    def restore_all_from_recycle_bin(self):
-        """Restores all files from tracked recycle bins to their parent folders."""
-        restored_count = 0
-
-        bins_to_restore = set(self.active_recycle_bins)
-        try:
-            bins_to_restore.add(self.image_dir / "image recycle bin")
-        except Exception:
-            pass
-
-        for bin_path in bins_to_restore:
-            if not bin_path.exists():
-                continue
-
-            restore_target = bin_path.parent
-            try:
-                for file_in_bin in bin_path.iterdir():
-                    dest_path = restore_target / file_in_bin.name
-                    if dest_path.exists():
-                        log.warning("File already exists, skipping: %s", dest_path)
-                        continue
-
-                    try:
-                        shutil.move(str(file_in_bin), str(dest_path))
-                        restored_count += 1
-                        log.info("Restored %s from %s", file_in_bin.name, bin_path.name)
-                    except OSError as e:
-                        log.error("Failed to restore %s: %s", file_in_bin.name, e)
-            except OSError:
-                log.exception("Failed to iterate recycle bin %s", bin_path)
-
-        # Clear delete history since we restored everything
-        self.delete_history.clear()
-
-        log.info("Restored %d files from recycle bins", restored_count)
 
     @Slot()
     def edit_in_photoshop(self):
@@ -7387,15 +7368,10 @@ class AppController(QObject):
             }, ...]
         """
         stats = []
-        # Filter out bins that don't exist anymore
-        active_bins = {p for p in self.active_recycle_bins if p.exists() and p.is_dir()}
-        # Always check the local directory's recycle bin for items from previous sessions
-        local_bin = self.image_dir / "image recycle bin"
-        if local_bin.exists() and local_bin.is_dir():
-            active_bins.add(local_bin)
+        active_bins = self._collect_active_bins()
         self.active_recycle_bins = active_bins
 
-        for bin_path in self.active_recycle_bins:
+        for bin_path in active_bins:
             try:
                 jpg_count = 0
                 raw_count = 0
@@ -7444,6 +7420,235 @@ class AppController(QObject):
 
         # Clear stats cache since we deleted files/folders
         clear_raw_count_cache()
+
+    # ---- regex for reversing UUID-suffixed recycle bin names ----
+    # Current format uses ``._fs_`` marker: ``{stem}._fs_{8hex}{suffix}``
+    _RECYCLE_FS_RE = re.compile(r"^(.+)\._fs_[0-9a-f]{8}$", re.IGNORECASE)
+
+    @staticmethod
+    def _original_name_from_recycled(recycled_path: Path) -> Optional[str]:
+        """Derive the original filename from a recycled file's UUID-suffixed name.
+
+        Current format: ``{original_stem}._fs_{8-hex-uuid}{original_suffix}``
+        e.g. ``IMG_001._fs_a7c3f2e1.jpg`` → ``IMG_001.jpg``
+
+        Only matches the ``._fs_`` marker to avoid false positives on
+        legitimate filenames that happen to end with a dot-8hex segment
+        (e.g. ``photo.a1b2c3d4.jpg``).
+
+        Returns:
+            The original filename, or None if the name doesn't match the pattern.
+        """
+        m = AppController._RECYCLE_FS_RE.match(recycled_path.stem)
+        if m:
+            return m.group(1) + recycled_path.suffix
+        return None
+
+    def _collect_active_bins(self) -> set:
+        """Return the set of existing recycle bin directories (tracked + local).
+
+        Excludes any bin that still has outstanding pending-delete jobs so that
+        the restore UI cannot act on a bin the worker is still writing to.
+        """
+        # Build set of bin dirs that have in-flight delete jobs.
+        pending_bins: set = set()
+        for job in self._pending_delete_jobs.values():
+            for img in job.images_to_delete:
+                pending_bins.add(img.path.parent / "image recycle bin")
+
+        active = {
+            p
+            for p in self.active_recycle_bins
+            if p.exists() and p.is_dir() and p not in pending_bins
+        }
+        local_bin = self.image_dir / "image recycle bin"
+        if (
+            local_bin.exists()
+            and local_bin.is_dir()
+            and local_bin not in pending_bins
+        ):
+            active.add(local_bin)
+        return active
+
+    def get_per_bin_restore_info(self) -> List[Dict[str, Any]]:
+        """Compute per-bin restore information with classification.
+
+        Returns a list of dicts, one per non-empty bin, sorted deterministically
+        (restorable first, then unavailable; within each bucket by dest_dir).
+
+        Each dict contains:
+            bin_id, bin_path, dest_dir, label, status,
+            jpg_count, raw_count, other_count, total_restorable,
+            total_files, legacy_count
+        """
+        results = []
+
+        for bin_path in self._collect_active_bins():
+            dest_dir = bin_path.parent
+            jpg_count = 0
+            raw_count = 0
+            other_count = 0
+            legacy_count = 0
+            total_files = 0
+
+            try:
+                for p in bin_path.iterdir():
+                    if not p.is_file():
+                        continue
+                    total_files += 1
+                    original_name = self._original_name_from_recycled(p)
+                    if original_name is None:
+                        legacy_count += 1
+                        continue
+                    ext = p.suffix.lower()
+                    if ext in (".jpg", ".jpeg", ".jpe"):
+                        jpg_count += 1
+                    elif ext in RAW_EXTENSIONS:
+                        raw_count += 1
+                    else:
+                        other_count += 1
+            except OSError:
+                continue
+
+            if total_files == 0:
+                continue  # skip truly empty bins
+
+            total_restorable = jpg_count + raw_count + other_count
+            dest_dir_str = str(dest_dir)
+
+            results.append(
+                {
+                    "bin_id": str(bin_path),
+                    "bin_path": str(bin_path),
+                    "dest_dir": dest_dir_str,
+                    "label": dest_dir.name or dest_dir_str,
+                    "status": "restorable" if total_restorable > 0 else "unavailable",
+                    "jpg_count": jpg_count,
+                    "raw_count": raw_count,
+                    "other_count": other_count,
+                    "total_restorable": total_restorable,
+                    "total_files": total_files,
+                    "legacy_count": legacy_count,
+                }
+            )
+
+        # Deterministic sort: restorable first, then by dest_dir within bucket
+        status_order = {"restorable": 0, "unavailable": 1}
+        results.sort(key=lambda r: (status_order.get(r["status"], 9), r["dest_dir"]))
+        return results
+
+    def restore_single_bin(self, bin_path_str: str) -> Dict[str, Any]:
+        """Restore all UUID-suffixed files from a single recycle bin.
+
+        Only allows restoring from paths that are currently in the tracked
+        active recycle bin set.  Refuses arbitrary paths.
+
+        Args:
+            bin_path_str: Absolute path string of the recycle bin directory.
+
+        Returns:
+            Dict with restored_count, skipped_count, legacy_remaining_count,
+            dest_dir, bin_path.
+        """
+        bin_path = Path(bin_path_str).resolve()
+        dest_dir = bin_path.parent
+        dest_dir_str = str(dest_dir)
+        result = {
+            "restored_count": 0,
+            "skipped_count": 0,
+            "legacy_remaining_count": 0,
+            "dest_dir": dest_dir_str,
+            "bin_path": bin_path_str,
+        }
+
+        # Verify the requested path is a known active recycle bin.
+        active_bins = {p.resolve() for p in self._collect_active_bins()}
+        if bin_path not in active_bins:
+            log.warning(
+                "restore_single_bin: refusing path not in active bins: %s",
+                bin_path_str,
+            )
+            return result
+
+        if not bin_path.exists() or not bin_path.is_dir():
+            log.warning("restore_single_bin: bin does not exist: %s", bin_path_str)
+            return result
+
+        restored_paths: Set[Path] = set()  # recycled paths successfully moved
+
+        try:
+            # Snapshot the listing so moves during iteration can't skip entries.
+            entries = list(bin_path.iterdir())
+        except OSError:
+            log.exception("Failed to iterate recycle bin %s", bin_path)
+            entries = []
+
+        for p in entries:
+            if not p.is_file():
+                continue
+            original_name = self._original_name_from_recycled(p)
+            if original_name is None:
+                result["legacy_remaining_count"] += 1
+                continue
+            dest = dest_dir / original_name
+            if dest.exists():
+                log.warning(
+                    "Skipping restore of %s — %s already exists",
+                    p.name,
+                    dest.name,
+                )
+                result["skipped_count"] += 1
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(p), str(dest))
+                log.info("Restored %s → %s", p.name, dest.name)
+                result["restored_count"] += 1
+                restored_paths.add(p)
+            except OSError as e:
+                log.error("Failed to restore %s: %s", p.name, e)
+                result["skipped_count"] += 1
+
+        # Prune delete_history and undo_history entries whose recycled
+        # paths were just restored, so Ctrl+Z doesn't try to restore
+        # files that are already back in place.
+        if restored_paths:
+            # Resolve all restored paths so comparison works even when
+            # delete_history contains relative paths (e.g. app started
+            # with a relative image directory).
+            resolved_restored = {p.resolve() for p in restored_paths}
+
+            def _record_stale(record: DeleteRecord) -> bool:
+                """True if any recycled path in this record was restored."""
+                (_, jpg_bin), (_, raw_bin) = record
+                return (
+                    (jpg_bin is not None and jpg_bin.resolve() in resolved_restored)
+                    or (raw_bin is not None and raw_bin.resolve() in resolved_restored)
+                )
+
+            self.delete_history = [
+                r for r in self.delete_history if not _record_stale(r)
+            ]
+            self.undo_history = [
+                (atype, adata, ts)
+                for atype, adata, ts in self.undo_history
+                if atype != "delete" or not _record_stale(adata)
+            ]
+
+        # Clean up empty bin directory
+        try:
+            remaining = list(bin_path.iterdir())
+            if not remaining:
+                bin_path.rmdir()
+                log.info("Removed empty recycle bin: %s", bin_path)
+        except OSError:
+            pass
+
+        self.active_recycle_bins = {
+            p for p in self.active_recycle_bins if p.exists() and p.is_dir()
+        }
+        clear_raw_count_cache()
+        return result
 
 
 def main(
