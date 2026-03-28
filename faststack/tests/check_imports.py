@@ -29,7 +29,7 @@ def main() -> None:
     for module in ["faststack.app", "faststack.tests.test_raw_pipeline"]:
         if not check_import(module):
             failures.append(module)
-            
+
     if failures:
         print(f"\nFailed imports: {', '.join(failures)}")
         sys.exit(1)
