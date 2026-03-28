@@ -139,13 +139,6 @@ def test_strict_mode_allows_double_dot_in_segment_name():
         mock_path_instance.is_file.return_value = True
         mock_path_instance.suffix.lower.return_value = ".exe"
         mock_path_instance.name = "Photoshop.exe"
-        mock_path.return_value.parts = (
-            "C:\\",
-            "Program Files",
-            "Vendor",
-            "v1..2",
-            "Photoshop.exe",
-        )
         mock_path_instance.__str__ = lambda self: safe_versioned
 
         with patch("faststack.io.executable_validator._is_subpath", return_value=True):
@@ -167,14 +160,6 @@ def test_strict_mode_rejects_parent_traversal_segment():
         mock_path_instance.is_file.return_value = True
         mock_path_instance.suffix.lower.return_value = ".exe"
         mock_path_instance.name = "malware.exe"
-        mock_path.return_value.parts = (
-            "C:\\",
-            "Program Files",
-            "..",
-            "Windows",
-            "System32",
-            "malware.exe",
-        )
         mock_path_instance.__str__ = lambda self: r"C:\Windows\System32\malware.exe"
 
         with patch("faststack.io.executable_validator._is_subpath", return_value=True):
