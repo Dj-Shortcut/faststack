@@ -374,9 +374,7 @@ def _image_content_key(image_arr: np.ndarray) -> int:
     # 4 evenly-spaced row/col indices (always includes first and last)
     rows = [0, h // 3, 2 * h // 3, h - 1]
     cols = [0, w // 3, 2 * w // 3, w - 1]
-    samples = b"".join(
-        image_arr[r, c].tobytes() for r in rows for c in cols
-    )
+    samples = b"".join(image_arr[r, c].tobytes() for r in rows for c in cols)
     return hash(samples)
 
 

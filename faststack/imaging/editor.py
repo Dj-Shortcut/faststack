@@ -2028,9 +2028,7 @@ class ImageEditor:
                 if getattr(ds, "enabled", False):
                     live_mask = self._mask_assets.get(ds.mask_id)
                     mask_snapshot = (
-                        copy.deepcopy(live_mask)
-                        if live_mask is not None
-                        else None
+                        copy.deepcopy(live_mask) if live_mask is not None else None
                     )
                     export_cache = MaskRasterCache()
                 else:
@@ -2055,9 +2053,7 @@ class ImageEditor:
         ds_snap = edits_snapshot.get("darken_settings")
         if ds_snap is not None:
             mask_override = (
-                {ds_snap.mask_id: mask_snapshot}
-                if mask_snapshot is not None
-                else {}
+                {ds_snap.mask_id: mask_snapshot} if mask_snapshot is not None else {}
             )
         else:
             mask_override = None

@@ -247,7 +247,9 @@ class AppController(QObject):
         )
 
         # Deferred-init state: set to safe defaults, populated later by their methods
-        self._saves_in_flight: set = set()  # canonical target paths currently being saved
+        self._saves_in_flight: set = (
+            set()
+        )  # canonical target paths currently being saved
         self._batch_indices_cache: set = set()
         self._batch_indices_cache_key: Optional[tuple] = None
         self.recycle_bin_dir: Optional[Path] = None
@@ -1575,9 +1577,7 @@ class AppController(QObject):
         # Normalize to a canonical string so Path vs str never causes a miss.
         save_target_path = self._get_save_target_path_for_current_view()
         raw_target = save_target_path or self.image_editor.current_filepath
-        effective_target = (
-            str(Path(raw_target).resolve()) if raw_target else None
-        )
+        effective_target = str(Path(raw_target).resolve()) if raw_target else None
         if effective_target and effective_target in self._saves_in_flight:
             self.update_status_message("Already saving this image...")
             return
