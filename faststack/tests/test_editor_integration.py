@@ -105,7 +105,10 @@ class TestEditorIntegration(unittest.TestCase):
 
         # 5. save_edited_image
         try:
-            self.controller.image_editor.save_from_snapshot.return_value = (Path("test.jpg"), None)
+            self.controller.image_editor.save_from_snapshot.return_value = (
+                Path("test.jpg"),
+                None,
+            )
             self.controller.save_edited_image()
             self.controller.image_editor.snapshot_for_export.assert_called_once()
             self.controller.image_editor.save_from_snapshot.assert_called_once()

@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 # Stroke
 # ---------------------------------------------------------------------------
 
+
 @dataclasses.dataclass
 class MaskStroke:
     """A single brush stroke stored in image-normalised coordinates [0, 1].
@@ -59,6 +60,7 @@ class MaskStroke:
 # ---------------------------------------------------------------------------
 # Generic mask asset (tool-agnostic)
 # ---------------------------------------------------------------------------
+
 
 @dataclasses.dataclass
 class MaskData:
@@ -119,6 +121,7 @@ class MaskData:
 # ---------------------------------------------------------------------------
 # Background darkening tool settings (tool-specific)
 # ---------------------------------------------------------------------------
+
 
 @dataclasses.dataclass
 class DarkenSettings:

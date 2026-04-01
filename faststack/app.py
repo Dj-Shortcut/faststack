@@ -1625,7 +1625,11 @@ class AppController(QObject):
                 return {"success": False, "error": str(e), "target": effective_target}
             except Exception as e:
                 log.exception("Unexpected error during save: %s", e)
-                return {"success": False, "error": "Failed to save image", "target": effective_target}
+                return {
+                    "success": False,
+                    "error": "Failed to save image",
+                    "target": effective_target,
+                }
 
         def on_done(future):
             """Callback when background save completes - emits signal to hop to main thread."""
@@ -5968,7 +5972,10 @@ class AppController(QObject):
         """
         # Ensure the image is loaded for editing (needed for darken processing)
         # but do NOT open the editor sidebar — the darken panel is independent.
-        if self.image_editor.float_image is None or self.image_editor.current_filepath is None:
+        if (
+            self.image_editor.float_image is None
+            or self.image_editor.current_filepath is None
+        ):
             self.load_image_for_editing()
         self._ensure_darken_state()
         self.ui_state.isDarkening = True
@@ -6011,7 +6018,10 @@ class AppController(QObject):
         displayed (post-crop, post-straighten) image."""
         edits = self.image_editor.current_edits
         x_base, y_base = inverse_transform(
-            x_norm, y_norm, edits, (1, 1),  # display_shape unused for normalised
+            x_norm,
+            y_norm,
+            edits,
+            (1, 1),  # display_shape unused for normalised
         )
         brush_r = self.ui_state._darken_brush_radius
         self._current_darken_stroke = {
@@ -6153,7 +6163,11 @@ class AppController(QObject):
 
             edits = dict(self.image_editor.current_edits)
             resolved = resolve_mask(
-                mask_data, ds, preview, preview.shape[:2], edits,
+                mask_data,
+                ds,
+                preview,
+                preview.shape[:2],
+                edits,
                 cache=self.image_editor._mask_raster_cache,
             )
 

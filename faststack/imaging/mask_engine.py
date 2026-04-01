@@ -29,13 +29,16 @@ except ImportError:
 # Coordinate transforms
 # ---------------------------------------------------------------------------
 
+
 def _geometry_hash(edits: Dict[str, Any]) -> int:
     """Hash of the geometry edits that affect mask alignment."""
-    return hash((
-        edits.get("rotation", 0),
-        round(float(edits.get("straighten_angle", 0.0)), 3),
-        tuple(edits.get("crop_box") or ()),
-    ))
+    return hash(
+        (
+            edits.get("rotation", 0),
+            round(float(edits.get("straighten_angle", 0.0)), 3),
+            tuple(edits.get("crop_box") or ()),
+        )
+    )
 
 
 def forward_transform(
@@ -51,8 +54,10 @@ def forward_transform(
     """
     straighten = float(edits.get("straighten_angle", 0.0))
     crop_box = edits.get("crop_box")
-    has_crop = crop_box is not None and len(crop_box) == 4 and any(
-        v != d for v, d in zip(crop_box, (0, 0, 1000, 1000))
+    has_crop = (
+        crop_box is not None
+        and len(crop_box) == 4
+        and any(v != d for v, d in zip(crop_box, (0, 0, 1000, 1000)))
     )
 
     # Start in oriented-base-image space [0, 1]
@@ -61,11 +66,11 @@ def forward_transform(
     # 0. Apply 90-degree rotation steps (matches np.rot90 in _apply_edits)
     rotation = edits.get("rotation", 0)
     k = (rotation // 90) % 4
-    if k == 1:      # 90 CCW: (x, y) → (y, 1-x)
+    if k == 1:  # 90 CCW: (x, y) → (y, 1-x)
         x, y = y, 1.0 - x
-    elif k == 2:    # 180:    (x, y) → (1-x, 1-y)
+    elif k == 2:  # 180:    (x, y) → (1-x, 1-y)
         x, y = 1.0 - x, 1.0 - y
-    elif k == 3:    # 270 CCW: (x, y) → (1-y, x)
+    elif k == 3:  # 270 CCW: (x, y) → (1-y, x)
         x, y = 1.0 - y, x
 
     # 1. Apply straighten rotation around (0.5, 0.5)
@@ -78,7 +83,12 @@ def forward_transform(
 
     # 2. Apply crop (map full-image normalised → crop-window normalised)
     if has_crop:
-        cl, ct, cr, cb = crop_box[0] / 1000, crop_box[1] / 1000, crop_box[2] / 1000, crop_box[3] / 1000
+        cl, ct, cr, cb = (
+            crop_box[0] / 1000,
+            crop_box[1] / 1000,
+            crop_box[2] / 1000,
+            crop_box[3] / 1000,
+        )
         cw = cr - cl
         ch = cb - ct
         if cw > 0 and ch > 0:
@@ -106,15 +116,22 @@ def inverse_transform(
     """
     straighten = float(edits.get("straighten_angle", 0.0))
     crop_box = edits.get("crop_box")
-    has_crop = crop_box is not None and len(crop_box) == 4 and any(
-        v != d for v, d in zip(crop_box, (0, 0, 1000, 1000))
+    has_crop = (
+        crop_box is not None
+        and len(crop_box) == 4
+        and any(v != d for v, d in zip(crop_box, (0, 0, 1000, 1000)))
     )
 
     x, y = x_disp, y_disp
 
     # Inverse crop: map crop-window normalised → full-image normalised
     if has_crop:
-        cl, ct, cr, cb = crop_box[0] / 1000, crop_box[1] / 1000, crop_box[2] / 1000, crop_box[3] / 1000
+        cl, ct, cr, cb = (
+            crop_box[0] / 1000,
+            crop_box[1] / 1000,
+            crop_box[2] / 1000,
+            crop_box[3] / 1000,
+        )
         cw = cr - cl
         ch = cb - ct
         if cw > 0 and ch > 0:
@@ -132,11 +149,11 @@ def inverse_transform(
     # Inverse 90-degree rotation (undo step 0 of forward_transform)
     rotation = edits.get("rotation", 0)
     k = (rotation // 90) % 4
-    if k == 1:      # undo 90 CCW: (x, y) → (1-y, x)
+    if k == 1:  # undo 90 CCW: (x, y) → (1-y, x)
         x, y = 1.0 - y, x
-    elif k == 2:    # undo 180:    (x, y) → (1-x, 1-y)
+    elif k == 2:  # undo 180:    (x, y) → (1-x, 1-y)
         x, y = 1.0 - x, 1.0 - y
-    elif k == 3:    # undo 270 CCW: (x, y) → (y, 1-x)
+    elif k == 3:  # undo 270 CCW: (x, y) → (y, 1-x)
         x, y = y, 1.0 - x
 
     return x, y
@@ -145,6 +162,7 @@ def inverse_transform(
 # ---------------------------------------------------------------------------
 # Stroke rasterisation
 # ---------------------------------------------------------------------------
+
 
 def _interpolate_points(points: list, max_gap: float) -> list:
     """Insert intermediate points so no two consecutive points are more than
@@ -190,8 +208,10 @@ def _draw_stroke_numpy(
 
         yy, xx = np.ogrid[y0:y1, x0:x1]
         dist_sq = (xx - px) ** 2 + (yy - py) ** 2
-        inside = dist_sq <= radius_px ** 2
-        canvas[y0:y1, x0:x1] = np.maximum(canvas[y0:y1, x0:x1], inside.astype(np.float32))
+        inside = dist_sq <= radius_px**2
+        canvas[y0:y1, x0:x1] = np.maximum(
+            canvas[y0:y1, x0:x1], inside.astype(np.float32)
+        )
 
 
 def _draw_stroke_cv2(
@@ -252,6 +272,7 @@ def rasterize_strokes(
 # Gaussian blur helper
 # ---------------------------------------------------------------------------
 
+
 def _gaussian_blur(arr: np.ndarray, sigma: float) -> np.ndarray:
     """Gaussian blur a 2-D float32 array."""
     if sigma < 0.5:
@@ -280,6 +301,7 @@ def _gaussian_blur(arr: np.ndarray, sigma: float) -> np.ndarray:
 # Confidence map builders
 # ---------------------------------------------------------------------------
 
+
 def _dark_prior(image_arr: np.ndarray, dark_range: float) -> np.ndarray:
     """Higher confidence for darker pixels."""
     luma = image_arr @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
@@ -301,7 +323,9 @@ def _neutral_prior(image_arr: np.ndarray, sensitivity: float) -> np.ndarray:
     return 1.0 - t  # neutral → 1.0
 
 
-def _border_prior(shape: Tuple[int, int], border_width_frac: float = 0.05) -> np.ndarray:
+def _border_prior(
+    shape: Tuple[int, int], border_width_frac: float = 0.05
+) -> np.ndarray:
     """Distance-from-border prior — pixels near edges get higher confidence."""
     h, w = shape
     bw = max(1, int(min(h, w) * border_width_frac))
@@ -319,11 +343,11 @@ def _edge_magnitude(image_arr: np.ndarray) -> np.ndarray:
     if cv2 is not None:
         gx = cv2.Sobel(luma, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(luma, cv2.CV_32F, 0, 1, ksize=3)
-        mag = np.sqrt(gx ** 2 + gy ** 2)
+        mag = np.sqrt(gx**2 + gy**2)
     else:
         # Simple numpy gradient
         gy, gx = np.gradient(luma)
-        mag = np.sqrt(gx ** 2 + gy ** 2)
+        mag = np.sqrt(gx**2 + gy**2)
     # Normalise to [0, 1]
     m = mag.max()
     if m > 1e-6:
@@ -334,6 +358,7 @@ def _edge_magnitude(image_arr: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Mask resolution pipeline
 # ---------------------------------------------------------------------------
+
 
 def resolve_mask(
     mask_data: MaskData,
@@ -368,7 +393,9 @@ def resolve_mask(
     if stroke_maps is None:
         add_map, protect_map = rasterize_strokes(mask_data, shape, edits)
         if cache is not None:
-            cache.put_strokes(mask_data.revision, shape, geo_hash, (add_map, protect_map))
+            cache.put_strokes(
+                mask_data.revision, shape, geo_hash, (add_map, protect_map)
+            )
     else:
         add_map, protect_map = stroke_maps
 
@@ -395,7 +422,9 @@ def resolve_mask(
         # Neutrality prior blended in
         if settings.neutrality_sensitivity > 0.01:
             np_arr = _neutral_prior(image_arr, settings.neutrality_sensitivity)
-            auto_prior = auto_prior * 0.6 + np_arr * 0.4 * settings.neutrality_sensitivity
+            auto_prior = (
+                auto_prior * 0.6 + np_arr * 0.4 * settings.neutrality_sensitivity
+            )
 
     # --- Combine signals ---
     # Background confidence = user strokes + auto prior where user hasn't painted
@@ -443,6 +472,7 @@ def resolve_mask(
 # Disposable raster cache
 # ---------------------------------------------------------------------------
 
+
 class MaskRasterCache:
     """Resolution-keyed cache for disposable raster products.
 
@@ -467,7 +497,10 @@ class MaskRasterCache:
     # stroke maps
 
     def get_strokes(
-        self, revision: int, shape: Tuple[int, int], geo_hash: int,
+        self,
+        revision: int,
+        shape: Tuple[int, int],
+        geo_hash: int,
     ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         key = (revision, shape, geo_hash)
         if self._stroke_key == key:

@@ -328,7 +328,10 @@ class TestMaskedDarken(unittest.TestCase):
 class TestMaskRasterCache(unittest.TestCase):
     def test_stroke_cache_hit(self):
         cache = MaskRasterCache()
-        maps = (np.zeros((10, 10), dtype=np.float32), np.zeros((10, 10), dtype=np.float32))
+        maps = (
+            np.zeros((10, 10), dtype=np.float32),
+            np.zeros((10, 10), dtype=np.float32),
+        )
         cache.put_strokes(1, (10, 10), 42, maps)
 
         result = cache.get_strokes(1, (10, 10), 42)
@@ -336,7 +339,10 @@ class TestMaskRasterCache(unittest.TestCase):
 
     def test_stroke_cache_miss_different_revision(self):
         cache = MaskRasterCache()
-        maps = (np.zeros((10, 10), dtype=np.float32), np.zeros((10, 10), dtype=np.float32))
+        maps = (
+            np.zeros((10, 10), dtype=np.float32),
+            np.zeros((10, 10), dtype=np.float32),
+        )
         cache.put_strokes(1, (10, 10), 42, maps)
 
         result = cache.get_strokes(2, (10, 10), 42)
@@ -345,7 +351,10 @@ class TestMaskRasterCache(unittest.TestCase):
     def test_stroke_cache_miss_different_shape(self):
         """Different resolution = different cache key."""
         cache = MaskRasterCache()
-        maps = (np.zeros((10, 10), dtype=np.float32), np.zeros((10, 10), dtype=np.float32))
+        maps = (
+            np.zeros((10, 10), dtype=np.float32),
+            np.zeros((10, 10), dtype=np.float32),
+        )
         cache.put_strokes(1, (10, 10), 42, maps)
 
         result = cache.get_strokes(1, (200, 200), 42)
@@ -367,7 +376,10 @@ class TestMaskRasterCache(unittest.TestCase):
 
     def test_clear(self):
         cache = MaskRasterCache()
-        maps = (np.zeros((10, 10), dtype=np.float32), np.zeros((10, 10), dtype=np.float32))
+        maps = (
+            np.zeros((10, 10), dtype=np.float32),
+            np.zeros((10, 10), dtype=np.float32),
+        )
         cache.put_strokes(1, (10, 10), 42, maps)
         cache.clear()
         self.assertIsNone(cache.get_strokes(1, (10, 10), 42))
@@ -437,6 +449,7 @@ class TestEditorIntegration(unittest.TestCase):
 
         # Clean up
         import os
+
         os.unlink(f.name)
 
     def test_load_image_clears_mask_state(self):
@@ -456,13 +469,15 @@ class TestEditorIntegration(unittest.TestCase):
 
         # Add darken state
         editor._mask_assets["darken"] = MaskData()
-        editor._mask_assets["darken"].add_stroke(
-            MaskStroke([(0.5, 0.5)], 0.1, "add")
-        )
+        editor._mask_assets["darken"].add_stroke(MaskStroke([(0.5, 0.5)], 0.1, "add"))
         editor._mask_raster_cache.put_strokes(
-            1, (50, 50), 0,
-            (np.zeros((50, 50), dtype=np.float32),
-             np.zeros((50, 50), dtype=np.float32)),
+            1,
+            (50, 50),
+            0,
+            (
+                np.zeros((50, 50), dtype=np.float32),
+                np.zeros((50, 50), dtype=np.float32),
+            ),
         )
 
         # Second load — should clear mask state
@@ -474,6 +489,7 @@ class TestEditorIntegration(unittest.TestCase):
         self.assertIsNone(editor._mask_raster_cache.get_strokes(1, (50, 50), 0))
 
         import os
+
         os.unlink(f.name)
         os.unlink(f2.name)
 
@@ -514,8 +530,8 @@ class TestEditorIntegration(unittest.TestCase):
         self.assertGreater(centre_off, centre_on)
 
         import os
-        os.unlink(f.name)
 
+        os.unlink(f.name)
 
     def test_snapshot_captures_immutable_darken_state(self):
         """snapshot_for_export deep-copies darken state — mutations after
@@ -550,14 +566,16 @@ class TestEditorIntegration(unittest.TestCase):
         snap_mask = snapshot["mask_override"]
         self.assertIsNotNone(snap_mask)
         self.assertIsNot(
-            snap_mask.get("darken"), md,
+            snap_mask.get("darken"),
+            md,
             "MaskData should be deep-copied",
         )
 
         # Verify fresh export cache
         self.assertIsNotNone(snapshot["export_cache"])
         self.assertIsNot(
-            snapshot["export_cache"], editor._mask_raster_cache,
+            snapshot["export_cache"],
+            editor._mask_raster_cache,
             "Export should use a fresh cache, not the shared preview cache",
         )
 
@@ -569,6 +587,7 @@ class TestEditorIntegration(unittest.TestCase):
         self.assertIsNotNone(snapshot["filepath_snapshot"])
 
         import os
+
         os.unlink(f.name)
 
     def test_snapshot_without_darken_no_override(self):
@@ -590,6 +609,7 @@ class TestEditorIntegration(unittest.TestCase):
         self.assertIsNone(snapshot["export_cache"])
 
         import os
+
         os.unlink(f.name)
 
     def test_mutation_after_snapshot_does_not_affect_export(self):
@@ -629,6 +649,7 @@ class TestEditorIntegration(unittest.TestCase):
         self.assertEqual(len(snap_mask.strokes), 1)  # only the original stroke
 
         import os
+
         os.unlink(f.name)
 
     def test_navigation_after_snapshot_does_not_affect_export(self):
@@ -673,6 +694,7 @@ class TestEditorIntegration(unittest.TestCase):
             pass
 
         import os
+
         os.unlink(f.name)
 
 

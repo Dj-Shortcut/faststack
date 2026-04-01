@@ -1305,8 +1305,16 @@ class ImageEditor:
         darken = edits.get("darken_settings")
         if darken is not None and getattr(darken, "enabled", False):
             # Use override assets/cache if provided (export snapshot), else live state
-            _assets = mask_assets_override if mask_assets_override is not None else self._mask_assets
-            _cache = cache_override if cache_override is not None else self._mask_raster_cache
+            _assets = (
+                mask_assets_override
+                if mask_assets_override is not None
+                else self._mask_assets
+            )
+            _cache = (
+                cache_override
+                if cache_override is not None
+                else self._mask_raster_cache
+            )
             mask_data = _assets.get(darken.mask_id)
             if mask_data is not None and mask_data.has_strokes():
                 from faststack.imaging.mask_engine import resolve_mask
@@ -1991,15 +1999,15 @@ class ImageEditor:
 
         with self._lock:
             if self.float_image is None:
-                raise RuntimeError(
-                    "snapshot_for_export called with no float_image"
-                )
+                raise RuntimeError("snapshot_for_export called with no float_image")
 
             # --- Source image ---
             _safe_no_copy = self._edits_can_share_input(self.current_edits)
             if _safe_no_copy:
                 source_arr = self.float_image
-                log.debug("snapshot_for_export: skipping float_image.copy() (safe no-copy path)")
+                log.debug(
+                    "snapshot_for_export: skipping float_image.copy() (safe no-copy path)"
+                )
             else:
                 source_arr = self.float_image.copy()
 
@@ -2015,7 +2023,9 @@ class ImageEditor:
 
                 edits_snapshot["darken_settings"] = copy.deepcopy(ds)
                 live_mask = self._mask_assets.get(ds.mask_id)
-                mask_snapshot = copy.deepcopy(live_mask) if live_mask is not None else None
+                mask_snapshot = (
+                    copy.deepcopy(live_mask) if live_mask is not None else None
+                )
                 export_cache = MaskRasterCache()
             else:
                 mask_snapshot = None
