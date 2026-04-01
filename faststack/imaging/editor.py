@@ -320,6 +320,7 @@ class ImageEditor:
         # Stores the currently applied edits (used for preview)
         self.current_edits: Dict[str, Any] = self._initial_edits()
         self.current_filepath: Optional[Path] = None
+        self.session_id: Optional[str] = None
 
         # Caching support for smooth updates
         self._lock = threading.RLock()
@@ -371,6 +372,7 @@ class ImageEditor:
         with self._lock:
             self.original_image = None
             self.current_filepath = None
+            self.session_id = None
             self.float_image = None
             self.float_preview = None
             self._edits_rev += 1
@@ -504,10 +506,14 @@ class ImageEditor:
                 self.float_image = None
                 self.float_preview = None
                 self.current_filepath = None
+                self.session_id = None
                 self._source_exif_bytes = None
                 self._edits_rev += 1
                 self._cached_preview = None
                 self._cached_rev = -1
+                # Clear mask state from previous image
+                self._mask_assets.clear()
+                self._mask_raster_cache.clear()
             log.error("Image file not found: %s", filepath)
             return False
 
@@ -682,6 +688,7 @@ class ImageEditor:
             # Assign all state atomically under lock to prevent race with preview worker
             with self._lock:
                 self.current_filepath = load_filepath
+                self.session_id = uuid.uuid4().hex
                 self.original_image = loaded_original
                 self.float_image = loaded_float_image
                 self.float_preview = loaded_float_preview
@@ -714,9 +721,12 @@ class ImageEditor:
                 self.float_image = None
                 self.float_preview = None
                 self.current_filepath = None
+                self.session_id = None
                 self._edits_rev += 1
                 self._cached_preview = None
                 self._cached_rev = -1
+                self._mask_assets.clear()
+                self._mask_raster_cache.clear()
             return False
 
     def _rotate_float_image(
@@ -751,6 +761,7 @@ class ImageEditor:
         for_export: bool = False,
         mask_assets_override: Optional[Dict[str, "MaskData"]] = None,
         cache_override: Optional["MaskRasterCache"] = None,
+        cache_context: Optional[dict] = None,
     ) -> np.ndarray:
         """Applies all current edits to the provided float32 numpy array.
         Returns float32 array (H, W, 3).
@@ -1018,11 +1029,12 @@ class ImageEditor:
 
                 cached_analysis = None
                 with self._lock:
+                    cached_dict = cache_context.get("highlight_analysis") if cache_context is not None else self._cached_highlight_analysis
                     if (
-                        self._cached_highlight_analysis
-                        and self._cached_highlight_analysis["hash"] == upstream_hash
+                        cached_dict
+                        and cached_dict["hash"] == upstream_hash
                     ):
-                        cached_analysis = self._cached_highlight_analysis["state"]
+                        cached_analysis = cached_dict["state"]
 
                 if cached_analysis:
                     analysis_state = cached_analysis
@@ -1039,10 +1051,14 @@ class ImageEditor:
                     )
 
                     with self._lock:
-                        self._cached_highlight_analysis = {
+                        entry = {
                             "hash": upstream_hash,
                             "state": analysis_state,
                         }
+                        if cache_context is not None:
+                            cache_context["highlight_analysis"] = entry
+                        else:
+                            self._cached_highlight_analysis = entry
 
             if not for_export:
                 with self._lock:
@@ -1057,6 +1073,7 @@ class ImageEditor:
                     srgb_u8_stride=srgb_u8_stride,  # Pass if we need to recompute analysis
                     analysis_state=analysis_state,
                     edits=edits,
+                    cache_context=cache_context,
                 )
 
             # 8-10. Clarity / Texture / Sharpness (Unified Pyramid Detail Bands)
@@ -1097,7 +1114,7 @@ class ImageEditor:
                 cached_exp_gain = 1.0
 
                 with self._lock:
-                    cached = self._cached_detail_bands
+                    cached = cache_context.get("detail_bands") if cache_context is not None else self._cached_detail_bands
                     # Verify both hash AND frozen values to avoid collisions
                     if (
                         cached
@@ -1195,7 +1212,10 @@ class ImageEditor:
                                 "Y3": newly_computed["Y3"],
                                 "Y1": newly_computed["Y1"],
                             }
-                        self._cached_detail_bands = new_cache
+                        if cache_context is not None:
+                            cache_context["detail_bands"] = new_cache
+                        else:
+                            self._cached_detail_bands = new_cache
 
                 # Build hierarchical pyramid bands (non-overlapping frequency ranges)
                 detail = np.zeros_like(Y)
@@ -1673,6 +1693,7 @@ class ImageEditor:
         srgb_u8: Optional[np.ndarray] = None,  # Planned future alias for srgb_u8_stride
         analysis_state: Optional[Dict[str, float]] = None,
         edits: Optional[Dict[str, Any]] = None,
+        cache_context: Optional[dict] = None,
     ) -> np.ndarray:
         """Apply highlights and shadows adjustments using brightness-based processing in linear light.
 
@@ -1782,7 +1803,7 @@ class ImageEditor:
                     max_brightness = 1.0
                     hit = False
                     with self._lock:
-                        cached = self._cached_max_brightness_state
+                        cached = cache_context.get("max_brightness_state") if cache_context is not None else self._cached_max_brightness_state
                         if cached and cached.get("hash") == current_hash:
                             max_brightness = cached["value"]
                             hit = True
@@ -1811,10 +1832,14 @@ class ImageEditor:
                             max_brightness = 1.0
 
                         with self._lock:
-                            self._cached_max_brightness_state = {
+                            entry = {
                                 "hash": current_hash,
                                 "value": max_brightness,
                             }
+                            if cache_context is not None:
+                                cache_context["max_brightness_state"] = entry
+                            else:
+                                self._cached_max_brightness_state = entry
 
                     # Clamp to avoid crazy values from single hot pixels or artifacts
                     max_brightness = min(max_brightness, 100.0)
@@ -2106,12 +2131,15 @@ class ImageEditor:
             t0 = time.perf_counter()
 
         # 1. Apply edits to full resolution — uses only snapshot data
+        # Use isolated snapshot context so background export doesn't pollute self._cached_*
+        export_cache_context = {}
         final_float = self._apply_edits(
             source_arr,
             edits=edits_snapshot,
             for_export=True,
             mask_assets_override=mask_override,
             cache_override=export_cache,
+            cache_context=export_cache_context,
         )  # (H,W,3) float32
 
         if _debug:

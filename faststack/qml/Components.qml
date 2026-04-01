@@ -142,8 +142,8 @@ Item {
             // Size matches the AABB of the rotated image
             // W' = W*|cos| + H*|sin|
             // Geometry is now updated atomically via updateRotatorGeometry()
-            property real implicitWidth: 0
-            property real implicitHeight: 0
+            implicitWidth: 0
+            implicitHeight: 0
             property bool isUpdatingGeometry: false
             
             // Fix A: Atomic Zoom Scale

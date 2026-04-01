@@ -41,8 +41,8 @@ def apply_masked_darken(
     ----------
     arr : float32 (H, W, 3)  sRGB image in [0, 1].  Modified **in-place**.
     mask : float32 (H, W)    soft mask in [0, 1], where 1.0 = full background.
-    darken_amount : float     overall strength, 0–1.
-    edge_protection : float   detail preservation strength, 0–1.
+    darken_amount : float     overall strength, 0-1.
+    edge_protection : float   detail preservation strength, 0-1.
 
     Returns
     -------

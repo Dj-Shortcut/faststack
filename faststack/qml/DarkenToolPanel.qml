@@ -210,7 +210,12 @@ Window {
                     id: brushSlider
                     Layout.fillWidth: true
                     from: 1; to: 100; stepSize: 1
-                    value: uiState ? uiState.darkenBrushRadius * 1000 : 30
+                    
+                    Binding on value {
+                        value: uiState ? uiState.darkenBrushRadius * 1000 : 30
+                        when: !brushSlider.pressed
+                    }
+                    
                     onMoved: {
                         if (controller) controller.set_darken_param("brush_radius", value / 1000.0)
                     }

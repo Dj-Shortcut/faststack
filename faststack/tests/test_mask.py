@@ -689,20 +689,22 @@ class TestEditorIntegration(unittest.TestCase):
         self.assertIsNone(editor.float_image)
         self.assertEqual(len(editor._mask_assets), 0)
 
+        # Simulate loading a second temporary image which will repopulate current_filepath
+        # and cached state, creating a potential cross-image race context.
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f2:
+            PILImage.new("RGB", (50, 50), color=(150, 150, 150)).save(f2.name)
+            editor.load_image(f2.name)
+
         # save_from_snapshot should still work with the snapshot
-        try:
-            result = editor.save_from_snapshot(snapshot)
-            # save_from_snapshot uses _apply_edits which still needs `self` for non-darken steps,
-            # but the critical darken data comes from the snapshot
-            self.assertIsNotNone(result)
-        except (OSError, IOError):
-            # File ops may fail in test env, but the point is that it doesn't crash
-            # trying to read cleared editor state for darken data
-            pass
+        result = editor.save_from_snapshot(snapshot)
+        # save_from_snapshot uses _apply_edits which uses the passed cache_context
+        # to avoid polluting or depending on live editor state.
+        self.assertIsNotNone(result)
 
         import os
 
         os.unlink(f.name)
+        os.unlink(f2.name)
 
 
 class TestOverlayFallback(unittest.TestCase):
@@ -712,12 +714,17 @@ class TestOverlayFallback(unittest.TestCase):
         try:
             from PySide6.QtGui import QImage
             from PySide6.QtCore import Qt
+            from faststack.ui.provider import ImageProvider
+            from unittest.mock import Mock
         except ImportError:
             self.skipTest("PySide6 not available")
 
-        # Create a 1x1 transparent image the same way provider.py does
-        transparent = QImage(1, 1, QImage.Format.Format_ARGB32)
-        transparent.fill(Qt.GlobalColor.transparent)
+        # Mock app_controller to return no overlay image
+        mock_controller = Mock()
+        mock_controller.ui_state._darken_overlay_image = None
+        
+        provider = ImageProvider(mock_controller)
+        transparent = provider.requestImage("mask_overlay/test", None, None)
 
         # Verify it has zero alpha (i.e. fully transparent)
         pixel = transparent.pixelColor(0, 0)

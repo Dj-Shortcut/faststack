@@ -250,6 +250,7 @@ class AppController(QObject):
         self._saves_in_flight: set = (
             set()
         )  # canonical target paths currently being saved
+        self._saving_keys: set = set()  # keys of images with active saves
         self._batch_indices_cache: set = set()
         self._batch_indices_cache_key: Optional[tuple] = None
         self.recycle_bin_dir: Optional[Path] = None
@@ -1579,7 +1580,7 @@ class AppController(QObject):
         raw_target = save_target_path or self.image_editor.current_filepath
         effective_target = str(Path(raw_target).resolve()) if raw_target else None
         if effective_target and effective_target in self._saves_in_flight:
-            self.update_status_message("Already saving this image...")
+            self.update_status_message("This image is still saving. Please wait a moment.", timeout=3000)
             return
 
         # Capture state needed for save before we start
@@ -1610,25 +1611,32 @@ class AppController(QObject):
             if 0 <= self.current_index < len(self.image_files)
             else None
         )
+        session_token = (
+            save_image_key,
+            getattr(self, "view_override_kind", None),
+            self.image_editor.session_id if self.image_editor else None,
+        )
+
+        if save_image_key and save_image_key in self._saving_keys:
+            self.update_status_message("This image is still saving. Please wait a moment.", timeout=3000)
+            return
 
         # Track in-flight save by target path
         if effective_target:
             self._saves_in_flight.add(effective_target)
+        if save_image_key:
+            self._saving_keys.add(save_image_key)
 
         # Show saving indicator (stays until save finishes — no auto-clear timeout)
         self.ui_state.isSaving = True
         self.ui_state.statusMessage = "Saving..."
-
-        # Close editor immediately — the snapshot is already captured, so the
-        # user doesn't need to keep the editor open during the export.
-        if self.ui_state.isEditorOpen:
-            self.ui_state.isEditorOpen = False
 
         # Build the base context that every result dict carries
         _ctx = {
             "target": effective_target,
             "editor_was_open": editor_was_open,
             "save_image_key": save_image_key,
+            "session_token": session_token,
         }
 
         # Submit save work to background thread — operates only on the snapshot
@@ -1660,6 +1668,11 @@ class AppController(QObject):
         future = self._save_executor.submit(do_save)
         future.add_done_callback(on_done)
 
+        # Close editor immediately — the snapshot is already captured, and the save
+        # is submitted, so the user doesn't need to keep the editor open during export.
+        if self.ui_state.isEditorOpen:
+            self.ui_state.isEditorOpen = False
+
     @Slot(object)
     def _on_save_finished(self, save_result: dict):
         """Handle save completion on main thread (called via signal from background)."""
@@ -1672,6 +1685,10 @@ class AppController(QObject):
         target = save_result.get("target")
         if target:
             self._saves_in_flight.discard(target)
+
+        save_key = save_result.get("save_image_key")
+        if save_key:
+            self._saving_keys.discard(save_key)
         if not self._saves_in_flight:
             self.ui_state.isSaving = False
 
@@ -1689,26 +1706,33 @@ class AppController(QObject):
             # Read frozen save context — these were captured at save-initiation
             # time and are immune to editor/navigation changes during the save.
             editor_was_open = save_result.get("editor_was_open", False)
-            save_image_key = save_result.get("save_image_key")
+            save_session_token = save_result.get("session_token")
 
-            # Check whether the user is still viewing the image they saved.
-            # Compare via _key() (normalised path) rather than reading
-            # image_editor.current_filepath which may have been cleared.
+            # Check whether the user is still viewing the identical session
+            # they saved (same image, same variant, same editor underlying data)
             current_image_key = (
                 self._key(self.image_files[self.current_index].path)
                 if 0 <= self.current_index < len(self.image_files)
                 else None
             )
+            current_session_token = (
+                current_image_key,
+                getattr(self, "view_override_kind", None),
+                self.image_editor.session_id if self.image_editor else None,
+            )
+
             still_on_same_image = (
-                save_image_key is not None
-                and current_image_key is not None
-                and current_image_key == save_image_key
+                save_session_token is not None
+                and current_session_token is not None
+                and current_session_token == save_session_token
             )
 
             if still_on_same_image:
                 # Clear Editor State (release memory) — only when the
                 # editor dialog was actually open for this save.
                 if editor_was_open:
+                    if self.ui_state.isEditorOpen:
+                        self.ui_state.isEditorOpen = False
                     self.image_editor.clear()
                     self._clear_variant_override()
 
@@ -4507,6 +4531,9 @@ class AppController(QObject):
             log.warning("[_delete_indices] No valid indices found in %s", indices)
             return summary
 
+        if self._block_if_saving(*[img.path for img in images_to_delete]):
+            return summary
+
         summary["requested_count"] = len(images_to_delete)
 
         # --- PHASE 1: OPTIMISTIC UI UPDATE (instant, no I/O) ---
@@ -5406,6 +5433,10 @@ class AppController(QObject):
             self.update_status_message("No image to edit.")
             return
 
+        current_image_path = self.image_files[self.current_index].path
+        if self._block_if_saving(current_image_path):
+            return
+
         # Prefer RAW file if it exists, otherwise use JPG
         image_file = self.image_files[self.current_index]
         jpg_path = image_file.path
@@ -5543,9 +5574,26 @@ class AppController(QObject):
         self.ui_state.statusMessage = message
         QTimer.singleShot(timeout, clear_message)
 
+    def _is_image_saving(self, file_path_str: str) -> bool:
+        if not file_path_str or not hasattr(self, "_saving_keys"):
+            return False
+        return self._key(Path(file_path_str)) in self._saving_keys
+
+    def _block_if_saving(self, *paths) -> bool:
+        """Helper to block actions if any of the given paths are currently saving."""
+        for path in paths:
+            if path and self._is_image_saving(str(path)):
+                self.update_status_message("This image is still saving. Please wait a moment.", timeout=3000)
+                return True
+        return False
+
     @Slot()
     def start_drag_current_image(self):
         if not self.image_files or self.current_index >= len(self.image_files):
+            return
+
+        current_image_path = self.image_files[self.current_index].path
+        if self._block_if_saving(current_image_path):
             return
 
         # Collect files to drag: batch files if any batches exist, otherwise current image
@@ -5651,6 +5699,10 @@ class AppController(QObject):
     def enable_raw_editing(self):
         """Switches the current image to RAW mode (using developed TIFF)."""
         if not self.image_files:
+            return
+
+        current_image_path = self.image_files[self.current_index].path
+        if self._block_if_saving(current_image_path):
             return
 
         # 1. Update State
@@ -5805,12 +5857,30 @@ class AppController(QObject):
         This provides a centralized entry point for loading the editor correctly.
         """
         try:
-            # Use variant override path if active
             if self.view_override_path:
                 active_path = Path(self.view_override_path)
             else:
                 active_path = self.get_active_edit_path(self.current_index)
             filepath = str(active_path)
+
+            editor_path = getattr(self.image_editor, "current_filepath", None)
+            match = False
+            if editor_path:
+                try:
+                    match = Path(editor_path).resolve() == Path(filepath).resolve()
+                    if match:
+                        mtime = Path(filepath).stat().st_mtime
+                        if mtime != getattr(self.image_editor, "current_mtime", 0.0):
+                            match = False
+                except (OSError, ValueError):
+                    pass
+
+            if match:
+                log.debug("load_image_for_editing: Reusing existing session for %s", filepath)
+                # Ensure the background renderer is current and notify UI to refresh
+                self._kick_preview_worker()
+                self.ui_state.editorImageChanged.emit()
+                return True
 
             # Fetch cached preview if available for faster initial display
             cached_preview = self.get_decoded_image(self.current_index)
@@ -5849,10 +5919,17 @@ class AppController(QObject):
                     self._sync_editor_state_to_ui()
 
                 return True
+
         except Exception as e:
             log.exception("Failed to load image for editing: %s", e)
             self.update_status_message(f"Error loading editor: {e}")
+            if self.ui_state:
+                self.ui_state.isEditorOpen = False
+            return False
 
+        # load_image returned False
+        if self.ui_state:
+            self.ui_state.isEditorOpen = False
         return False
 
     def _sync_editor_state_to_ui(self):
@@ -5987,6 +6064,25 @@ class AppController(QObject):
         self.ui_state.darkenMode = "assisted"
         self.ui_state.darkenBrushRadius = 0.03
 
+    def _prepare_darken_image_state(self) -> bool:
+        """Helper to ensure the correct image is loaded for darkening."""
+        needs_load = (
+            self.image_editor.float_image is None
+            or self.image_editor.current_filepath is None
+        )
+        if not needs_load:
+            try:
+                active = str(self.view_override_path if self.view_override_path else self.get_active_edit_path(self.current_index))
+                if str(self.image_editor.current_filepath) != active:
+                    needs_load = True
+            except (IndexError, TypeError):
+                needs_load = True
+        if needs_load:
+            if not self.load_image_for_editing():
+                return False  # load failed — abort rather than darken stale data
+            self._reset_darken_on_navigation()
+        return True
+
     @Slot()
     def open_darken_tool(self):
         """Activate the darkening tool, loading the image if needed.
@@ -5996,24 +6092,8 @@ class AppController(QObject):
         panel open.  The image is silently loaded for editing if it hasn't
         been already.
         """
-        # Ensure the correct image is loaded for editing (needed for darken
-        # processing).  A stale editor (e.g. user navigated to a different
-        # image after closing the editor) must be reloaded.
-        needs_load = (
-            self.image_editor.float_image is None
-            or self.image_editor.current_filepath is None
-        )
-        if not needs_load:
-            try:
-                active = str(self.get_active_edit_path(self.current_index))
-                if str(self.image_editor.current_filepath) != active:
-                    needs_load = True
-            except (IndexError, TypeError):
-                needs_load = True
-        if needs_load:
-            if not self.load_image_for_editing():
-                return  # load failed — abort rather than darken stale data
-            self._reset_darken_on_navigation()
+        if not self._prepare_darken_image_state():
+            return
         self._ensure_darken_state()
         self.ui_state.isDarkening = True
         self._kick_preview_worker()
@@ -6034,6 +6114,8 @@ class AppController(QObject):
                 self.image_editor._edits_rev += 1
                 self._kick_preview_worker()
         else:
+            if not self._prepare_darken_image_state():
+                return
             self._ensure_darken_state()
             self.ui_state.isDarkening = True
             self._kick_preview_worker()
