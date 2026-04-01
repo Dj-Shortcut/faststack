@@ -1580,7 +1580,9 @@ class AppController(QObject):
         raw_target = save_target_path or self.image_editor.current_filepath
         effective_target = str(Path(raw_target).resolve()) if raw_target else None
         if effective_target and effective_target in self._saves_in_flight:
-            self.update_status_message("This image is still saving. Please wait a moment.", timeout=3000)
+            self.update_status_message(
+                "This image is still saving. Please wait a moment.", timeout=3000
+            )
             return
 
         # Capture state needed for save before we start
@@ -1618,7 +1620,9 @@ class AppController(QObject):
         )
 
         if save_image_key and save_image_key in self._saving_keys:
-            self.update_status_message("This image is still saving. Please wait a moment.", timeout=3000)
+            self.update_status_message(
+                "This image is still saving. Please wait a moment.", timeout=3000
+            )
             return
 
         # Track in-flight save by target path
@@ -5583,7 +5587,9 @@ class AppController(QObject):
         """Helper to block actions if any of the given paths are currently saving."""
         for path in paths:
             if path and self._is_image_saving(str(path)):
-                self.update_status_message("This image is still saving. Please wait a moment.", timeout=3000)
+                self.update_status_message(
+                    "This image is still saving. Please wait a moment.", timeout=3000
+                )
                 return True
         return False
 
@@ -5876,7 +5882,9 @@ class AppController(QObject):
                     pass
 
             if match:
-                log.debug("load_image_for_editing: Reusing existing session for %s", filepath)
+                log.debug(
+                    "load_image_for_editing: Reusing existing session for %s", filepath
+                )
                 # Ensure the background renderer is current and notify UI to refresh
                 self._kick_preview_worker()
                 self.ui_state.editorImageChanged.emit()
@@ -6072,7 +6080,11 @@ class AppController(QObject):
         )
         if not needs_load:
             try:
-                active = str(self.view_override_path if self.view_override_path else self.get_active_edit_path(self.current_index))
+                active = str(
+                    self.view_override_path
+                    if self.view_override_path
+                    else self.get_active_edit_path(self.current_index)
+                )
                 if str(self.image_editor.current_filepath) != active:
                     needs_load = True
             except (IndexError, TypeError):

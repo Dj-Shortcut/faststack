@@ -8,6 +8,7 @@ sys.path.append(str(Path(__file__).parents[2]))
 
 from faststack.app import AppController
 
+
 class TestEditorReopening(unittest.TestCase):
     def setUp(self):
         # 1. Heavily patch all external-touching classes
@@ -20,7 +21,9 @@ class TestEditorReopening(unittest.TestCase):
             patch("faststack.app.config"),
             patch("faststack.app.setup_logging"),
             patch("faststack.app.UIState"),
-            patch("faststack.app.QTimer"), # <-- Fix QObject/Timer issues in headless tests
+            patch(
+                "faststack.app.QTimer"
+            ),  # <-- Fix QObject/Timer issues in headless tests
             patch("faststack.app.create_daemon_threadpool_executor"),
             patch("concurrent.futures.ThreadPoolExecutor"),
         ]
@@ -29,13 +32,13 @@ class TestEditorReopening(unittest.TestCase):
 
         # 2. Instantiate controller
         self.controller = AppController(Path("."), MagicMock())
-        
+
         # 3. Setup mocks for editor session logic
         self.controller.image_editor = MagicMock()
         self.controller.image_editor.current_filepath = Path("test.jpg")
         self.controller.image_editor.current_mtime = 123.4
         self.controller.image_editor.session_id = "test-session"
-        
+
         # Setup files
         mock_file = MagicMock()
         mock_file.path = Path("test.jpg")
@@ -51,13 +54,13 @@ class TestEditorReopening(unittest.TestCase):
         save_ctx = {
             "image_key": str(Path("test.jpg").resolve()),
             "session_id": "test-session",
-            "editor_was_open": True
+            "editor_was_open": True,
         }
         result = {"success": False, "error": "Disk full"}
-        
+
         # Post-save cleanup path
         self.controller._on_save_finished(result, save_ctx)
-        
+
         # VERIFY: Clear must NOT be called on failure
         self.controller.image_editor.clear.assert_not_called()
 
@@ -65,14 +68,14 @@ class TestEditorReopening(unittest.TestCase):
         target = Path("test.jpg")
         self.controller.image_editor.current_filepath = target
         self.controller.image_editor.current_mtime = 123.4
-        
+
         with patch("pathlib.Path.resolve", return_value=target.absolute()):
             with patch("pathlib.Path.stat") as mock_stat:
                 mock_stat.return_value.st_mtime = 123.4
-                
+
                 # REOPEN
                 res = self.controller.load_image_for_editing()
-                
+
                 self.assertTrue(res)
                 # VERIFY: reuse signals
                 self.controller.ui_state.editorImageChanged.emit.assert_called_once()
@@ -82,19 +85,24 @@ class TestEditorReopening(unittest.TestCase):
     def test_load_failure_closes_dialog(self):
         # Case 1: load_image fails
         self.controller.ui_state.isEditorOpen = True
-        self.controller.image_editor.current_filepath = None # Ensure no reuse
+        self.controller.image_editor.current_filepath = None  # Ensure no reuse
         self.controller.image_editor.load_image.return_value = False
-        
+
         res = self.controller.load_image_for_editing()
         self.assertFalse(res)
-        self.assertFalse(self.controller.ui_state.isEditorOpen, "Dialog should close on failure")
-        
+        self.assertFalse(
+            self.controller.ui_state.isEditorOpen, "Dialog should close on failure"
+        )
+
         # Case 2: exception throws
         self.controller.ui_state.isEditorOpen = True
         self.controller.image_editor.load_image.side_effect = RuntimeError("IO error")
         res = self.controller.load_image_for_editing()
         self.assertFalse(res)
-        self.assertFalse(self.controller.ui_state.isEditorOpen, "Dialog should close on error")
+        self.assertFalse(
+            self.controller.ui_state.isEditorOpen, "Dialog should close on error"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

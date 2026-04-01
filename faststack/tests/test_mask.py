@@ -722,7 +722,7 @@ class TestOverlayFallback(unittest.TestCase):
         # Mock app_controller to return no overlay image
         mock_controller = Mock()
         mock_controller.ui_state._darken_overlay_image = None
-        
+
         provider = ImageProvider(mock_controller)
         transparent = provider.requestImage("mask_overlay/test", None, None)
 

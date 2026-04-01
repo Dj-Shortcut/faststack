@@ -1029,11 +1029,12 @@ class ImageEditor:
 
                 cached_analysis = None
                 with self._lock:
-                    cached_dict = cache_context.get("highlight_analysis") if cache_context is not None else self._cached_highlight_analysis
-                    if (
-                        cached_dict
-                        and cached_dict["hash"] == upstream_hash
-                    ):
+                    cached_dict = (
+                        cache_context.get("highlight_analysis")
+                        if cache_context is not None
+                        else self._cached_highlight_analysis
+                    )
+                    if cached_dict and cached_dict["hash"] == upstream_hash:
                         cached_analysis = cached_dict["state"]
 
                 if cached_analysis:
@@ -1114,7 +1115,11 @@ class ImageEditor:
                 cached_exp_gain = 1.0
 
                 with self._lock:
-                    cached = cache_context.get("detail_bands") if cache_context is not None else self._cached_detail_bands
+                    cached = (
+                        cache_context.get("detail_bands")
+                        if cache_context is not None
+                        else self._cached_detail_bands
+                    )
                     # Verify both hash AND frozen values to avoid collisions
                     if (
                         cached
@@ -1803,7 +1808,11 @@ class ImageEditor:
                     max_brightness = 1.0
                     hit = False
                     with self._lock:
-                        cached = cache_context.get("max_brightness_state") if cache_context is not None else self._cached_max_brightness_state
+                        cached = (
+                            cache_context.get("max_brightness_state")
+                            if cache_context is not None
+                            else self._cached_max_brightness_state
+                        )
                         if cached and cached.get("hash") == current_hash:
                             max_brightness = cached["value"]
                             hit = True
