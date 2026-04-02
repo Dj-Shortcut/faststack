@@ -1635,12 +1635,20 @@ class AppController(QObject):
         self.ui_state.isSaving = True
         self.ui_state.statusMessage = "Saving..."
 
+        # Compute restore-override flag
+        # We are restoring if we have an override path AND kind is NOT developed (i.e. it's a backup)
+        started_from_restore_override = (
+            bool(self.view_override_path) and 
+            getattr(self, "view_override_kind", None) != "developed"
+        )
+
         # Build the base context that every result dict carries
         _ctx = {
             "target": effective_target,
             "editor_was_open": editor_was_open,
             "save_image_key": save_image_key,
             "session_token": session_token,
+            "started_from_restore_override": started_from_restore_override,
         }
 
         # Submit save work to background thread — operates only on the snapshot
@@ -1672,10 +1680,9 @@ class AppController(QObject):
         future = self._save_executor.submit(do_save)
         future.add_done_callback(on_done)
 
-        # Close editor immediately — the snapshot is already captured, and the save
-        # is submitted, so the user doesn't need to keep the editor open during export.
-        if self.ui_state.isEditorOpen:
-            self.ui_state.isEditorOpen = False
+        # Leave editor open during background save so the user doesn't lose state
+        # if the save fails. Closure is deferred until _on_save_finished() success path.
+        pass
 
     @Slot(object)
     def _on_save_finished(self, save_result: dict):
@@ -1737,7 +1744,12 @@ class AppController(QObject):
                 if editor_was_open:
                     if self.ui_state.isEditorOpen:
                         self.ui_state.isEditorOpen = False
+                    # Closing triggers _on_editor_open_changed -> image_editor.clear()
+                    # but we call it explicitly here just in case they closed it manually.
                     self.image_editor.clear()
+
+                # Call this regardless of editor_was_open IF it was a restore-override
+                if save_result.get("started_from_restore_override"):
                     self._clear_variant_override()
 
                 # Refresh list to pick up new backup files and update variant map
@@ -5598,8 +5610,10 @@ class AppController(QObject):
         if not self.image_files or self.current_index >= len(self.image_files):
             return
 
-        current_image_path = self.image_files[self.current_index].path
-        if self._block_if_saving(current_image_path):
+        # (Check moved below after batch resolution)
+        path_to_check = self.image_files[self.current_index].path
+        # We still check the current image early as a fast-fail
+        if self._block_if_saving(path_to_check):
             return
 
         # Collect files to drag: batch files if any batches exist, otherwise current image
@@ -5620,6 +5634,11 @@ class AppController(QObject):
         existing_indices = [
             idx for idx in file_indices if self.image_files[idx].path.exists()
         ]
+
+        # Check if ANY of the resolved files are currently saving
+        for idx in existing_indices:
+            if self._block_if_saving(self.image_files[idx].path):
+                return
 
         # Prefer dragging the developed JPG if it exists (for external export),
         # but only when RAW mode is active or we are dragging a developed file itself.
@@ -5886,8 +5905,8 @@ class AppController(QObject):
                     "load_image_for_editing: Reusing existing session for %s", filepath
                 )
                 # Ensure the background renderer is current and notify UI to refresh
-                self._kick_preview_worker()
-                self.ui_state.editorImageChanged.emit()
+                # Also synchronize sliders/crop state to the backend session.
+                self._sync_editor_state_to_ui()
                 return True
 
             # Fetch cached preview if available for faster initial display
