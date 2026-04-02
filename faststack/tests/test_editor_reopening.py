@@ -50,16 +50,18 @@ class TestEditorReopening(unittest.TestCase):
             p.stop()
 
     def test_save_failure_retains_editor_state(self):
-        # Simulate background worker callback firing with a failure
-        save_ctx = {
-            "image_key": str(Path("test.jpg").resolve()),
-            "session_id": "test-session",
+        # Simulate background worker callback firing with a failure.
+        # _on_save_finished takes a single dict that contains both the
+        # result and the context fields produced by save_edited_image().
+        save_result = {
+            "success": False,
+            "error": "Disk full",
+            "save_image_key": str(Path("test.jpg").resolve()),
+            "session_token": ("key", None, "test-session"),
             "editor_was_open": True,
         }
-        result = {"success": False, "error": "Disk full"}
 
-        # Post-save cleanup path
-        self.controller._on_save_finished(result, save_ctx)
+        self.controller._on_save_finished(save_result)
 
         # VERIFY: Clear must NOT be called on failure
         self.controller.image_editor.clear.assert_not_called()
@@ -102,6 +104,69 @@ class TestEditorReopening(unittest.TestCase):
         self.assertFalse(
             self.controller.ui_state.isEditorOpen, "Dialog should close on error"
         )
+
+
+    def test_reuse_returns_REUSED_not_True(self):
+        """The reuse path must return _REUSED (truthy, but ``is True`` is False)
+        so _prepare_darken_image_state can distinguish reuse from reload."""
+        target = Path("test.jpg")
+        self.controller.image_editor.current_filepath = target
+        self.controller.image_editor.current_mtime = 123.4
+        self.controller.image_editor.current_edits = {}
+
+        with patch("pathlib.Path.resolve", return_value=target.absolute()):
+            with patch("pathlib.Path.stat") as mock_stat:
+                mock_stat.return_value.st_mtime = 123.4
+
+                res = self.controller.load_image_for_editing()
+
+                # Must be truthy (success)…
+                self.assertTrue(res)
+                # …but not exactly True (so ``is True`` check in
+                # _prepare_darken_image_state correctly skips darken reset)
+                self.assertIsNot(res, True)
+                self.assertEqual(res, AppController._REUSED)
+
+    def test_prepare_darken_skips_reset_on_reuse(self):
+        """_prepare_darken_image_state must NOT call _reset_darken_on_navigation
+        when load_image_for_editing returns _REUSED."""
+        target = Path("test.jpg")
+        self.controller.image_editor.current_filepath = None  # Force a load
+        self.controller.image_editor.float_image = None  # Force needs_load=True
+        self.controller.image_editor.current_edits = {}
+
+        with patch.object(
+            self.controller, "load_image_for_editing", return_value=AppController._REUSED
+        ):
+            with patch.object(self.controller, "_reset_darken_on_navigation") as mock_reset:
+                result = self.controller._prepare_darken_image_state()
+                self.assertTrue(result)
+                mock_reset.assert_not_called()
+
+    def test_prepare_darken_resets_on_real_reload(self):
+        """_prepare_darken_image_state MUST call _reset_darken_on_navigation
+        when load_image_for_editing returns True (real reload)."""
+        self.controller.image_editor.current_filepath = None
+        self.controller.image_editor.float_image = None
+
+        with patch.object(
+            self.controller, "load_image_for_editing", return_value=True
+        ):
+            with patch.object(self.controller, "_reset_darken_on_navigation") as mock_reset:
+                result = self.controller._prepare_darken_image_state()
+                self.assertTrue(result)
+                mock_reset.assert_called_once()
+
+    def test_prepare_darken_aborts_on_failure(self):
+        """_prepare_darken_image_state must return False when load fails."""
+        self.controller.image_editor.current_filepath = None
+        self.controller.image_editor.float_image = None
+
+        with patch.object(
+            self.controller, "load_image_for_editing", return_value=False
+        ):
+            result = self.controller._prepare_darken_image_state()
+            self.assertFalse(result)
 
 
 if __name__ == "__main__":

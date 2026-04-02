@@ -5875,11 +5875,19 @@ class AppController(QObject):
     def develop_raw_for_current_image(self):
         self.enable_raw_editing()
 
-    @Slot()
+    # Return sentinels for load_image_for_editing():
+    #   True  — a real reload was performed (new file or changed mtime)
+    #   _REUSED — the existing editor session was kept (truthy, but ``is True`` is False)
+    #   False — load failed or was aborted
+    _REUSED = 2  # truthy int so QML @Slot(result=bool) coerces to true
+
+    @Slot(result=bool)
     def load_image_for_editing(self):
-        """
-        Loads the currently viewed image into the editor using active path logic.
-        This provides a centralized entry point for loading the editor correctly.
+        """Load the currently viewed image into the editor.
+
+        Returns True on real reload, _REUSED when the existing session
+        was kept, or False on failure.  The @Slot annotation coerces
+        _REUSED to true for QML callers (none of which inspect the value).
         """
         try:
             if self.view_override_path:
@@ -5906,8 +5914,8 @@ class AppController(QObject):
                 )
                 # Ensure the background renderer is current and notify UI to refresh
                 # Also synchronize sliders/crop state to the backend session.
-                self._sync_editor_state_to_ui()
-                return True
+                self._sync_editor_state_from_session()
+                return self._REUSED
 
             # Fetch cached preview if available for faster initial display
             cached_preview = self.get_decoded_image(self.current_index)
@@ -5943,9 +5951,9 @@ class AppController(QObject):
                 # For now, simpler to emit a signal that UIState listens to,
                 # OR just manually update UIState here if we have reference.
                 if self.ui_state:
-                    self._sync_editor_state_to_ui()
+                    self._sync_editor_state_from_session()
 
-                return True
+                return True  # Real reload performed
 
         except Exception as e:
             log.exception("Failed to load image for editing: %s", e)
@@ -5959,18 +5967,23 @@ class AppController(QObject):
             self.ui_state.isEditorOpen = False
         return False
 
-    def _sync_editor_state_to_ui(self):
-        """Helper to push editor state (initial edits) to UIState."""
-        initial_edits = self.image_editor._initial_edits()
-        for key, value in initial_edits.items():
+    def _sync_editor_state_from_session(self):
+        """Helper to push current editor session state (edits, crop) to UIState."""
+        edits = self.image_editor.current_edits
+        for key, value in edits.items():
             if hasattr(self.ui_state, key):
                 setattr(self.ui_state, key, value)
 
         # Reset visual components
         if hasattr(self.ui_state, "aspectRatioNames"):
             self.ui_state.aspectRatioNames = [r["name"] for r in ASPECT_RATIOS]
-            self.ui_state.currentAspectRatioIndex = 0
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            # Pull crop box specifically; use default if None
+            crop_box = edits.get("crop_box")
+            if crop_box:
+                self.ui_state.currentCropBox = crop_box
+            else:
+                self.ui_state.currentAspectRatioIndex = 0
+                self.ui_state.currentCropBox = (0, 0, 1000, 1000)
 
         # Kick off background render
         self._kick_preview_worker()
@@ -6099,19 +6112,28 @@ class AppController(QObject):
         )
         if not needs_load:
             try:
-                active = str(
+                active = (
                     self.view_override_path
                     if self.view_override_path
                     else self.get_active_edit_path(self.current_index)
                 )
-                if str(self.image_editor.current_filepath) != active:
+                current_p = self.image_editor.current_filepath
+                if current_p and active:
+                    match = Path(current_p).resolve() == Path(active).resolve()
+                    if not match:
+                        needs_load = True
+                else:
                     needs_load = True
-            except (IndexError, TypeError):
+            except (IndexError, TypeError, OSError, ValueError):
                 needs_load = True
+
         if needs_load:
-            if not self.load_image_for_editing():
+            load_result = self.load_image_for_editing()
+            if load_result is False:
                 return False  # load failed — abort rather than darken stale data
-            self._reset_darken_on_navigation()
+            # Only reset darken on a real reload, not when reusing the session
+            if load_result is True:
+                self._reset_darken_on_navigation()
         return True
 
     @Slot()

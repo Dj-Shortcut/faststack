@@ -170,8 +170,13 @@ Window {
                 value: uiState ? uiState.darkenExpandContract * 100 : 0
                 tooltip: "Grows or shrinks the mask boundary.\nPositive values expand the darkened area outward,\nnegative values contract it inward.\nUse to fine-tune where darkening starts and stops."
             }
-            // Auto From Edges — plumbed but not yet wired into resolve_mask(); hidden until implemented
-            // DarkenSlider { label: "Auto From Edges"; paramKey: "auto_from_edges"; value: uiState ? uiState.darkenAutoEdges * 100 : 0; minVal: 0 }
+            DarkenSlider {
+                label: "Auto From Edges"
+                paramKey: "auto_from_edges"
+                value: uiState ? uiState.darkenAutoEdges * 100 : 0
+                minVal: 0
+                tooltip: "Uses edge detection to guide automatic masking.\nSmooth areas between strong edges get higher\nbackground confidence, helping the mask follow\nsubject outlines. Complements Edge Protection:\nthat slider stops the mask at edges, this one\nactively uses edges to shape the mask."
+            }
 
             // --- Separator ---
             Rectangle {

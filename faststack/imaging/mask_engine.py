@@ -452,6 +452,17 @@ def resolve_mask(
                 auto_prior * 0.6 + np_arr * 0.4 * settings.neutrality_sensitivity
             )
 
+        # Edge-aware prior: areas between strong edges are likely uniform
+        # background, so use inverted edge magnitude as a positive signal.
+        if settings.auto_from_edges > 0.01:
+            edges = _edge_magnitude(image_arr)
+            # Blur the edge map so the "between edges" regions fill in
+            edge_blurred = _gaussian_blur(edges, sigma=min(shape) * 0.02)
+            # Invert: low-edge (smooth) regions get high confidence
+            edge_prior = 1.0 - edge_blurred
+            w = settings.auto_from_edges
+            auto_prior = auto_prior * (1.0 - w) + edge_prior * w
+
     # --- Combine signals ---
     # Background confidence = user strokes + auto prior where user hasn't painted
     raw_bg = np.clip(add_map + auto_prior * (1.0 - add_map), 0.0, 1.0)
