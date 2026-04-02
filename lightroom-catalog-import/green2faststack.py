@@ -59,6 +59,7 @@ DEFAULT_UPLOADED_DATE = "1970-01-01"
 @dataclass(frozen=True)
 class GreenPathRecord:
     """A single green-labeled image path extracted from the Lightroom catalog."""
+
     image_id: int
     full_path: str
     stem_key: str
@@ -236,7 +237,9 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         raise SystemExit(1)
 
     if export_selected and json_selected:
-        parser.error("Choose either export mode (-i/-o) or JSON mode (--paths/--json), not both.")
+        parser.error(
+            "Choose either export mode (-i/-o) or JSON mode (--paths/--json), not both."
+        )
 
     if export_selected:
         if not args.input or not args.output:
@@ -256,7 +259,9 @@ def connect_ro_sqlite(path: str) -> sqlite3.Connection:
     return conn
 
 
-def normalize_catalog_path(root: str, subdir: str, base_name: str, extension: str) -> str:
+def normalize_catalog_path(
+    root: str, subdir: str, base_name: str, extension: str
+) -> str:
     """Assemble a full path from the Lightroom join components.
 
     The components come from:
@@ -359,7 +364,7 @@ def check_file_exists(path_str: str, logger: Logger) -> bool:
     wsl_match = _WSL_MOUNT_RE.match(normalized)
     if wsl_match and (platform.system() == "Windows" or os.name == "nt"):
         drive_letter = wsl_match.group(1).upper()
-        rest = normalized[len(wsl_match.group(0)) - 1:]  # keep leading "/"
+        rest = normalized[len(wsl_match.group(0)) - 1 :]  # keep leading "/"
         win_path = f"{drive_letter}:{rest}"
         if os.path.exists(win_path):
             logger.debug(f"Exists (Windows drive): {win_path}")
@@ -372,6 +377,7 @@ def check_file_exists(path_str: str, logger: Logger) -> bool:
 # ---------------------------------------------------------------------------
 # Export mode
 # ---------------------------------------------------------------------------
+
 
 def export_green_paths(catalog_path: str, output_path: str, logger: Logger) -> int:
     """Export all green-labeled image paths from a Lightroom catalog to a text file.
@@ -423,7 +429,9 @@ def export_green_paths(catalog_path: str, output_path: str, logger: Logger) -> i
                 stem_key=stem_key_from_path(full_path),
             )
             output_records.append(record)
-            logger.debug(f"Export row image_id={record.image_id} path={record.full_path}")
+            logger.debug(
+                f"Export row image_id={record.image_id} path={record.full_path}"
+            )
 
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -442,9 +450,11 @@ def export_green_paths(catalog_path: str, output_path: str, logger: Logger) -> i
 # JSON mode
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class JsonUpdateSummary:
     """Tracks counts and outcomes for a JSON update operation."""
+
     paths_read: int = 0
     unique_stems_in_paths: int = 0
     existing_files: int = 0
@@ -541,13 +551,15 @@ def human_summary(summary: JsonUpdateSummary, json_path: str) -> str:
     ]
     if summary.existence_check_note:
         lines.append(f"  Note: {summary.existence_check_note}")
-    lines.extend([
-        f"  FastStack entries present in JSON: {summary.json_entries_total}",
-        f"  Matching FastStack entries found: {summary.matching_entries_found}",
-        f"  Newly marked uploaded: {summary.newly_marked_uploaded}",
-        f"  Already uploaded: {summary.already_uploaded}",
-        f"  Exported stems not present in this JSON: {summary.stems_not_present_in_json}",
-    ])
+    lines.extend(
+        [
+            f"  FastStack entries present in JSON: {summary.json_entries_total}",
+            f"  Matching FastStack entries found: {summary.matching_entries_found}",
+            f"  Newly marked uploaded: {summary.newly_marked_uploaded}",
+            f"  Already uploaded: {summary.already_uploaded}",
+            f"  Exported stems not present in this JSON: {summary.stems_not_present_in_json}",
+        ]
+    )
     if summary.backup_path:
         lines.append(f"  Backup created: {summary.backup_path}")
     if summary.json_written:
@@ -624,7 +636,9 @@ def update_faststack_json(
         summary.matching_entries_found += 1
         entry = entries[stem]
         if not isinstance(entry, dict):
-            logger.warn(f"Skipping malformed FastStack entry for stem {stem!r}: not an object")
+            logger.warn(
+                f"Skipping malformed FastStack entry for stem {stem!r}: not an object"
+            )
             continue
 
         ensure_faststack_entry_shape(entry)
@@ -661,6 +675,7 @@ def update_faststack_json(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -683,7 +698,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         logger.info("")
         logger.info(human_summary(summary, args.json))
         return 0
-    except (FileNotFoundError, ValueError, sqlite3.DatabaseError, json.JSONDecodeError) as exc:
+    except (
+        FileNotFoundError,
+        ValueError,
+        sqlite3.DatabaseError,
+        json.JSONDecodeError,
+    ) as exc:
         logger.error(str(exc))
         return 2
 

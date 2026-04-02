@@ -105,7 +105,6 @@ class TestEditorReopening(unittest.TestCase):
             self.controller.ui_state.isEditorOpen, "Dialog should close on error"
         )
 
-
     def test_reuse_returns_REUSED_not_True(self):
         """The reuse path must return _REUSED (truthy, but ``is True`` is False)
         so _prepare_darken_image_state can distinguish reuse from reload."""
@@ -136,9 +135,13 @@ class TestEditorReopening(unittest.TestCase):
         self.controller.image_editor.current_edits = {}
 
         with patch.object(
-            self.controller, "load_image_for_editing", return_value=AppController._REUSED
+            self.controller,
+            "load_image_for_editing",
+            return_value=AppController._REUSED,
         ):
-            with patch.object(self.controller, "_reset_darken_on_navigation") as mock_reset:
+            with patch.object(
+                self.controller, "_reset_darken_on_navigation"
+            ) as mock_reset:
                 result = self.controller._prepare_darken_image_state()
                 self.assertTrue(result)
                 mock_reset.assert_not_called()
@@ -149,10 +152,10 @@ class TestEditorReopening(unittest.TestCase):
         self.controller.image_editor.current_filepath = None
         self.controller.image_editor.float_image = None
 
-        with patch.object(
-            self.controller, "load_image_for_editing", return_value=True
-        ):
-            with patch.object(self.controller, "_reset_darken_on_navigation") as mock_reset:
+        with patch.object(self.controller, "load_image_for_editing", return_value=True):
+            with patch.object(
+                self.controller, "_reset_darken_on_navigation"
+            ) as mock_reset:
                 result = self.controller._prepare_darken_image_state()
                 self.assertTrue(result)
                 mock_reset.assert_called_once()

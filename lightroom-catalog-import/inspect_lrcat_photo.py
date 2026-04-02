@@ -69,13 +69,15 @@ def connect_ro(path: str) -> sqlite3.Connection:
 
 def get_tables(conn: sqlite3.Connection) -> list[str]:
     """Return all user table names in the database, sorted."""
-    rows = conn.execute("""
+    rows = conn.execute(
+        """
         SELECT name
         FROM sqlite_master
         WHERE type='table'
           AND name NOT LIKE 'sqlite_%'
         ORDER BY name
-    """).fetchall()
+    """
+    ).fetchall()
     return [row["name"] for row in rows]
 
 
@@ -98,8 +100,13 @@ def print_row(title: str, row: sqlite3.Row | None) -> None:
 # Column names (lowercased) that might be foreign keys pointing to an image.
 # These were observed in Lightroom Classic catalogs; other versions may differ.
 CANDIDATE_IMAGE_COLUMN_NAMES = {
-    "image", "imageid", "id_image", "image_id",
-    "rootfile", "rootfileid", "id_rootfile",
+    "image",
+    "imageid",
+    "id_image",
+    "image_id",
+    "rootfile",
+    "rootfileid",
+    "id_rootfile",
 }
 
 
@@ -119,7 +126,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            '  %(prog)s catalog.lrcat 12345\n'
+            "  %(prog)s catalog.lrcat 12345\n"
             '  %(prog)s "Alan Rockefeller-v13-3.lrcat" 99\n'
             "\n"
             "The catalog is opened read-only; no changes are made.\n"
@@ -173,8 +180,7 @@ def main() -> int:
         for table in tables:
             cols = get_columns(conn, table)
             matching_cols = [
-                col for col in cols
-                if col.lower() in CANDIDATE_IMAGE_COLUMN_NAMES
+                col for col in cols if col.lower() in CANDIDATE_IMAGE_COLUMN_NAMES
             ]
             if matching_cols:
                 candidates.append((table, matching_cols))
@@ -205,8 +211,19 @@ def main() -> int:
         for table in tables:
             cols = get_columns(conn, table)
             interesting = [
-                c for c in cols
-                if any(x in c.lower() for x in ["path", "filename", "basename", "folder", "volume", "root"])
+                c
+                for c in cols
+                if any(
+                    x in c.lower()
+                    for x in [
+                        "path",
+                        "filename",
+                        "basename",
+                        "folder",
+                        "volume",
+                        "root",
+                    ]
+                )
             ]
             if interesting:
                 print(f"{table}: {', '.join(interesting)}")

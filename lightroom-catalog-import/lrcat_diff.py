@@ -100,7 +100,9 @@ def get_columns(conn: sqlite3.Connection, table: str) -> list[sqlite3.Row]:
 def get_pk_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     """Return primary key column names for the given table, in PK order."""
     cols = get_columns(conn, table)
-    pk_cols = [row["name"] for row in sorted(cols, key=lambda r: r["pk"]) if row["pk"] > 0]
+    pk_cols = [
+        row["name"] for row in sorted(cols, key=lambda r: r["pk"]) if row["pk"] > 0
+    ]
     return pk_cols
 
 
@@ -173,8 +175,12 @@ def summarize_table_counts(
     out = []
     for table in sorted(tables):
         try:
-            b = conn_before.execute(f"SELECT COUNT(*) FROM {quote_ident(table)}").fetchone()[0]
-            a = conn_after.execute(f"SELECT COUNT(*) FROM {quote_ident(table)}").fetchone()[0]
+            b = conn_before.execute(
+                f"SELECT COUNT(*) FROM {quote_ident(table)}"
+            ).fetchone()[0]
+            a = conn_after.execute(
+                f"SELECT COUNT(*) FROM {quote_ident(table)}"
+            ).fetchone()[0]
             if b != a:
                 out.append((table, b, a))
         except sqlite3.DatabaseError as exc:
@@ -427,7 +433,9 @@ def main() -> int:
         if not any_output:
             print("No matching row-level diffs found.")
             if args.match:
-                print("Try rerunning without --match, or with a different filename/path fragment.")
+                print(
+                    "Try rerunning without --match, or with a different filename/path fragment."
+                )
 
         return 0
     finally:
