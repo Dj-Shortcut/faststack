@@ -1638,8 +1638,8 @@ class AppController(QObject):
         # Compute restore-override flag
         # We are restoring if we have an override path AND kind is NOT developed (i.e. it's a backup)
         started_from_restore_override = (
-            bool(self.view_override_path) and 
-            getattr(self, "view_override_kind", None) != "developed"
+            bool(self.view_override_path)
+            and getattr(self, "view_override_kind", None) != "developed"
         )
 
         # Build the base context that every result dict carries
