@@ -7077,7 +7077,9 @@ class AppController(QObject):
 
         # Save via ImageEditor (passing the resolved target for variant-save policy)
         try:
-            save_result = self.image_editor.save_image(save_target_path=save_target_path)
+            save_result = self.image_editor.save_image(
+                save_target_path=save_target_path
+            )
         except RuntimeError as e:
             log.warning("execute_crop: Save failed: %s", e)
             self.update_status_message(f"Failed to save cropped image: {e}")

@@ -171,7 +171,6 @@ class TestEditorReopening(unittest.TestCase):
             result = self.controller._prepare_darken_image_state()
             self.assertFalse(result)
 
-
     def test_save_closes_ui_immediately_but_keeps_memory(self):
         # 1. Setup
         target = Path("test.jpg")
