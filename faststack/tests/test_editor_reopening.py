@@ -219,7 +219,6 @@ class TestEditorReopening(unittest.TestCase):
         # VERIFY: Clear IS called because no save active for this file
         self.controller.image_editor.clear.assert_called_once()
 
-
     def test_reuse_blocked_when_float_image_is_none(self):
         """Matching path/mtime with float_image=None must force a real reload,
         not silently reuse a preview-only (float-less) session."""
