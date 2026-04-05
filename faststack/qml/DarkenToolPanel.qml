@@ -278,6 +278,7 @@ Window {
                         target: overlayCheck
                         property: "checked"
                         value: uiState ? uiState.darkenOverlayVisible : true
+                        when: !overlayCheck.pressed
                     }
                     
                     onToggled: {
@@ -319,7 +320,7 @@ Window {
                         color: Qt.rgba(modelData.r / 255, modelData.g / 255, modelData.b / 255, 1.0)
                         border.color: activeFocus ? "white" : "transparent"
                         border.width: 2
-                        focus: true
+                        activeFocusOnTab: true
                         
                         Accessible.name: modelData.name
                         Accessible.role: Accessible.Button

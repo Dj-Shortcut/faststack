@@ -427,6 +427,11 @@ def resolve_mask(
     mode = settings.mode
     auto_prior = np.zeros(shape, dtype=np.float32)
 
+    # Pre-compute edges if needed by either auto priors or final edge protection.
+    edges = None
+    if (mode != "paint_only" and settings.auto_from_edges > 0.01) or settings.edge_protection > 0.01:
+        edges = _edge_magnitude(image_arr)
+
     if mode != "paint_only":
         # Dark prior
         dp = _dark_prior(image_arr, settings.dark_range)
@@ -453,7 +458,7 @@ def resolve_mask(
         # Edge-aware prior: areas between strong edges are likely uniform
         # background, so use inverted edge magnitude as a positive signal.
         if settings.auto_from_edges > 0.01:
-            edges = _edge_magnitude(image_arr)
+            # edges is already computed above
             # Blur the edge map so the "between edges" regions fill in
             edge_blurred = _gaussian_blur(edges, sigma=min(shape) * 0.02)
             # Invert: low-edge (smooth) regions get high confidence
@@ -474,7 +479,7 @@ def resolve_mask(
 
     # --- Edge stopping ---
     if settings.edge_protection > 0.01:
-        edges = _edge_magnitude(image_arr)
+        # edges is already computed above
         # Reduce mask confidence at strong edges
         edge_brake = 1.0 - edges * settings.edge_protection
         raw_bg = raw_bg * np.clip(edge_brake, 0.0, 1.0)

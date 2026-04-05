@@ -169,6 +169,7 @@ def main() -> int:
             return 1
 
         image_id = args.image_id
+        root_file_id = row["rootFile"]
         tables = get_tables(conn)
 
         # Step 2: Scan all tables for columns that might reference this image.
@@ -191,8 +192,11 @@ def main() -> int:
         found_any = False
         for table, cols in candidates:
             for col in cols:
+                # If column name specifically suggests it's a "rootFile" foreign key,
+                # use the library-file ID instead of the image ID.
+                probe_id = root_file_id if "rootfile" in col.lower() else image_id
                 sql = f"SELECT * FROM {quote_ident(table)} WHERE {quote_ident(col)} = ? LIMIT 5"
-                rows = conn.execute(sql, (image_id,)).fetchall()
+                rows = conn.execute(sql, (probe_id,)).fetchall()
                 if rows:
                     found_any = True
                     print(f"\n--- {table}.{col} ---")

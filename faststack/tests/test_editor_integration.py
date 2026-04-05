@@ -29,6 +29,9 @@ class TestEditorIntegration(unittest.TestCase):
             patch("faststack.app.ThumbnailProvider"),
         ):
             self.controller = AppController(Path("."), self.mock_engine)
+            # Stub out refresh_image_list so later calls during the test
+            # do not trigger disk I/O or overwrite mock state.
+            self.controller.refresh_image_list = MagicMock()
 
         # Mock the internal image_editor to verify delegation
         self.controller.image_editor = MagicMock()

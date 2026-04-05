@@ -154,15 +154,18 @@ def main() -> int:
         # absolutePath and pathFromRoot typically include trailing slashes.
         abs_root = row["absolutePath"] or ""
         path_from_root = row["pathFromRoot"] or ""
-        base_name = row["baseName"] or row["originalFilename"] or ""
+        # AgLibraryFile.baseName is the filename without extension.
+        # AgLibraryFile.originalFilename is a fallback that already includes the extension.
+        base_name = row["baseName"]
         extension = row["extension"] or ""
 
-        # Append the extension if present.
-        # AgLibraryFile.extension is stored without a leading dot.
-        if extension:
-            filename = f"{base_name}.{extension}"
+        if base_name:
+            if extension:
+                filename = f"{base_name}.{extension}"
+            else:
+                filename = base_name
         else:
-            filename = base_name
+            filename = row["originalFilename"] or ""
 
         full_path = os.path.normpath(abs_root + path_from_root + filename)
         print(f"\nfull_path_guess = {full_path!r}")

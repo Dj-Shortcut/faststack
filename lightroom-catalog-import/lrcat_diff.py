@@ -221,8 +221,15 @@ def compare_table(
     before_keys = set(before_rows)
     after_keys = set(after_rows)
 
-    inserted_keys = sorted(after_keys - before_keys)[:max_rows]
-    deleted_keys = sorted(before_keys - after_keys)[:max_rows]
+    inserted_keys = sorted(after_keys - before_keys)
+    if match:
+        inserted_keys = [k for k in inserted_keys if row_matches(after_rows[k], match)]
+    inserted_keys = inserted_keys[:max_rows]
+
+    deleted_keys = sorted(before_keys - after_keys)
+    if match:
+        deleted_keys = [k for k in deleted_keys if row_matches(before_rows[k], match)]
+    deleted_keys = deleted_keys[:max_rows]
     common_keys = before_keys & after_keys
 
     changed = []
@@ -245,14 +252,12 @@ def compare_table(
     inserted = []
     for key in inserted_keys:
         row = after_rows[key]
-        if row_matches(row, match):
-            inserted.append({"pk": dict(zip(pk_cols, key, strict=True)), "row": row})
+        inserted.append({"pk": dict(zip(pk_cols, key, strict=True)), "row": row})
 
     deleted = []
     for key in deleted_keys:
         row = before_rows[key]
-        if row_matches(row, match):
-            deleted.append({"pk": dict(zip(pk_cols, key, strict=True)), "row": row})
+        deleted.append({"pk": dict(zip(pk_cols, key, strict=True)), "row": row})
 
     return {
         "table": table,

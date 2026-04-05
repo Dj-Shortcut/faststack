@@ -1690,8 +1690,37 @@ class AppController(QObject):
                 result = {"success": False, "error": str(e), **_ctx}
             self._saveFinished.emit(result)
 
-        future = self._save_executor.submit(do_save)
-        future.add_done_callback(on_done)
+        try:
+            future = self._save_executor.submit(do_save)
+        except Exception as e:
+            log.error("Failed to submit save to background executor: %s", e)
+            # Rollback save bookkeeping: submission failed, save never started.
+            if effective_target:
+                self._saves_in_flight.discard(effective_target)
+            if save_image_key:
+                self._saving_keys.discard(save_image_key)
+            self.ui_state.isSaving = False
+            self.update_status_message(f"Failed to start background save: {e}")
+            # Do NOT close editor if submission failed, as the save never started.
+            # Return early to avoid the isEditorOpen = False block below.
+            return
+        try:
+            future.add_done_callback(on_done)
+        except Exception as e:
+            # Submission succeeded, so the save IS running — do not roll back
+            # _saves_in_flight / _saving_keys.  Instead, spin up a minimal
+            # daemon thread to await the future and deliver the result via
+            # on_done(), so _saveFinished is still emitted and cleanup runs.
+            log.error(
+                "Failed to register save callback; using fallback watcher thread: %s", e
+            )
+
+            def _fallback_watcher(fut=future):
+                concurrent.futures.wait([fut])
+                on_done(fut)
+
+            t = threading.Thread(target=_fallback_watcher, daemon=True, name="SaveCallbackFallback")
+            t.start()
 
         # Close editor UI immediately to allow the user to continue working.
         # The background worker uses the frozen export_snapshot, so it doesn't
