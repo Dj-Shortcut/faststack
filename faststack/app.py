@@ -1630,6 +1630,9 @@ class AppController(QObject):
             save_image_key,
             getattr(self, "view_override_kind", None),
             self.image_editor.session_id if self.image_editor else None,
+            # Include edit revision so _on_save_finished does not clear state
+            # if the user continued editing after save was submitted.
+            getattr(self.image_editor, "_edits_rev", None),
         )
 
         if save_image_key and save_image_key in self._saving_keys:
@@ -1778,6 +1781,7 @@ class AppController(QObject):
                 current_image_key,
                 getattr(self, "view_override_kind", None),
                 self.image_editor.session_id if self.image_editor else None,
+                getattr(self.image_editor, "_edits_rev", None),
             )
 
             still_on_same_image = (
@@ -5957,6 +5961,13 @@ class AppController(QObject):
                     pass
 
             if match:
+                # Also require an intact float buffer — a preview_only load leaves
+                # current_filepath/mtime set but float_image=None, which breaks
+                # crop, darken, and full-editor flows that need the master buffer.
+                if getattr(self.image_editor, "float_image", None) is None:
+                    match = False
+
+            if match:
                 log.debug(
                     "load_image_for_editing: Reusing existing session for %s", filepath
                 )
@@ -6834,10 +6845,31 @@ class AppController(QObject):
     @Slot()
     def toggle_crop_mode(self):
         """Toggle crop mode on/off."""
-        self.ui_state.isCropping = not self.ui_state.isCropping
-
         if self.ui_state.isCropping:
-            # Entering crop mode: reset to full image defaults
+            # Exiting crop mode: cleanup
+            self.ui_state.isCropping = False
+            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            # Ensure preview rotation is cleared when exiting
+            self.image_editor.set_edit_param("straighten_angle", 0.0)
+            self.update_status_message("Crop cancelled")
+        else:
+            # Entering crop mode requires a loaded image with a valid float buffer.
+            if not self.image_files or not (
+                0 <= self.current_index < len(self.image_files)
+            ):
+                self.update_status_message("No image to crop")
+                return
+
+            # Block if a save is already in progress for this image.
+            current_path = self.image_files[self.current_index].path
+            if self._block_if_saving(current_path):
+                return
+
+            if not self.load_image_for_editing():
+                return
+
+            self.ui_state.isCropping = True
+            # Reset to full image defaults
             self.ui_state.currentCropBox = (0, 0, 1000, 1000)
             self.ui_state.aspectRatioNames = [r["name"] for r in ASPECT_RATIOS]
             self.ui_state.currentAspectRatioIndex = 0
@@ -6845,12 +6877,6 @@ class AppController(QObject):
             # Reset rotation to 0 when starting fresh crop mode
             self.image_editor.set_edit_param("straighten_angle", 0.0)
             self.update_status_message("Crop mode: Drag to select area, Enter to crop")
-        else:
-            # Exiting crop mode: cleanup
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-            # Ensure preview rotation is cleared when exiting
-            self.image_editor.set_edit_param("straighten_angle", 0.0)
-            self.update_status_message("Crop cancelled")
 
     @Slot()
     def stack_source_raws(self):
