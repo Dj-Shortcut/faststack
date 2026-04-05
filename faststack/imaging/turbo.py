@@ -75,7 +75,9 @@ def _candidate_library_paths() -> list[Optional[str]]:
 def create_turbojpeg() -> Tuple[Optional["TurboJPEG"], bool]:
     """Create a TurboJPEG decoder if possible."""
     if TurboJPEG is None:
-        log.warning("PyTurboJPEG not found. Falling back to Pillow for JPEG decoding.")
+        log.warning(
+            "PyTurboJPEG not found. Falling back to Pillow for JPEG decoding. Installing PyTurboJPEG will improve image navigation speed."
+        )
         return None, False
 
     failures: list[str] = []

@@ -1,6 +1,6 @@
 # FastStack
 
-# Version 1.6.1 - March 13, 2026
+# Version 1.6.2 - March 28, 2026
 # By Alan Rockefeller
 
 Ultra-fast, caching JPG viewer designed for culling and selecting RAW or JPG files for focus stacking and website upload.
@@ -16,7 +16,9 @@ This tool is optimized for speed, using `libjpeg-turbo` for decoding, aggressive
 - **Helicon Focus Integration:** Launch Helicon Focus with your selected RAW files with a single keypress (`Enter`).
 - **Instant Navigation:** Sub-10ms next/previous image switching, high performance decoding via `PyTurboJPEG`.
 - **Image Editor:** Built-in editor with exposure, contrast, white balance, sharpness, and more (E key)
-- **Quick Auto White Balance:** Press A to apply auto white balance and save automatically with undo support (Ctrl+Z).   For better white balance, load the raw into Photoshop with the P key.- **Photoshop Integration:** Edit current image in Photoshop (P key) - always uses RAW files when available.
+- **Background Darkening:** Mask-based background darkening tool (K key) with smart edge detection, subject protection, and multiple modes. Paint rough background hints and the tool refines them into natural-looking dark backgrounds.
+- **Quick Auto White Balance:** Press A to apply auto white balance and save automatically with undo support (Ctrl+Z).   For better white balance, load the raw into Photoshop with the P key.
+- **Photoshop / Gimp Integration:** Edit current image in Photoshop or Gimp (P key) - always uses RAW files when available.
 - **Clipboard Support:** Copy image path to clipboard (Ctrl+C)
 - **Image Filtering:** Filter images by filename
 - **Drag & Drop:** Drag images to external applications.   Press { and } to batch files to drag & drop multiple images.
@@ -85,7 +87,7 @@ Example:
 
 ```cmd
 set FASTSTACK_TURBOJPEG_LIB=C:\path\to\turbojpeg.dll
-venv\Scripts\python.exe -m faststack.app "C:\path\to\photos"
+faststack "C:\path\to\photos"
 ```
 
 ### Troubleshooting on Windows
@@ -105,15 +107,16 @@ Fastest fixes:
 
 ```cmd
 set FASTSTACK_TURBOJPEG_LIB=C:\path\to\turbojpeg.dll
-venv\Scripts\python.exe -m faststack.app "C:\path\to\photos"
+faststack "C:\path\to\photos"
 ```
 
 If you do nothing, FastStack will still run, but JPEG decoding and thumbnail generation will use Pillow instead of `libjpeg-turbo`, which is slower.
 
 ## Keyboard Shortcuts
 
-- `J` / `Right Arrow`: Next Image
-- `K` / `Left Arrow`: Previous Image
+- `Right Arrow`: Next Image
+- `Left Arrow`: Previous Image
+- `K`: Mask-based background darkening (smart edge detection, subject protection, multiple modes)
 - `G`: Jump to Image Number
 - `I`: Show EXIF Data
 - `F11`: Toggle Fullscreen (Loupe View)
@@ -131,7 +134,7 @@ If you do nothing, FastStack will still run, but JPEG decoding and thumbnail gen
 - `Ctrl+E`: Toggle edited flag
 - `Ctrl+S`: Toggle stacked flag
 - `Enter`: Launch Helicon Focus with selected RAWs
-- `P`: Edit in Photoshop (uses RAW file if available)
+- `P`: Edit in Photoshop or Gimp (uses RAW file when available)
 - `O` (or Right-Click): Toggle crop mode (Enter to execute, Esc to cancel)
 - `Delete` / `Backspace`: Move image to recycle bin
 - `Ctrl+Z`: Undo last action (delete, auto white balance, or crop)

@@ -108,10 +108,6 @@ Item {
             panTransform.y = 0
         }
         function onAbsoluteZoomRequested(scale) {
-             if (uiState && uiState.debugMode) {
-                 console.log("QML: Absolute zoom requested: " + scale)
-             }
-             
              imageRotator.zoomScale = scale
              
              // If we need to switch to high-res, flag this scale as the target 
@@ -142,8 +138,8 @@ Item {
             // Size matches the AABB of the rotated image
             // W' = W*|cos| + H*|sin|
             // Geometry is now updated atomically via updateRotatorGeometry()
-            property real implicitWidth: 0
-            property real implicitHeight: 0
+            implicitWidth: 0
+            implicitHeight: 0
             property bool isUpdatingGeometry: false
             
             // Fix A: Atomic Zoom Scale
@@ -281,13 +277,30 @@ Item {
                 
                 rotation: mainMouseArea.cropRotation
                 
+                // Darken mask overlay - anchored to mainImage, rotates/scales with it
+                Image {
+                    id: darkenOverlay
+                    anchors.fill: parent
+                    z: 90
+                    visible: uiState && uiState.isDarkening && uiState.darkenOverlayVisible
+                    source: (uiState && uiState.isDarkening && uiState.darkenOverlayVisible)
+                            ? "image://provider/mask_overlay/" + uiState.darkenOverlayGeneration
+                            : ""
+                    fillMode: Image.Stretch
+                    cache: false
+                    opacity: 1.0  // Opacity is baked into the ARGB32 image
+                }
+
                 // Crop overlay - anchored to mainImage to rotate with it
                 Item {
                     id: cropOverlay
                     property var cropBox: uiState ? uiState.currentCropBox : [0, 0, 1000, 1000]
                     property bool hasActiveCrop: cropBox && cropBox.length === 4 && !(cropBox[0]===0 && cropBox[1]===0 && cropBox[2]===1000 && cropBox[3]===1000)
+                    // Show visual content only when there is an actual user-drawn crop or rotate mode.
+                    // The overlay Item itself stays alive (visible: isCropping) so updateCropRect() always fires.
+                    property bool showCropContent: hasActiveCrop || mainMouseArea.isRotating
                     
-                    visible: uiState && uiState.isCropping && (hasActiveCrop || mainMouseArea.isRotating)
+                    visible: uiState && uiState.isCropping
                     anchors.fill: parent // Fills mainImage
                     z: 100
                     
@@ -296,7 +309,7 @@ Item {
                     
                     Connections {
                         target: uiState
-                        function onCurrentCropBoxChanged() { if (cropOverlay.visible && mainImage.source) cropOverlay.updateCropRect() }
+                        function onCurrentCropBoxChanged() { if (mainImage.source) cropOverlay.updateCropRect() }
                     }
                     
                     Connections {
@@ -321,14 +334,15 @@ Item {
                         cropRect.height = localBottom - localTop
                     }
                     
-                    // Dimmer Rectangles
-                    Rectangle { x: 0; y: 0; width: parent.width; height: cropRect.y; color: "black"; opacity: 0.3 }
-                    Rectangle { x: 0; y: cropRect.y + cropRect.height; width: parent.width; height: parent.height - (cropRect.y + cropRect.height); color: "black"; opacity: 0.3 }
-                    Rectangle { x: 0; y: cropRect.y; width: cropRect.x; height: cropRect.height; color: "black"; opacity: 0.3 }
-                    Rectangle { x: cropRect.x + cropRect.width; y: cropRect.y; width: parent.width - (cropRect.x + cropRect.width); height: cropRect.height; color: "black"; opacity: 0.3 }
+                    // Dimmer Rectangles — only render when a real crop is active/being drawn
+                    Rectangle { visible: cropOverlay.showCropContent; x: 0; y: 0; width: parent.width; height: cropRect.y; color: "black"; opacity: 0.3 }
+                    Rectangle { visible: cropOverlay.showCropContent; x: 0; y: cropRect.y + cropRect.height; width: parent.width; height: parent.height - (cropRect.y + cropRect.height); color: "black"; opacity: 0.3 }
+                    Rectangle { visible: cropOverlay.showCropContent; x: 0; y: cropRect.y; width: cropRect.x; height: cropRect.height; color: "black"; opacity: 0.3 }
+                    Rectangle { visible: cropOverlay.showCropContent; x: cropRect.x + cropRect.width; y: cropRect.y; width: parent.width - (cropRect.x + cropRect.width); height: cropRect.height; color: "black"; opacity: 0.3 }
                     
                     Rectangle {
                         id: cropRect
+                        visible: cropOverlay.showCropContent
                         color: "transparent"
                         border.color: "white"
                         border.width: 3 / ((scaleTransform && scaleTransform.xScale) ? scaleTransform.xScale : 1.0)
@@ -383,13 +397,6 @@ Item {
 
                     // Force fit recompute so fitScale / zoom logic stabilizes immediately
                     imageRotator.recomputeFitScale(true)
-
-                    if (uiState && uiState.debugMode) {
-                        console.log("sourceSize changed:", mainImage.sourceSize.width, mainImage.sourceSize.height,
-                                    "dpr:", dpr,
-                                    "base:", imageRotator.baseW, imageRotator.baseH,
-                                    "zoomScale:", imageRotator.zoomScale)
-                    }
                 }
 
                 onSourceSizeChanged: { handleSourceSizeChange() }
@@ -518,11 +525,13 @@ Item {
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             hoverEnabled: true
             cursorShape: {
+                if (uiState && uiState.isDarkening) return Qt.CrossCursor
                 if (!uiState || !uiState.isCropping) return Qt.ArrowCursor
-                // Use a simple cross cursor for crop mode - edge detection would require tracking mouse position
-                // which is complex in QML. The edge dragging will still work based on click position.
                 return Qt.CrossCursor
             }
+
+        // Darken painting state
+        property bool isDarkenPainting: false
         
         // Drag-to-pan with drag-and-drop when dragging outside window
         property real lastX: 0
@@ -587,35 +596,45 @@ Item {
             startX = mouse.x
             startY = mouse.y
             isDraggingOutside = false
-            
-            if (mouse.button === Qt.RightButton) {
-                if (uiState && uiState.isCropping) {
-                    // Cancel crop mode if already active
-                    if (controller) controller.cancel_crop_mode()
-                } else if (uiState) {
-                    // Enter crop mode and start new crop
-                    uiState.isCropping = true
-                    
-                    // Set up new crop state
-                    cropDragMode = "new"
-                    cropStartX = mouse.x
-                    cropStartY = mouse.y
-                    
-                    // Initialize anchors
-                    var startCoords = mapToImageCoordinates(Qt.point(mouse.x, mouse.y))
-                    // Clamp to [0, 1] and convert to [0, 1000]
-                    var startNormX = Math.max(0, Math.min(1, startCoords.x)) * 1000
-                    var startNormY = Math.max(0, Math.min(1, startCoords.y)) * 1000
-                    
-                    cropBoxStartLeft = startNormX
-                    cropBoxStartRight = startNormX
-                    cropBoxStartTop = startNormY
-                    cropBoxStartBottom = startNormY
-                    
-                    isCropDragging = true
+
+            // Darken painting mode
+            if (uiState && uiState.isDarkening && !uiState.isCropping && controller) {
+                var imgCoords = mapToImageCoordinates(Qt.point(mouse.x, mouse.y))
+                var sx = Math.max(0, Math.min(1, imgCoords.x))
+                var sy = Math.max(0, Math.min(1, imgCoords.y))
+                if (imgCoords.x < 0 || imgCoords.x > 1 || imgCoords.y < 0 || imgCoords.y > 1) {
+                    return  // click outside image bounds
                 }
+                var strokeType = (mouse.button === Qt.RightButton) ? "protect" : "add"
+                controller.start_darken_stroke(sx, sy, strokeType)
+                isDarkenPainting = true
+                return
+            }
+
+            if (mouse.button === Qt.RightButton) {
+                if (!uiState.isCropping && controller) {
+                    controller.toggle_crop_mode() // Ensure mode is ON
+                }
+                
                 // Ensure loupeView has active focus so Escape key works
                 loupeView.forceActiveFocus()
+                
+                // Start a NEW crop rectangle immediately from the clicked point
+                // This fulfills the "right-click drag crops immediately" requirement
+                var coords = mapToImageCoordinates(Qt.point(mouse.x, mouse.y))
+                var mx = coords.x * 1000
+                var my = coords.y * 1000
+                
+                cropDragMode = "new"
+                cropStartX = mouse.x
+                cropStartY = mouse.y
+                cropBoxStartLeft = mx
+                cropBoxStartTop = my
+                cropBoxStartRight = mx
+                cropBoxStartBottom = my
+                
+                uiState.currentCropBox = [Math.round(mx), Math.round(my), Math.round(mx), Math.round(my)]
+                isCropDragging = true
                 return
             }
             
@@ -640,7 +659,6 @@ Item {
 
                 var inside = mx >= box[0] && mx <= box[2] && my >= box[1] && my <= box[3]
                 
-                // --- Hit test for rotation handle (robust: uses actual knob transform) ---
                 if (mainMouseArea.isRotating && cropOverlay.visible && rotateKnob.visible) {
                     // knob center in mainMouseArea coords (includes cropRect rotation)
                     // Note: rotateKnob is now inside mainImage -> cropOverlay -> cropRect
@@ -689,9 +707,17 @@ Item {
                 
                 // If crop box is full image, always start a new crop
                 else if (isFullImage) {
+                    // Start a new crop rectangle from the clicked point
                     cropDragMode = "new"
                     cropStartX = mouse.x
                     cropStartY = mouse.y
+                    
+                    cropBoxStartLeft = mx
+                    cropBoxStartTop = my
+                    cropBoxStartRight = mx
+                    cropBoxStartBottom = my
+                    
+                    uiState.currentCropBox = [Math.round(mx), Math.round(my), Math.round(mx), Math.round(my)]
                 } else if (inside) {
                     // Determine which edge/corner is being dragged (Image Space)
                     var nearLeft = Math.abs(mx - box[0]) < edgeThreshold
@@ -725,6 +751,8 @@ Item {
                     cropBoxStartRight = mx
                     cropBoxStartTop = my
                     cropBoxStartBottom = my
+                    
+                    uiState.currentCropBox = [Math.round(mx), Math.round(my), Math.round(mx), Math.round(my)]
                 }
                 isCropDragging = true
             }
@@ -732,10 +760,24 @@ Item {
         // Legacy getCropRect removed - using Image Space hit testing instead.
         // mapToImageCoordinates maps directly to mainImage
         function mapToImageCoordinates(screenPoint) {
-            var p = mainMouseArea.mapToItem(mainImage, screenPoint.x, screenPoint.y)
-            return {x: p.x / mainImage.width, y: p.y / mainImage.height}
+            if (!mainImage || mainImage.width <= 0) return {x:0, y:0}
+            
+            // Simplified: Use Qt-native mapping to handle scale, pan, and rotation
+            var p = mainImage.mapFromItem(mainMouseArea, screenPoint.x, screenPoint.y)
+            
+            // Normalize (0-1)
+            return { x: p.x / mainImage.width, y: p.y / mainImage.height }
         }
         onPositionChanged: function(mouse) {
+            // Darken painting drag — clamp to image bounds
+            if (isDarkenPainting && controller) {
+                var imgCoords = mapToImageCoordinates(Qt.point(mouse.x, mouse.y))
+                var cx = Math.max(0, Math.min(1, imgCoords.x))
+                var cy = Math.max(0, Math.min(1, imgCoords.y))
+                controller.continue_darken_stroke(cx, cy)
+                return
+            }
+
             if (uiState && uiState.isCropping && isCropDragging) {
                 if (cropDragMode === "new") {
                     // Update crop rectangle while dragging
@@ -840,23 +882,15 @@ Item {
         }
         
         onReleased: function(mouse) {
+            // Darken painting release
+            if (isDarkenPainting) {
+                isDarkenPainting = false
+                if (controller) controller.finish_darken_stroke()
+                return
+            }
+
             isDraggingOutside = false
             if (uiState && uiState.isCropping && isCropDragging) {
-                // Fix: Prevent accidental tiny crops with Right Click
-                if (mouse.button === Qt.RightButton && cropDragMode === "new") {
-                    var dx = Math.abs(mouse.x - cropStartX)
-                    var dy = Math.abs(mouse.y - cropStartY)
-                    var maxDim = Math.max(dx, dy)
-                    var minDim = Math.min(dx, dy)
-                    
-                    // "at least 50 pixels in both dimensions"
-                    if (maxDim < 50 || minDim < 50) {
-                        if (controller) controller.cancel_crop_mode()
-                        isCropDragging = false
-                        cropDragMode = "none"
-                        return
-                    }
-                }
 
                 isCropDragging = false
                 cropDragMode = "none"
@@ -930,7 +964,7 @@ Item {
         }
         
         function updateCropBox(x1, y1, x2, y2, applyAspectRatio = false) {
-            if (!uiState || !mainImage.source) return
+            if (!uiState || !mainImage.source || mainImage.width <= 0) return
 
             var imgCoord1 = mapToImageCoordinates(Qt.point(x1, y1))
             var imgCoord2 = mapToImageCoordinates(Qt.point(x2, y2))

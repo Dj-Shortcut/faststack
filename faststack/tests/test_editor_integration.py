@@ -29,6 +29,9 @@ class TestEditorIntegration(unittest.TestCase):
             patch("faststack.app.ThumbnailProvider"),
         ):
             self.controller = AppController(Path("."), self.mock_engine)
+            # Stub out refresh_image_list so later calls during the test
+            # do not trigger disk I/O or overwrite mock state.
+            self.controller.refresh_image_list = MagicMock()
 
         # Mock the internal image_editor to verify delegation
         self.controller.image_editor = MagicMock()
@@ -105,8 +108,20 @@ class TestEditorIntegration(unittest.TestCase):
 
         # 5. save_edited_image
         try:
+            snapshot_sentinel = {"mock": "snapshot"}
+            self.controller.image_editor.snapshot_for_export.return_value = (
+                snapshot_sentinel
+            )
+            self.controller.image_editor.save_from_snapshot.return_value = (
+                Path("test.jpg"),
+                None,
+            )
+            self.controller.ui_state.isSaving = False
             self.controller.save_edited_image()
-            self.controller.image_editor.save_image.assert_called_once()
+            self.controller.image_editor.snapshot_for_export.assert_called_once()
+            self.controller.image_editor.save_from_snapshot.assert_called_once_with(
+                snapshot_sentinel
+            )
         except AttributeError:
             self.fail("AppController is missing method 'save_edited_image'")
 

@@ -71,6 +71,8 @@ from faststack.imaging.cache import (
 from faststack.imaging.prefetch import Prefetcher, clear_icc_caches
 from faststack.ui.keystrokes import Keybinder
 from faststack.imaging.editor import ImageEditor, ASPECT_RATIOS
+from faststack.imaging.mask import DarkenSettings, MaskData, MaskStroke
+from faststack.imaging.mask_engine import inverse_transform
 from faststack.imaging.metadata import get_exif_data
 from faststack.thumbnail_view import (
     ThumbnailModel,
@@ -245,7 +247,10 @@ class AppController(QObject):
         )
 
         # Deferred-init state: set to safe defaults, populated later by their methods
-        self._save_initiated_path: Optional[str] = None
+        self._saves_in_flight: set = (
+            set()
+        )  # canonical target paths currently being saved
+        self._saving_keys: set = set()  # keys of images with active saves
         self._batch_indices_cache: set = set()
         self._batch_indices_cache_key: Optional[tuple] = None
         self.recycle_bin_dir: Optional[Path] = None
@@ -518,8 +523,21 @@ class AppController(QObject):
         else:
             # Cleanup large memory buffers when editor closes
             if self.image_editor:
-                log.debug("Editor closed, clearing editor memory buffers")
-                self.image_editor.clear()
+                # If a save is active for this session, preserve the memory
+                # so the user can re-open/retry if the background task fails.
+                current_key = (
+                    self._key(self.image_editor.current_filepath)
+                    if self.image_editor.current_filepath
+                    else None
+                )
+                if current_key and current_key in self._saving_keys:
+                    log.debug(
+                        "Editor closed but save in progress for %s; keeping session memory",
+                        current_key,
+                    )
+                else:
+                    log.debug("Editor closed, clearing editor memory buffers")
+                    self.image_editor.clear()
 
             # Also clear the cached preview rendering
             with self._preview_lock:
@@ -1561,14 +1579,23 @@ class AppController(QObject):
     def save_edited_image(self):
         """Saves the edited image in a background thread to keep UI responsive.
 
-        Sets isSaving=True, spawns background worker, returns immediately.
-        On completion, _on_save_finished is called via signal to perform cleanup.
+        All export-critical state is captured as an immutable snapshot on the
+        main thread BEFORE the editor is closed or the background worker starts.
+        The background worker operates only on the snapshot — it never reads
+        live editor state for export data.
         """
         if not self.image_editor.original_image:
             return
 
-        # Prevent double-saves
-        if self.ui_state.isSaving:
+        # Determine the actual target path for duplicate-save protection.
+        # Normalize to a canonical string so Path vs str never causes a miss.
+        save_target_path = self._get_save_target_path_for_current_view()
+        raw_target = save_target_path or self.image_editor.current_filepath
+        effective_target = str(Path(raw_target).resolve()) if raw_target else None
+        if effective_target and effective_target in self._saves_in_flight:
+            self.update_status_message(
+                "This image is still saving. Please wait a moment.", timeout=3000
+            )
             return
 
         # Capture state needed for save before we start
@@ -1577,46 +1604,133 @@ class AppController(QObject):
         if write_sidecar and 0 <= self.current_index < len(self.image_files):
             dev_path = self.image_files[self.current_index].developed_jpg_path
 
-        # Determine save_target_path for variant saves
-        save_target_path = self._get_save_target_path_for_current_view()
+        # --- CRITICAL: Snapshot export state BEFORE closing editor or submitting ---
+        # This runs on the main thread and captures an immutable copy of everything
+        # needed for the export: source image, edits, darken settings, mask data, EXIF.
+        try:
+            export_snapshot = self.image_editor.snapshot_for_export(
+                write_developed_jpg=write_sidecar,
+                developed_path=dev_path,
+                save_target_path=save_target_path,
+            )
+        except RuntimeError as e:
+            self.update_status_message(str(e))
+            return
 
-        # Store save token to prevent "surprise close" if user navigates away during save
-        self._save_initiated_path = self.image_editor.current_filepath
+        # Capture save context NOW — these are frozen into the result dict so
+        # _on_save_finished can make cleanup decisions without reading mutable
+        # controller/editor fields that may change during the background save.
+        editor_was_open = self.ui_state.isEditorOpen
+        save_image_key = (
+            self._key(self.image_files[self.current_index].path)
+            if 0 <= self.current_index < len(self.image_files)
+            else None
+        )
+        session_token = (
+            save_image_key,
+            getattr(self, "view_override_kind", None),
+            self.image_editor.session_id if self.image_editor else None,
+        )
 
-        # Show saving indicator
+        if save_image_key and save_image_key in self._saving_keys:
+            self.update_status_message(
+                "This image is still saving. Please wait a moment.", timeout=3000
+            )
+            return
+
+        # Track in-flight save by target path
+        if effective_target:
+            self._saves_in_flight.add(effective_target)
+        if save_image_key:
+            self._saving_keys.add(save_image_key)
+
+        # Show saving indicator (stays until save finishes — no auto-clear timeout)
         self.ui_state.isSaving = True
-        self.update_status_message("Saving...")
+        self.ui_state.statusMessage = "Saving..."
 
-        # Submit save work to background thread
+        # Compute restore-override flag
+        # We are restoring if we have an override path AND kind is NOT developed (i.e. it's a backup)
+        started_from_restore_override = (
+            bool(self.view_override_path)
+            and getattr(self, "view_override_kind", None) != "developed"
+        )
+
+        # Build the base context that every result dict carries
+        _ctx = {
+            "target": effective_target,
+            "editor_was_open": editor_was_open,
+            "save_image_key": save_image_key,
+            "session_token": session_token,
+            "started_from_restore_override": started_from_restore_override,
+        }
+
+        # Submit save work to background thread — operates only on the snapshot
         def do_save():
             """Worker function that runs in background thread."""
             try:
-                result = self.image_editor.save_image(
-                    write_developed_jpg=write_sidecar,
-                    developed_path=dev_path,
-                    save_target_path=save_target_path,
-                )
-                return {"success": True, "result": result}
+                result = self.image_editor.save_from_snapshot(export_snapshot)
+                return {"success": True, "result": result, **_ctx}
             except RuntimeError as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": str(e), **_ctx}
             except Exception as e:
                 log.exception("Unexpected error during save: %s", e)
-                return {"success": False, "error": "Failed to save image"}
+                return {
+                    "success": False,
+                    "error": "Failed to save image",
+                    **_ctx,
+                }
 
         def on_done(future):
             """Callback when background save completes - emits signal to hop to main thread."""
-            # Guard emit during shutdown to prevent signal to deleted QObject
             if self._shutting_down:
                 return
             try:
                 result = future.result()
             except Exception as e:
-                result = {"success": False, "error": str(e)}
-            # Emit signal to process result on main thread
+                result = {"success": False, "error": str(e), **_ctx}
             self._saveFinished.emit(result)
 
-        future = self._save_executor.submit(do_save)
-        future.add_done_callback(on_done)
+        try:
+            future = self._save_executor.submit(do_save)
+        except Exception as e:
+            log.error("Failed to submit save to background executor: %s", e)
+            # Rollback save bookkeeping: submission failed, save never started.
+            if effective_target:
+                self._saves_in_flight.discard(effective_target)
+            if save_image_key:
+                self._saving_keys.discard(save_image_key)
+            self.ui_state.isSaving = False
+            self.update_status_message(f"Failed to start background save: {e}")
+            # Do NOT close editor if submission failed, as the save never started.
+            # Return early to avoid the isEditorOpen = False block below.
+            return
+        try:
+            future.add_done_callback(on_done)
+        except Exception as e:
+            # Submission succeeded, so the save IS running — do not roll back
+            # _saves_in_flight / _saving_keys.  Instead, spin up a minimal
+            # daemon thread to await the future and deliver the result via
+            # on_done(), so _saveFinished is still emitted and cleanup runs.
+            log.error(
+                "Failed to register save callback; using fallback watcher thread: %s", e
+            )
+
+            def _fallback_watcher(fut=future):
+                concurrent.futures.wait([fut])
+                on_done(fut)
+
+            t = threading.Thread(
+                target=_fallback_watcher, daemon=True, name="SaveCallbackFallback"
+            )
+            t.start()
+
+        # Close editor UI immediately to allow the user to continue working.
+        # The background worker uses the frozen export_snapshot, so it doesn't
+        # need the live editor UI to remain open.
+        # If the save fails later, memory is preserved due to the guard in
+        # _on_editor_open_changed, allowing the same session to be re-opened.
+        if self.ui_state.isEditorOpen:
+            self.ui_state.isEditorOpen = False
 
     @Slot(object)
     def _on_save_finished(self, save_result: dict):
@@ -1625,52 +1739,73 @@ class AppController(QObject):
         if self._shutting_down:
             return
 
-        # Always clear saving indicator
-        self.ui_state.isSaving = False
+        # Remove completed target from in-flight set, then clear the saving
+        # indicator only when no exports remain in progress.
+        target = save_result.get("target")
+        if target:
+            self._saves_in_flight.discard(target)
+
+        save_key = save_result.get("save_image_key")
+        if save_key:
+            self._saving_keys.discard(save_key)
+        if not self._saves_in_flight:
+            self.ui_state.isSaving = False
 
         if not save_result.get("success"):
-            self.update_status_message(save_result.get("error", "Save failed"))
+            error_msg = save_result.get("error", "Save failed")
+            self.update_status_message(f"Save failed: {error_msg}", timeout=5000)
             return
 
         result = save_result.get("result")
-        if result:
+        if isinstance(result, tuple) and len(result) >= 2:
             saved_path, _ = result  # backup_path unused
 
             # --- Post-Save Cleanup ---
 
-            # Only auto-close editor if still on the same image that initiated the save
-            # Prevents "surprise close" if user navigated away during save
-            initiated_path = getattr(self, "_save_initiated_path", None)
-            editor_still_on_same_image = (
-                self.ui_state.isEditorOpen
-                and self.image_editor.current_filepath
-                and initiated_path
-                and self.image_editor.current_filepath == initiated_path
+            # Read frozen save context — these were captured at save-initiation
+            # time and are immune to editor/navigation changes during the save.
+            editor_was_open = save_result.get("editor_was_open", False)
+            save_session_token = save_result.get("session_token")
+
+            # Check whether the user is still viewing the identical session
+            # they saved (same image, same variant, same editor underlying data)
+            current_image_key = (
+                self._key(self.image_files[self.current_index].path)
+                if 0 <= self.current_index < len(self.image_files)
+                else None
+            )
+            current_session_token = (
+                current_image_key,
+                getattr(self, "view_override_kind", None),
+                self.image_editor.session_id if self.image_editor else None,
             )
 
-            # 1. Close Editor UI (only if still on same image)
-            if editor_still_on_same_image:
-                self.ui_state.isEditorOpen = False
+            still_on_same_image = (
+                save_session_token is not None
+                and current_session_token is not None
+                and current_session_token == save_session_token
+            )
 
-            # 2. Clear Editor State (release memory) - only if still on same image
-            if editor_still_on_same_image:
-                self.image_editor.clear()
+            if still_on_same_image:
+                # Clear Editor State (release memory) — only when the
+                # editor dialog was actually open for this save.
+                if editor_was_open:
+                    if self.ui_state.isEditorOpen:
+                        self.ui_state.isEditorOpen = False
+                    # Closing triggers _on_editor_open_changed -> image_editor.clear()
+                    # but we call it explicitly here just in case they closed it manually.
+                    self.image_editor.clear()
 
-            # 2b. Clear variant override (save always targets Main)
-            if editor_still_on_same_image:
-                self._clear_variant_override()
+                # Call this regardless of editor_was_open IF it was a restore-override
+                if save_result.get("started_from_restore_override"):
+                    self._clear_variant_override()
 
-            # 3. Refresh List and Handle Selection
-            if editor_still_on_same_image:
-                # Full refresh to see new file or updated timestamp
+                # Refresh list to pick up new backup files and update variant map
                 self.refresh_image_list()
 
-                # 4. Find and re-select the saved image
-                new_index = (
-                    self.current_index
-                )  # Default to keeping selection if not found
+                # Find and re-select the saved image
+                new_index = self.current_index
 
-                # Try to find by exact path match
                 if saved_path:
                     target_key = self._key(saved_path)
                     for i, img in enumerate(self.image_files):
@@ -1680,19 +1815,19 @@ class AppController(QObject):
 
                 self.current_index = new_index
 
-                # 5. Force UI Sync / Prefetch
-                self.image_cache.clear()  # Clear cache to ensure we reload valid image
+                # Force UI Sync / Prefetch
+                self.image_cache.clear()
                 self.prefetcher.cancel_all()
                 self.prefetcher.update_prefetch(self.current_index)
                 self.sync_ui_state()
-                # Refresh variant badges (backup was created)
-                if self.ui_state:
-                    self.ui_state.variantBadgesChanged.emit()
             else:
-                # User navigated away - skip full refresh to preserve their selection
-                # Just clear stale cache entry for the saved image
+                # User navigated away — clear stale cache entry
                 if saved_path:
                     self.image_cache.pop_path(saved_path)
+
+            # Always emit badge update — backup file was created
+            if self.ui_state:
+                self.ui_state.variantBadgesChanged.emit()
 
             self.update_status_message("Image saved")
         else:
@@ -1733,6 +1868,7 @@ class AppController(QObject):
         self._clear_variant_override()
 
         self._reset_crop_settings()
+        self._reset_darken_on_navigation()
 
         if self.debug_cache:
             _t_prefetch = time.perf_counter()
@@ -4459,6 +4595,9 @@ class AppController(QObject):
             log.warning("[_delete_indices] No valid indices found in %s", indices)
             return summary
 
+        if self._block_if_saving(*[img.path for img in images_to_delete]):
+            return summary
+
         summary["requested_count"] = len(images_to_delete)
 
         # --- PHASE 1: OPTIMISTIC UI UPDATE (instant, no I/O) ---
@@ -5358,6 +5497,10 @@ class AppController(QObject):
             self.update_status_message("No image to edit.")
             return
 
+        current_image_path = self.image_files[self.current_index].path
+        if self._block_if_saving(current_image_path):
+            return
+
         # Prefer RAW file if it exists, otherwise use JPG
         image_file = self.image_files[self.current_index]
         jpg_path = image_file.path
@@ -5495,9 +5638,30 @@ class AppController(QObject):
         self.ui_state.statusMessage = message
         QTimer.singleShot(timeout, clear_message)
 
+    def _is_image_saving(self, file_path_str: str) -> bool:
+        if not file_path_str or not hasattr(self, "_saving_keys"):
+            return False
+        return self._key(Path(file_path_str)) in self._saving_keys
+
+    def _block_if_saving(self, *paths) -> bool:
+        """Helper to block actions if any of the given paths are currently saving."""
+        for path in paths:
+            if path and self._is_image_saving(str(path)):
+                self.update_status_message(
+                    "This image is still saving. Please wait a moment.", timeout=3000
+                )
+                return True
+        return False
+
     @Slot()
     def start_drag_current_image(self):
         if not self.image_files or self.current_index >= len(self.image_files):
+            return
+
+        # (Check moved below after batch resolution)
+        path_to_check = self.image_files[self.current_index].path
+        # We still check the current image early as a fast-fail
+        if self._block_if_saving(path_to_check):
             return
 
         # Collect files to drag: batch files if any batches exist, otherwise current image
@@ -5518,6 +5682,11 @@ class AppController(QObject):
         existing_indices = [
             idx for idx in file_indices if self.image_files[idx].path.exists()
         ]
+
+        # Check if ANY of the resolved files are currently saving
+        for idx in existing_indices:
+            if self._block_if_saving(self.image_files[idx].path):
+                return
 
         # Prefer dragging the developed JPG if it exists (for external export),
         # but only when RAW mode is active or we are dragging a developed file itself.
@@ -5603,6 +5772,10 @@ class AppController(QObject):
     def enable_raw_editing(self):
         """Switches the current image to RAW mode (using developed TIFF)."""
         if not self.image_files:
+            return
+
+        current_image_path = self.image_files[self.current_index].path
+        if self._block_if_saving(current_image_path):
             return
 
         # 1. Update State
@@ -5750,19 +5923,47 @@ class AppController(QObject):
     def develop_raw_for_current_image(self):
         self.enable_raw_editing()
 
-    @Slot()
+    # Return sentinels for load_image_for_editing():
+    #   True  — a real reload was performed (new file or changed mtime)
+    #   _REUSED — the existing editor session was kept (truthy, but ``is True`` is False)
+    #   False — load failed or was aborted
+    _REUSED = 2  # truthy int so QML @Slot(result=bool) coerces to true
+
+    @Slot(result=bool)
     def load_image_for_editing(self):
-        """
-        Loads the currently viewed image into the editor using active path logic.
-        This provides a centralized entry point for loading the editor correctly.
+        """Load the currently viewed image into the editor.
+
+        Returns True on real reload, _REUSED when the existing session
+        was kept, or False on failure.  The @Slot annotation coerces
+        _REUSED to true for QML callers (none of which inspect the value).
         """
         try:
-            # Use variant override path if active
             if self.view_override_path:
                 active_path = Path(self.view_override_path)
             else:
                 active_path = self.get_active_edit_path(self.current_index)
             filepath = str(active_path)
+
+            editor_path = getattr(self.image_editor, "current_filepath", None)
+            match = False
+            if editor_path:
+                try:
+                    match = Path(editor_path).resolve() == Path(filepath).resolve()
+                    if match:
+                        mtime = Path(filepath).stat().st_mtime
+                        if mtime != getattr(self.image_editor, "current_mtime", 0.0):
+                            match = False
+                except (OSError, ValueError):
+                    pass
+
+            if match:
+                log.debug(
+                    "load_image_for_editing: Reusing existing session for %s", filepath
+                )
+                # Ensure the background renderer is current and notify UI to refresh
+                # Also synchronize sliders/crop state to the backend session.
+                self._sync_editor_state_from_session()
+                return self._REUSED
 
             # Fetch cached preview if available for faster initial display
             cached_preview = self.get_decoded_image(self.current_index)
@@ -5798,27 +5999,39 @@ class AppController(QObject):
                 # For now, simpler to emit a signal that UIState listens to,
                 # OR just manually update UIState here if we have reference.
                 if self.ui_state:
-                    self._sync_editor_state_to_ui()
+                    self._sync_editor_state_from_session()
 
-                return True
+                return True  # Real reload performed
+
         except Exception as e:
             log.exception("Failed to load image for editing: %s", e)
             self.update_status_message(f"Error loading editor: {e}")
+            if self.ui_state:
+                self.ui_state.isEditorOpen = False
+            return False
 
+        # load_image returned False
+        if self.ui_state:
+            self.ui_state.isEditorOpen = False
         return False
 
-    def _sync_editor_state_to_ui(self):
-        """Helper to push editor state (initial edits) to UIState."""
-        initial_edits = self.image_editor._initial_edits()
-        for key, value in initial_edits.items():
+    def _sync_editor_state_from_session(self):
+        """Helper to push current editor session state (edits, crop) to UIState."""
+        edits = self.image_editor.current_edits
+        for key, value in edits.items():
             if hasattr(self.ui_state, key):
                 setattr(self.ui_state, key, value)
 
         # Reset visual components
         if hasattr(self.ui_state, "aspectRatioNames"):
             self.ui_state.aspectRatioNames = [r["name"] for r in ASPECT_RATIOS]
-            self.ui_state.currentAspectRatioIndex = 0
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            # Pull crop box specifically; use default if None
+            crop_box = edits.get("crop_box")
+            if crop_box:
+                self.ui_state.currentCropBox = crop_box
+            else:
+                self.ui_state.currentAspectRatioIndex = 0
+                self.ui_state.currentCropBox = (0, 0, 1000, 1000)
 
         # Kick off background render
         self._kick_preview_worker()
@@ -5901,6 +6114,310 @@ class AppController(QObject):
 
         if self.ui_state.isHistogramVisible:
             self.update_histogram()
+
+    # ---- Background Darkening Tool ----
+
+    def _reset_darken_on_navigation(self):
+        """Reset all darken-specific state on image switch.
+
+        Called from _set_current_index() to ensure a clean slate.
+        Clears both editor-level mask data AND UI-side panel values,
+        because navigation while the editor is open does NOT call
+        editor.load_image().
+        """
+        # Editor-level: clear mask assets, raster cache, and darken settings
+        self.image_editor._mask_assets.clear()
+        self.image_editor._mask_raster_cache.clear()
+        if self.image_editor.current_edits.get("darken_settings") is not None:
+            self.image_editor.current_edits["darken_settings"] = None
+            self.image_editor._edits_rev += 1
+        # In-progress stroke
+        self._current_darken_stroke = None
+        # Tool mode
+        self.ui_state.isDarkening = False
+        # Overlay image
+        self.ui_state._darken_overlay_image = None
+        self.ui_state._darken_overlay_generation += 1
+        self.ui_state.darken_overlay_generation_changed.emit()
+        # Reset slider / panel values via property setters so QML bindings update
+        self.ui_state.darkenOverlayVisible = True
+        self.ui_state.darkenAmount = 0.5
+        self.ui_state.darkenEdgeProtection = 0.5
+        self.ui_state.darkenSubjectProtection = 0.5
+        self.ui_state.darkenFeather = 0.5
+        self.ui_state.darkenDarkRange = 0.5
+        self.ui_state.darkenNeutrality = 0.5
+        self.ui_state.darkenExpandContract = 0.0
+        self.ui_state.darkenAutoEdges = 0.0
+        self.ui_state.darkenMode = "assisted"
+        self.ui_state.darkenBrushRadius = 0.03
+
+    def _prepare_darken_image_state(self) -> bool:
+        """Helper to ensure the correct image is loaded for darkening."""
+        needs_load = (
+            self.image_editor.float_image is None
+            or self.image_editor.current_filepath is None
+        )
+        if not needs_load:
+            try:
+                active = (
+                    self.view_override_path
+                    if self.view_override_path
+                    else self.get_active_edit_path(self.current_index)
+                )
+                current_p = self.image_editor.current_filepath
+                if current_p and active:
+                    match = Path(current_p).resolve() == Path(active).resolve()
+                    if not match:
+                        needs_load = True
+                else:
+                    needs_load = True
+            except (IndexError, TypeError, OSError, ValueError):
+                needs_load = True
+
+        if needs_load:
+            load_result = self.load_image_for_editing()
+            if load_result is False:
+                return False  # load failed — abort rather than darken stale data
+            # Only reset darken on a real reload, not when reusing the session
+            if load_result is True:
+                self._reset_darken_on_navigation()
+        return True
+
+    @Slot()
+    def open_darken_tool(self):
+        """Activate the darkening tool, loading the image if needed.
+
+        The darken panel is independent of the editor sidebar — pressing K
+        in loupe view opens the darken panel without forcing the editor
+        panel open.  The image is silently loaded for editing if it hasn't
+        been already.
+        """
+        if not self._prepare_darken_image_state():
+            return
+        self._ensure_darken_state()
+        self.ui_state.isDarkening = True
+        self._kick_preview_worker()
+        self._update_darken_overlay()
+
+    @Slot()
+    def toggle_darken_mode(self):
+        """Toggle the background darkening tool on/off.
+
+        Turning off also disables the darkening effect so the preview
+        reverts to the un-darkened image.
+        """
+        if self.ui_state.isDarkening:
+            self.ui_state.isDarkening = False
+            ds = self.image_editor.current_edits.get("darken_settings")
+            if ds is not None:
+                ds.enabled = False
+                self.image_editor._edits_rev += 1
+                self._kick_preview_worker()
+        else:
+            if not self._prepare_darken_image_state():
+                return
+            self._ensure_darken_state()
+            self.ui_state.isDarkening = True
+            self._kick_preview_worker()
+            self._update_darken_overlay()
+
+    def _ensure_darken_state(self):
+        """Ensure MaskData and DarkenSettings exist for the darken tool."""
+        if "darken" not in self.image_editor._mask_assets:
+            self.image_editor._mask_assets["darken"] = MaskData()
+        if self.image_editor.current_edits.get("darken_settings") is None:
+            ds = DarkenSettings(enabled=True)
+            self.image_editor.current_edits["darken_settings"] = ds
+            self.image_editor._edits_rev += 1
+        else:
+            ds = self.image_editor.current_edits["darken_settings"]
+            if not ds.enabled:
+                ds.enabled = True
+                self.image_editor._edits_rev += 1
+
+    @Slot(float, float, str)
+    def start_darken_stroke(self, x_norm: float, y_norm: float, stroke_type: str):
+        """Begin a new brush stroke. Coords are normalised [0,1] relative to the
+        displayed (post-crop, post-straighten) image."""
+        edits = self.image_editor.current_edits
+        x_base, y_base = inverse_transform(
+            x_norm,
+            y_norm,
+            edits,
+            (1, 1),  # display_shape unused for normalised
+        )
+        brush_r = self.ui_state._darken_brush_radius
+        self._current_darken_stroke = {
+            "points": [(x_base, y_base)],
+            "radius": brush_r,
+            "stroke_type": stroke_type,
+        }
+
+    @Slot(float, float)
+    def continue_darken_stroke(self, x_norm: float, y_norm: float):
+        """Add a point to the current brush stroke."""
+        stroke = getattr(self, "_current_darken_stroke", None)
+        if stroke is None:
+            return
+        edits = self.image_editor.current_edits
+        x_base, y_base = inverse_transform(x_norm, y_norm, edits, (1, 1))
+        stroke["points"].append((x_base, y_base))
+
+    @Slot()
+    def finish_darken_stroke(self):
+        """Commit the current stroke to MaskData."""
+        stroke = getattr(self, "_current_darken_stroke", None)
+        if stroke is None or not stroke["points"]:
+            return
+        self._current_darken_stroke = None
+
+        mask_data = self.image_editor._mask_assets.get("darken")
+        if mask_data is None:
+            return
+
+        ms = MaskStroke(
+            points=stroke["points"],
+            radius=stroke["radius"],
+            stroke_type=stroke["stroke_type"],
+        )
+        mask_data.add_stroke(ms)
+
+        # Bump editor revision and refresh preview
+        self.image_editor._edits_rev += 1
+        self._kick_preview_worker()
+        self._update_darken_overlay()
+
+    @Slot()
+    def undo_darken_stroke(self):
+        """Remove the last brush stroke."""
+        mask_data = self.image_editor._mask_assets.get("darken")
+        if mask_data is None or not mask_data.has_strokes():
+            return
+        mask_data.undo_last_stroke()
+        self.image_editor._edits_rev += 1
+        self._kick_preview_worker()
+        self._update_darken_overlay()
+
+    @Slot()
+    def clear_darken_strokes(self):
+        """Clear all brush strokes."""
+        mask_data = self.image_editor._mask_assets.get("darken")
+        if mask_data is None or not mask_data.has_strokes():
+            return
+        mask_data.clear_strokes()
+        self.image_editor._edits_rev += 1
+        self._kick_preview_worker()
+        self._update_darken_overlay()
+
+    @Slot(str, float)
+    def set_darken_param(self, key: str, value: float):
+        """Update a DarkenSettings scalar and refresh."""
+        ds = self.image_editor.current_edits.get("darken_settings")
+        if ds is None:
+            return
+        if not hasattr(ds, key):
+            log.warning("Unknown darken param: %s", key)
+            return
+        setattr(ds, key, value)
+        # Sync UIState — map DarkenSettings field name → UIState property name
+        prop_map = {
+            "darken_amount": "darkenAmount",
+            "edge_protection": "darkenEdgeProtection",
+            "subject_protection": "darkenSubjectProtection",
+            "feather": "darkenFeather",
+            "dark_range": "darkenDarkRange",
+            "neutrality_sensitivity": "darkenNeutrality",
+            "expand_contract": "darkenExpandContract",
+            "auto_from_edges": "darkenAutoEdges",
+            "brush_radius": "darkenBrushRadius",
+        }
+        ui_prop = prop_map.get(key)
+        if ui_prop and hasattr(self.ui_state, ui_prop):
+            setattr(self.ui_state, ui_prop, value)
+
+        self.image_editor._edits_rev += 1
+        self._kick_preview_worker()
+        self._update_darken_overlay()
+
+    @Slot(str)
+    def set_darken_mode(self, mode: str):
+        """Set the darkening mode."""
+        ds = self.image_editor.current_edits.get("darken_settings")
+        if ds is None:
+            return
+        ds.mode = mode
+        self.ui_state.darkenMode = mode
+        self.image_editor._edits_rev += 1
+        self._kick_preview_worker()
+        self._update_darken_overlay()
+
+    @Slot(bool)
+    def set_darken_overlay_visible(self, visible: bool):
+        """Toggle mask overlay visibility."""
+        self.ui_state.darkenOverlayVisible = visible
+
+    @Slot(int, int, int)
+    def set_darken_overlay_color(self, r: int, g: int, b: int):
+        """Set the overlay colour."""
+        mask_data = self.image_editor._mask_assets.get("darken")
+        if mask_data is not None:
+            mask_data.overlay_color = (r, g, b)
+        self._update_darken_overlay()
+
+    def _update_darken_overlay(self):
+        """Generate the mask overlay QImage for display in QML."""
+        try:
+            from PySide6.QtGui import QImage
+
+            mask_data = self.image_editor._mask_assets.get("darken")
+            ds = self.image_editor.current_edits.get("darken_settings")
+            if mask_data is None or ds is None or not mask_data.has_strokes():
+                self.ui_state._darken_overlay_image = None
+                self.ui_state._darken_overlay_generation += 1
+                self.ui_state.darken_overlay_generation_changed.emit()
+                return
+
+            # Resolve mask at preview resolution
+            preview = self.image_editor.float_preview
+            if preview is None:
+                return
+
+            from faststack.imaging.mask_engine import resolve_mask
+
+            edits = dict(self.image_editor.current_edits)
+            resolved = resolve_mask(
+                mask_data,
+                ds,
+                preview,
+                preview.shape[:2],
+                edits,
+                cache=self.image_editor._mask_raster_cache,
+            )
+
+            # Build ARGB32 overlay
+            h, w = resolved.shape
+            r, g, b = mask_data.overlay_color
+            alpha = int(mask_data.overlay_opacity * 255)
+
+            # Create ARGB buffer: (H, W, 4) uint8
+            overlay = np.zeros((h, w, 4), dtype=np.uint8)
+            mask_u8 = (np.clip(resolved, 0.0, 1.0) * alpha).astype(np.uint8)
+            overlay[:, :, 0] = b  # QImage ARGB32 is BGRA in memory on little-endian
+            overlay[:, :, 1] = g
+            overlay[:, :, 2] = r
+            overlay[:, :, 3] = mask_u8
+
+            buf = overlay.tobytes()
+            self._darken_overlay_buffer = buf
+            qimg = QImage(buf, w, h, w * 4, QImage.Format.Format_ARGB32)
+
+            self.ui_state._darken_overlay_image = qimg
+            self.ui_state._darken_overlay_generation += 1
+            self.ui_state.darken_overlay_generation_changed.emit()
+
+        except Exception:
+            log.exception("Failed to update darken overlay")
 
     @Slot()
     def rotate_image_cw(self):
@@ -6291,6 +6808,9 @@ class AppController(QObject):
             self.ui_state.currentImageSourceChanged.emit()
             self.ui_state.highlightStateChanged.emit()
             self.update_histogram()
+            # Keep mask overlay in sync with the preview whenever it changes
+            if self.ui_state._is_darkening:
+                self._update_darken_overlay()
 
         # Call directly (not via singleShot) since we're on the UI thread.
         # This prevents race where a new slider event could interleave between
@@ -6310,52 +6830,27 @@ class AppController(QObject):
             self.ui_refresh_generation += 1
             self.ui_state.currentImageSourceChanged.emit()
             self.update_status_message("Crop cancelled")
-            log.info("Crop mode cancelled")
 
     @Slot()
     def toggle_crop_mode(self):
         """Toggle crop mode on/off."""
         self.ui_state.isCropping = not self.ui_state.isCropping
+
         if self.ui_state.isCropping:
-            # Reset crop box when entering crop mode
+            # Entering crop mode: reset to full image defaults
             self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-            # Set aspect ratios for QML dropdown
             self.ui_state.aspectRatioNames = [r["name"] for r in ASPECT_RATIOS]
             self.ui_state.currentAspectRatioIndex = 0
 
-            # Pre-load image into editor to ensure smooth rotation
-            if self.image_files and self.current_index < len(self.image_files):
-                image_file = self.image_files[self.current_index]
-                filepath = image_file.path
-                editor_path = self.image_editor.current_filepath
-
-                # Robust comparison
-                match = False
-                if editor_path:
-                    try:
-                        match = Path(editor_path).resolve() == Path(filepath).resolve()
-                    except (OSError, ValueError):
-                        match = str(editor_path) == str(filepath)
-
-                if not match:
-                    log.debug("toggle_crop_mode: Loading %s into editor", filepath)
-                    # Use cached preview if available to speed up using get_decoded_image(self.current_index)
-                    # note: get_decoded_image verifies index bounds
-                    cached_preview = self.get_decoded_image(self.current_index)
-                    self.image_editor.load_image(
-                        str(filepath), cached_preview=cached_preview
-                    )
-
             # Reset rotation to 0 when starting fresh crop mode
             self.image_editor.set_edit_param("straighten_angle", 0.0)
-
             self.update_status_message("Crop mode: Drag to select area, Enter to crop")
-            log.info("Crop mode enabled")
-        else:  # Exiting crop mode
-            self.ui_state.isCropping = False
+        else:
+            # Exiting crop mode: cleanup
             self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            # Ensure preview rotation is cleared when exiting
+            self.image_editor.set_edit_param("straighten_angle", 0.0)
             self.update_status_message("Crop cancelled")
-            log.info("Crop mode disabled")
 
     @Slot()
     def stack_source_raws(self):
@@ -6572,9 +7067,17 @@ class AppController(QObject):
             self.update_status_message("No crop area selected")
             return
 
-        # Ensure image is loaded in editor
-        image_file = self.image_files[self.current_index]
-        filepath = image_file.path
+        # Restoration means viewing a backup; crop should target the main image.
+        # We must resolve this BEFORE potentially reloading or saving.
+        save_target_path = self._get_save_target_path_for_current_view()
+        is_restoring = save_target_path is not None
+
+        # Ensure image is loaded in editor.
+        # For crop, we use the CURRENTLY VIEWED file (which might be a variant).
+        if self.view_override_path:
+            filepath = Path(self.view_override_path)
+        else:
+            filepath = self.get_active_edit_path(self.current_index)
 
         # Robust path comparison
         editor_path = self.image_editor.current_filepath
@@ -6589,6 +7092,7 @@ class AppController(QObject):
             log.debug(
                 f"execute_crop reloading image due to path mismatch. Editor: {editor_path}, File: {filepath}"
             )
+            # get_decoded_image() honors variants/overrides.
             cached_preview = self.get_decoded_image(self.current_index)
             if not self.image_editor.load_image(
                 str(filepath), cached_preview=cached_preview
@@ -6602,9 +7106,11 @@ class AppController(QObject):
         # This handles cases where we reloaded the image (resetting edits) or where UI state sync was flaky.
         self.image_editor.set_edit_param("straighten_angle", current_rotation)
 
-        # Save via ImageEditor (handles rotation + crop correctly)
+        # Save via ImageEditor (passing the resolved target for variant-save policy)
         try:
-            save_result = self.image_editor.save_image()
+            save_result = self.image_editor.save_image(
+                save_target_path=save_target_path
+            )
         except RuntimeError as e:
             log.warning("execute_crop: Save failed: %s", e)
             self.update_status_message(f"Failed to save cropped image: {e}")
@@ -6616,6 +7122,10 @@ class AppController(QObject):
 
         if save_result:
             saved_path, backup_path = save_result
+
+            # IF we were restoring from a variant, clear the override now that it's "the truth"
+            if is_restoring:
+                self._clear_variant_override()
 
             timestamp = time.time()
             self.undo_history.append(
