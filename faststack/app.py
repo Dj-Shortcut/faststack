@@ -6849,7 +6849,8 @@ class AppController(QObject):
             # Exiting crop mode: cleanup
             self.ui_state.isCropping = False
             self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-            # Ensure preview rotation is cleared when exiting
+            # Ensure backend crop state and preview rotation are cleared when exiting
+            self.image_editor.set_crop_box(None)
             self.image_editor.set_edit_param("straighten_angle", 0.0)
             self.update_status_message("Crop cancelled")
         else:
@@ -6869,8 +6870,9 @@ class AppController(QObject):
                 return
 
             self.ui_state.isCropping = True
-            # Reset to full image defaults
+            # Reset to full image defaults (UI and Backend)
             self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            self.image_editor.set_crop_box(None)
             self.ui_state.aspectRatioNames = [r["name"] for r in ASPECT_RATIOS]
             self.ui_state.currentAspectRatioIndex = 0
 

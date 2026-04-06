@@ -234,9 +234,10 @@ class TestEditorReopening(unittest.TestCase):
                 mock_stat.return_value.st_mtime = 123.4
                 res = self.controller.load_image_for_editing()
 
-        # Must perform a real reload, not _REUSED
+        # Must perform a real reload, not _REUSED, and return truthy.
         self.controller.image_editor.load_image.assert_called_once()
         self.assertIsNot(res, AppController._REUSED)
+        self.assertTrue(res)
 
     def test_crop_mode_blocked_while_saving(self):
         """toggle_crop_mode must not enter crop mode when a save is in flight."""
