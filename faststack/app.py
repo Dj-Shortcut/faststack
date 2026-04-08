@@ -1784,26 +1784,37 @@ class AppController(QObject):
                 getattr(self.image_editor, "_edits_rev", None),
             )
 
-            still_on_same_image = (
+            # Check whether the user is still viewing the same image/session
+            # (image key, variant kind, and session_id matching)
+            still_on_same_session = (
                 save_session_token is not None
                 and current_session_token is not None
-                and current_session_token == save_session_token
+                and len(save_session_token) >= 3
+                and current_session_token[:3] == save_session_token[:3]
             )
 
-            if still_on_same_image:
-                # Clear Editor State (release memory) — only when the
-                # editor dialog was actually open for this save.
-                if editor_was_open:
-                    if self.ui_state.isEditorOpen:
-                        self.ui_state.isEditorOpen = False
-                    # Closing triggers _on_editor_open_changed -> image_editor.clear()
-                    # but we call it explicitly here just in case they closed it manually.
-                    self.image_editor.clear()
+            # Check if it is the EXACT identical revision (no user edits since save started)
+            still_on_identical_revision = (
+                still_on_same_session
+                and len(save_session_token) >= 4
+                and current_session_token[3] == save_session_token[3]
+            )
 
-                # Call this regardless of editor_was_open IF it was a restore-override
-                if save_result.get("started_from_restore_override"):
-                    self._clear_variant_override()
+            if still_on_same_session:
+                # 1. Editor Cleanup (only if revision is unchanged)
+                if still_on_identical_revision:
+                    if editor_was_open:
+                        if self.ui_state.isEditorOpen:
+                            self.ui_state.isEditorOpen = False
+                        # Closing triggers _on_editor_open_changed -> image_editor.clear()
+                        # but we call it explicitly here just in case they closed it manually.
+                        self.image_editor.clear()
+                    
+                    # Also clear variant override if we started from one
+                    if save_result.get("started_from_restore_override"):
+                        self._clear_variant_override()
 
+                # 2. Update variants and re-select index
                 # Refresh list to pick up new backup files and update variant map
                 self.refresh_image_list()
 
@@ -6834,26 +6845,21 @@ class AppController(QObject):
         """Cancel crop mode without applying changes."""
         if self.ui_state.isCropping:
             self.ui_state.isCropping = False
-            self.ui_state.currentCropBox = [0, 0, 1000, 1000]
-            # Ensure preview rotation is cleared
+            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            # Ensure backend crop state and preview rotation are cleared
+            self.image_editor.set_crop_box(None)
             self.image_editor.set_edit_param("straighten_angle", 0.0)
-            # Force QML to refresh if it's showing provider preview frames
+            # Notify UI and kick fresh render
             self.ui_refresh_generation += 1
-            self.ui_state.currentImageSourceChanged.emit()
+            self._kick_preview_worker()
             self.update_status_message("Crop cancelled")
 
     @Slot()
     def toggle_crop_mode(self):
         """Toggle crop mode on/off."""
         if self.ui_state.isCropping:
-            # Exiting crop mode: cleanup
-            self.ui_state.isCropping = False
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-            # Ensure backend crop state and preview rotation are cleared when exiting
-            self.image_editor.set_crop_box(None)
-            self.image_editor.set_edit_param("straighten_angle", 0.0)
-            self._kick_preview_worker()
-            self.update_status_message("Crop cancelled")
+            # Exiting crop mode: reuse the specialized cleanup
+            self.cancel_crop_mode()
         else:
             # Entering crop mode requires a loaded image with a valid float buffer.
             if not self.image_files or not (
