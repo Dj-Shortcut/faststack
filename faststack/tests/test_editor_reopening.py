@@ -219,6 +219,127 @@ class TestEditorReopening(unittest.TestCase):
         # VERIFY: Clear IS called because no save active for this file
         self.controller.image_editor.clear.assert_called_once()
 
+    def test_reuse_blocked_when_float_image_is_none(self):
+        """Matching path/mtime with float_image=None must force a real reload,
+        not silently reuse a preview-only (float-less) session."""
+        target = Path("test.jpg")
+        self.controller.image_editor.current_filepath = target
+        self.controller.image_editor.current_mtime = 123.4
+        # Simulate a preview_only load: filepath/mtime set, but no float buffer.
+        self.controller.image_editor.float_image = None
+        self.controller.image_editor.load_image.return_value = True
+
+        with patch("pathlib.Path.resolve", return_value=target.absolute()):
+            with patch("pathlib.Path.stat") as mock_stat:
+                mock_stat.return_value.st_mtime = 123.4
+                res = self.controller.load_image_for_editing()
+
+        # Must perform a real reload, not _REUSED, and return truthy.
+        self.controller.image_editor.load_image.assert_called_once()
+        self.assertIsNot(res, AppController._REUSED)
+        self.assertTrue(res)
+
+    def test_crop_mode_blocked_while_saving(self):
+        """toggle_crop_mode must not enter crop mode when a save is in flight."""
+        mock_file = MagicMock()
+        target = Path("test.jpg")
+        mock_file.path = target
+        self.controller.image_files = [mock_file]
+        self.controller.current_index = 0
+
+        # Put the image key in saving_keys
+        save_key = self.controller._key(target)
+        self.controller._saving_keys = {save_key}
+        self.controller.ui_state.isCropping = False
+
+        with patch.object(self.controller, "load_image_for_editing") as mock_load:
+            self.controller.toggle_crop_mode()
+
+        # isCropping must remain False
+        self.assertFalse(self.controller.ui_state.isCropping)
+        mock_load.assert_not_called()
+
+    def test_crop_mode_blocked_when_load_fails(self):
+        """toggle_crop_mode must not set isCropping when load_image_for_editing fails."""
+        self.controller._saving_keys = set()
+        self.controller.ui_state.isCropping = False
+
+        with patch.object(
+            self.controller, "load_image_for_editing", return_value=False
+        ):
+            self.controller.toggle_crop_mode()
+
+        self.assertFalse(self.controller.ui_state.isCropping)
+
+    def test_crop_mode_blocked_no_image(self):
+        """toggle_crop_mode must not enter crop mode if no image is available."""
+        self.controller.image_files = []
+        self.controller.current_index = -1
+        self.controller.ui_state.isCropping = False
+
+        with patch.object(self.controller, "update_status_message") as mock_msg:
+            self.controller.toggle_crop_mode()
+
+        self.assertFalse(self.controller.ui_state.isCropping)
+        mock_msg.assert_called_with("No image to crop")
+
+    def test_save_finished_does_not_clear_editor_when_edits_rev_advanced(self):
+        """If _edits_rev changed after save started, _on_save_finished must not
+        call image_editor.clear() — the user has unsaved changes."""
+        target = Path("test.jpg")
+        target_abs = self.controller._key(target)
+        self.controller.image_editor.current_filepath = target
+        self.controller.image_editor.session_id = "sess-1"
+        # _edits_rev at save-start was 5; user bumped it to 6 during the save
+        save_rev = 5
+        self.controller.image_editor._edits_rev = 6  # newer than save token
+
+        save_result = {
+            "success": True,
+            "result": (target, None),
+            "target": target_abs,
+            "save_image_key": target_abs,
+            "session_token": (target_abs, None, "sess-1", save_rev),
+            "editor_was_open": True,
+            "started_from_restore_override": False,
+        }
+
+        # Patch list/refresh helpers the handler calls
+        with patch.object(self.controller, "refresh_image_list"):
+            with patch.object(self.controller, "sync_ui_state"):
+                self.controller._on_save_finished(save_result)
+
+        # Token mismatch on _edits_rev → still_on_same_image is False → no clear
+        self.controller.image_editor.clear.assert_not_called()
+
+    def test_save_finished_clears_editor_when_edits_rev_unchanged(self):
+        """Normal save completion (no edits made during save) must still clear
+        editor memory — the 4-part tokens are equal so still_on_same_image is True."""
+        target = Path("test.jpg")
+        target_abs = self.controller._key(target)
+        self.controller.image_editor.current_filepath = target
+        self.controller.image_editor.session_id = "sess-1"
+        # _edits_rev same at save-start and now — user did not edit during save
+        rev = 5
+        self.controller.image_editor._edits_rev = rev
+
+        save_result = {
+            "success": True,
+            "result": (target, None),
+            "target": target_abs,
+            "save_image_key": target_abs,
+            "session_token": (target_abs, None, "sess-1", rev),
+            "editor_was_open": True,
+            "started_from_restore_override": False,
+        }
+
+        with patch.object(self.controller, "refresh_image_list"):
+            with patch.object(self.controller, "sync_ui_state"):
+                self.controller._on_save_finished(save_result)
+
+        # Tokens equal → still_on_same_image is True → editor_was_open → clear called
+        self.controller.image_editor.clear.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

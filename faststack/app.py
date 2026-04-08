@@ -1630,6 +1630,9 @@ class AppController(QObject):
             save_image_key,
             getattr(self, "view_override_kind", None),
             self.image_editor.session_id if self.image_editor else None,
+            # Include edit revision so _on_save_finished does not clear state
+            # if the user continued editing after save was submitted.
+            getattr(self.image_editor, "_edits_rev", None),
         )
 
         if save_image_key and save_image_key in self._saving_keys:
@@ -1778,28 +1781,40 @@ class AppController(QObject):
                 current_image_key,
                 getattr(self, "view_override_kind", None),
                 self.image_editor.session_id if self.image_editor else None,
+                getattr(self.image_editor, "_edits_rev", None),
             )
 
-            still_on_same_image = (
+            # Check whether the user is still viewing the same image/session
+            # (image key, variant kind, and session_id matching)
+            still_on_same_session = (
                 save_session_token is not None
                 and current_session_token is not None
-                and current_session_token == save_session_token
+                and len(save_session_token) >= 3
+                and current_session_token[:3] == save_session_token[:3]
             )
 
-            if still_on_same_image:
-                # Clear Editor State (release memory) — only when the
-                # editor dialog was actually open for this save.
-                if editor_was_open:
-                    if self.ui_state.isEditorOpen:
-                        self.ui_state.isEditorOpen = False
-                    # Closing triggers _on_editor_open_changed -> image_editor.clear()
-                    # but we call it explicitly here just in case they closed it manually.
-                    self.image_editor.clear()
+            # Check if it is the EXACT identical revision (no user edits since save started)
+            still_on_identical_revision = (
+                still_on_same_session
+                and len(save_session_token) >= 4
+                and current_session_token[3] == save_session_token[3]
+            )
 
-                # Call this regardless of editor_was_open IF it was a restore-override
-                if save_result.get("started_from_restore_override"):
-                    self._clear_variant_override()
+            if still_on_same_session:
+                # 1. Editor Cleanup (only if revision is unchanged)
+                if still_on_identical_revision:
+                    if editor_was_open:
+                        if self.ui_state.isEditorOpen:
+                            self.ui_state.isEditorOpen = False
+                        # Closing triggers _on_editor_open_changed -> image_editor.clear()
+                        # but we call it explicitly here just in case they closed it manually.
+                        self.image_editor.clear()
 
+                    # Also clear variant override if we started from one
+                    if save_result.get("started_from_restore_override"):
+                        self._clear_variant_override()
+
+                # 2. Update variants and re-select index
                 # Refresh list to pick up new backup files and update variant map
                 self.refresh_image_list()
 
@@ -5957,6 +5972,13 @@ class AppController(QObject):
                     pass
 
             if match:
+                # Also require an intact float buffer — a preview_only load leaves
+                # current_filepath/mtime set but float_image=None, which breaks
+                # crop, darken, and full-editor flows that need the master buffer.
+                if getattr(self.image_editor, "float_image", None) is None:
+                    match = False
+
+            if match:
                 log.debug(
                     "load_image_for_editing: Reusing existing session for %s", filepath
                 )
@@ -6823,34 +6845,48 @@ class AppController(QObject):
         """Cancel crop mode without applying changes."""
         if self.ui_state.isCropping:
             self.ui_state.isCropping = False
-            self.ui_state.currentCropBox = [0, 0, 1000, 1000]
-            # Ensure preview rotation is cleared
+            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            # Ensure backend crop state and preview rotation are cleared
+            self.image_editor.set_crop_box(None)
             self.image_editor.set_edit_param("straighten_angle", 0.0)
-            # Force QML to refresh if it's showing provider preview frames
+            # Notify UI and kick fresh render
             self.ui_refresh_generation += 1
-            self.ui_state.currentImageSourceChanged.emit()
+            self._kick_preview_worker()
             self.update_status_message("Crop cancelled")
 
     @Slot()
     def toggle_crop_mode(self):
         """Toggle crop mode on/off."""
-        self.ui_state.isCropping = not self.ui_state.isCropping
-
         if self.ui_state.isCropping:
-            # Entering crop mode: reset to full image defaults
+            # Exiting crop mode: reuse the specialized cleanup
+            self.cancel_crop_mode()
+        else:
+            # Entering crop mode requires a loaded image with a valid float buffer.
+            if not self.image_files or not (
+                0 <= self.current_index < len(self.image_files)
+            ):
+                self.update_status_message("No image to crop")
+                return
+
+            # Block if a save is already in progress for this image.
+            current_path = self.image_files[self.current_index].path
+            if self._block_if_saving(current_path):
+                return
+
+            if not self.load_image_for_editing():
+                return
+
+            self.ui_state.isCropping = True
+            # Reset to full image defaults (UI and Backend)
             self.ui_state.currentCropBox = (0, 0, 1000, 1000)
+            self.image_editor.set_crop_box(None)
             self.ui_state.aspectRatioNames = [r["name"] for r in ASPECT_RATIOS]
             self.ui_state.currentAspectRatioIndex = 0
 
             # Reset rotation to 0 when starting fresh crop mode
             self.image_editor.set_edit_param("straighten_angle", 0.0)
+            self._kick_preview_worker()
             self.update_status_message("Crop mode: Drag to select area, Enter to crop")
-        else:
-            # Exiting crop mode: cleanup
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-            # Ensure preview rotation is cleared when exiting
-            self.image_editor.set_edit_param("straighten_angle", 0.0)
-            self.update_status_message("Crop cancelled")
 
     @Slot()
     def stack_source_raws(self):
