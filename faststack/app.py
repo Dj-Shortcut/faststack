@@ -6844,11 +6844,7 @@ class AppController(QObject):
     def cancel_crop_mode(self):
         """Cancel crop mode without applying changes."""
         if self.ui_state.isCropping:
-            self.ui_state.isCropping = False
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-            # Ensure backend crop state and preview rotation are cleared
-            self.image_editor.set_crop_box(None)
-            self.image_editor.set_edit_param("straighten_angle", 0.0)
+            self._reset_crop_settings()
             # Notify UI and kick fresh render
             self.ui_refresh_generation += 1
             self._kick_preview_worker()
@@ -6878,13 +6874,15 @@ class AppController(QObject):
 
             self.ui_state.isCropping = True
             # Reset to full image defaults (UI and Backend)
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-            self.image_editor.set_crop_box(None)
+            self._reset_crop_settings()
+            # Restore isCropping after helper might have cleared it (if it was somehow already True)
+            self.ui_state.isCropping = True
+            
             self.ui_state.aspectRatioNames = [r["name"] for r in ASPECT_RATIOS]
             self.ui_state.currentAspectRatioIndex = 0
 
-            # Reset rotation to 0 when starting fresh crop mode
-            self.image_editor.set_edit_param("straighten_angle", 0.0)
+            # Ensure UI and backend are synced and kick render
+            self.ui_refresh_generation += 1
             self._kick_preview_worker()
             self.update_status_message("Crop mode: Drag to select area, Enter to crop")
 
