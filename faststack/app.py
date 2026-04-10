@@ -1140,9 +1140,7 @@ class AppController(QObject):
             # Use the timestamp captured at scan time (ImageFile.timestamp)
             # so we avoid live filesystem calls during sort.  Tiebreak on
             # lowercase filename for determinism when mtimes are equal.
-            filtered.sort(
-                key=lambda img: (-img.timestamp, img.path.name.lower())
-            )
+            filtered.sort(key=lambda img: (-img.timestamp, img.path.name.lower()))
 
         self.image_files = filtered
         self._rebuild_path_to_index()
