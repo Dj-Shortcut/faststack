@@ -78,7 +78,9 @@ def confirm_permanent_delete(image_file, reason: str = "") -> bool:
         f"The following files will be permanently deleted:\n{file_list}"
     )
 
-    delete_btn = msg_box.addButton("Delete Permanently", QMessageBox.ButtonRole.DestructiveRole)
+    delete_btn = msg_box.addButton(
+        "Delete Permanently", QMessageBox.ButtonRole.DestructiveRole
+    )
     cancel_btn = msg_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
     msg_box.setDefaultButton(cancel_btn)
 

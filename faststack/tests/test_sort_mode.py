@@ -308,16 +308,22 @@ def test_batch_split_does_not_block_sort(app_controller, tmp_path):
             batch_indices.add(i)
     # a.jpg → index 2, b.jpg → index 0 under date sort
     a_idx = next(
-        i for i, img in enumerate(app_controller.image_files) if img.path.name == "a.jpg"
+        i
+        for i, img in enumerate(app_controller.image_files)
+        if img.path.name == "a.jpg"
     )
     b_idx = next(
-        i for i, img in enumerate(app_controller.image_files) if img.path.name == "b.jpg"
+        i
+        for i, img in enumerate(app_controller.image_files)
+        if img.path.name == "b.jpg"
     )
     assert a_idx in batch_indices
     assert b_idx in batch_indices
 
 
-def test_pending_stack_start_remapped_without_completed_stacks(app_controller, tmp_path):
+def test_pending_stack_start_remapped_without_completed_stacks(
+    app_controller, tmp_path
+):
     """A pending stack_start_index must follow its image through a sort,
     even when no completed stacks exist."""
     # Default order: a(idx0), b(idx1), c(idx2)
@@ -337,4 +343,7 @@ def test_pending_stack_start_remapped_without_completed_stacks(app_controller, t
 
     assert app_controller.sort_mode == "date"
     # a.jpg moved to index 2 under date sort
-    assert app_controller.image_files[app_controller.stack_start_index].path.name == "a.jpg"
+    assert (
+        app_controller.image_files[app_controller.stack_start_index].path.name
+        == "a.jpg"
+    )
