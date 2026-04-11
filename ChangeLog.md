@@ -365,11 +365,12 @@ Todo: More testing Linux / Mac. Create Windows .exe. Write better documentation 
 ### Features
 
 - **JPG Fallback for Helicon:** Helicon Focus stacking now works with JPG-only workflows when RAW files absent.
-- **Comprehensive Timing Instrumentation:** Added detailed decode timing logs in debug mode for performance analysis.- **Jump to Photo:** Press `G` to jump directly to any image (feature documented more fully in [1.0.0]).
 - **Comprehensive Timing Instrumentation:** Added detailed decode timing logs in debug mode for performance analysis.
 - **Jump to Photo:** Press `G` to jump directly to any image (feature documented more fully in [1.0.0]).
 
-## [0.8.0] - 2025-11-20- Backspace key now deletes images (in addition to Delete key). Control-Z restores.
+## [0.8.0] - 2025-11-20
+
+- Backspace key now deletes images (in addition to Delete key). Control-Z restores.
 
 - Photoshop integration now automatically uses RAW files when available, falling back to JPG.
 - We now have some new color modes in the view menu to make the images in your monitor reflect reality. ICC profile mode works best on my system - try it if the images are over-saturated - or turn down the saturation in saturation mode. Test it out by loading an image in Faststack and Photoshop or another image viewer and make sure the colors look the same.

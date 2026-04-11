@@ -1,54 +1,8 @@
 """Tests for sort-mode feature (default / filename / date)."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from faststack.models import ImageFile
-
-
-@pytest.fixture
-def app_controller(tmp_path):
-    from PySide6.QtCore import QCoreApplication
-
-    from faststack.app import AppController
-
-    app = QCoreApplication.instance()
-    if not app:
-        app = QCoreApplication([])
-
-    image_dir = tmp_path / "images"
-    image_dir.mkdir()
-
-    mock_engine = MagicMock()
-
-    with (
-        patch("faststack.app.Watcher"),
-        patch("faststack.app.SidecarManager"),
-        patch("faststack.app.Prefetcher"),
-        patch("faststack.app.ByteLRUCache"),
-        patch("faststack.app.config"),
-        patch("faststack.app.ThumbnailProvider"),
-        patch("faststack.app.ThumbnailModel"),
-        patch("faststack.app.ThumbnailPrefetcher"),
-        patch("faststack.app.ThumbnailCache"),
-        patch("faststack.app.Keybinder"),
-        patch("faststack.app.UIState"),
-    ):
-        controller = AppController(image_dir, mock_engine, debug_cache=False)
-        controller.refresh_image_list = MagicMock()
-        controller.update_status_message = MagicMock()
-        controller.sync_ui_state = MagicMock()
-        controller.image_cache = MagicMock()
-        controller.prefetcher = MagicMock()
-        controller._thumbnail_model = MagicMock()
-        controller._thumbnail_model.rowCount.return_value = 0
-        controller._thumbnail_prefetcher = MagicMock()
-        controller._path_resolver = MagicMock()
-        controller.dataChanged = MagicMock()
-        controller.ui_state = MagicMock()
-        return controller
 
 
 def _make_images(tmp_path, specs):
@@ -145,11 +99,14 @@ def test_date_sort_oserror_does_not_crash(app_controller, tmp_path):
     """
     p_missing = tmp_path / "gone.jpg"
     p_missing.write_bytes(b"\xff\xd8")
+    p_ok = tmp_path / "ok.jpg"
+    p_ok.write_bytes(b"\xff\xd8")
+    # Remove the file so it is truly missing on disk
+    p_missing.unlink()
     imgs = [
-        ImageFile(path=p_missing, timestamp=0.0),  # simulates missing/failed stat
-        ImageFile(path=tmp_path / "ok.jpg", timestamp=5000),
+        ImageFile(path=p_missing, timestamp=0.0),  # truly missing file
+        ImageFile(path=p_ok, timestamp=5000),
     ]
-    (tmp_path / "ok.jpg").write_bytes(b"\xff\xd8")
     _populate(app_controller, imgs)
 
     app_controller.set_sort_mode("date")
@@ -241,3 +198,143 @@ def test_set_sort_mode_invalid_ignored(app_controller):
     """Invalid sort mode string must be silently ignored."""
     app_controller.set_sort_mode("random")
     assert app_controller.sort_mode == "default"
+
+
+# --- stack/batch preservation across sort ---
+
+
+def test_sort_preserves_contiguous_stacks(app_controller, tmp_path):
+    """Stacks that stay contiguous after sort must be preserved."""
+    # a,b,c in default order; filename sort gives same order (a,b,c)
+    imgs = _make_images(
+        tmp_path,
+        [("a.jpg", 3000), ("b.jpg", 2000), ("c.jpg", 1000)],
+    )
+    _populate(app_controller, imgs)
+    # Stack covers indices 0-1 (a.jpg, b.jpg) — stays contiguous under filename sort
+    app_controller.stacks = [[0, 1]]
+    app_controller.sidecar = MagicMock()
+    app_controller.sidecar.data.stacks = [[0, 1]]
+
+    app_controller.set_sort_mode("filename")
+
+    assert app_controller.sort_mode == "filename"
+    # a.jpg and b.jpg are still adjacent at positions 0-1
+    assert app_controller.stacks == [[0, 1]]
+    app_controller.sidecar.save.assert_called()
+
+
+def test_sort_noncontiguous_stack_user_cancels(app_controller, tmp_path):
+    """Non-contiguous stack + user Cancel ⇒ nothing changes."""
+    # default order: a, b, c.  date sort: c(ts=3000), a(ts=2000), b(ts=1000)
+    # Stack [0,1] = a,b. Under date sort a→idx1, b→idx2: still contiguous.
+    # Stack [0,2] = a,b,c. Under date sort a→1,b→2,c→0: c=0,a=1,b=2 contiguous.
+    # We need non-contiguous: stack [0,1]={a,b} where date order scatters them.
+    # a(ts=1000), b(ts=3000), c(ts=2000). Date: b(3000), c(2000), a(1000).
+    # Stack[0,1]={a,b} → date indices: a→2, b→0. Not contiguous!
+    imgs = _make_images(
+        tmp_path,
+        [("a.jpg", 1000), ("b.jpg", 3000), ("c.jpg", 2000)],
+    )
+    _populate(app_controller, imgs)
+    app_controller.stacks = [[0, 1]]
+    app_controller.sidecar = MagicMock()
+    app_controller.sidecar.data.stacks = [[0, 1]]
+    original_files = list(app_controller.image_files)
+
+    with patch.object(
+        app_controller, "_confirm_clear_stacks_for_sort", return_value=False
+    ):
+        app_controller.set_sort_mode("date")
+
+    # Everything unchanged
+    assert app_controller.sort_mode == "default"
+    assert app_controller.stacks == [[0, 1]]
+    assert app_controller.image_files == original_files
+    app_controller.sidecar.save.assert_not_called()
+
+
+def test_sort_noncontiguous_stack_user_clears(app_controller, tmp_path):
+    """Non-contiguous stack + user confirms ⇒ stacks cleared, sort applied, sidecar saved."""
+    imgs = _make_images(
+        tmp_path,
+        [("a.jpg", 1000), ("b.jpg", 3000), ("c.jpg", 2000)],
+    )
+    _populate(app_controller, imgs)
+    app_controller.stacks = [[0, 1]]
+    app_controller.stack_start_index = 0
+    app_controller.sidecar = MagicMock()
+    app_controller.sidecar.data.stacks = [[0, 1]]
+    app_controller.sidecar.get_metadata.return_value = None
+
+    with patch.object(
+        app_controller, "_confirm_clear_stacks_for_sort", return_value=True
+    ):
+        app_controller.set_sort_mode("date")
+
+    assert app_controller.sort_mode == "date"
+    assert app_controller.stacks == []
+    assert app_controller.stack_start_index is None
+    # Sidecar must persist the cleared stacks
+    assert app_controller.sidecar.data.stacks == []
+    app_controller.sidecar.save.assert_called()
+    # Date order: b(3000), c(2000), a(1000)
+    names = [img.path.name for img in app_controller.image_files]
+    assert names == ["b.jpg", "c.jpg", "a.jpg"]
+
+
+def test_batch_split_does_not_block_sort(app_controller, tmp_path):
+    """Batches that become non-contiguous after sort must not block sorting."""
+    imgs = _make_images(
+        tmp_path,
+        [("a.jpg", 1000), ("b.jpg", 3000), ("c.jpg", 2000)],
+    )
+    _populate(app_controller, imgs)
+    # Batch covers a,b (indices 0-1). No stacks defined.
+    app_controller.batches = [[0, 1]]
+    app_controller.stacks = []
+    app_controller.sidecar = MagicMock()
+    app_controller.sidecar.data.stacks = []
+    app_controller.sidecar.get_metadata.return_value = None
+
+    app_controller.set_sort_mode("date")
+
+    assert app_controller.sort_mode == "date"
+    # Date order: b(3000), c(2000), a(1000) → a is at idx 2, b at idx 0
+    # Batch should now contain both, possibly split into [0,0] and [2,2]
+    batch_indices = set()
+    for start, end in app_controller.batches:
+        for i in range(start, end + 1):
+            batch_indices.add(i)
+    # a.jpg → index 2, b.jpg → index 0 under date sort
+    a_idx = next(
+        i for i, img in enumerate(app_controller.image_files) if img.path.name == "a.jpg"
+    )
+    b_idx = next(
+        i for i, img in enumerate(app_controller.image_files) if img.path.name == "b.jpg"
+    )
+    assert a_idx in batch_indices
+    assert b_idx in batch_indices
+
+
+def test_pending_stack_start_remapped_without_completed_stacks(app_controller, tmp_path):
+    """A pending stack_start_index must follow its image through a sort,
+    even when no completed stacks exist."""
+    # Default order: a(idx0), b(idx1), c(idx2)
+    # Date order: b(3000)→idx0, c(2000)→idx1, a(1000)→idx2
+    imgs = _make_images(
+        tmp_path,
+        [("a.jpg", 1000), ("b.jpg", 3000), ("c.jpg", 2000)],
+    )
+    _populate(app_controller, imgs)
+    app_controller.stacks = []  # no completed stacks
+    app_controller.stack_start_index = 0  # pending start on a.jpg
+    app_controller.sidecar = MagicMock()
+    app_controller.sidecar.data.stacks = []
+    app_controller.sidecar.get_metadata.return_value = None
+
+    app_controller.set_sort_mode("date")
+
+    assert app_controller.sort_mode == "date"
+    # a.jpg moved to index 2 under date sort
+    assert app_controller.image_files[app_controller.stack_start_index].path.name == "a.jpg"
