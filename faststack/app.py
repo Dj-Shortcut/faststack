@@ -16,6 +16,7 @@ import shutil
 import uuid
 import functools
 from collections import deque
+from itertools import pairwise
 
 # Must set before importing PySide6
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.mime.warning=false"
@@ -846,7 +847,7 @@ class AppController(QObject):
             if len(indices) <= 1:
                 continue
             indices.sort()
-            for a, b in zip(indices, indices[1:]):
+            for a, b in pairwise(indices):
                 if b != a + 1:
                     return False
         return True
