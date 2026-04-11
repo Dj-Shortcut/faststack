@@ -750,8 +750,11 @@ class AppController(QObject):
             self.sidecar.save()
         elif have_stacks:
             self.stacks = self._rebuild_ranges_from_paths(old_stack_paths)
-            self.sidecar.data.stacks = self.stacks
-            self.sidecar.save()
+            # Only persist to sidecar when no filter is active — filtered
+            # image_files may hide stack members, producing incomplete ranges.
+            if not self._filter_enabled:
+                self.sidecar.data.stacks = self.stacks
+                self.sidecar.save()
 
         # Remap pending stack start marker (even when no completed stacks exist)
         if not clear_stacks and old_stack_start_path:

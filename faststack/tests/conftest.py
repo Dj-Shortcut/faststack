@@ -66,4 +66,4 @@ def app_controller(tmp_path):
         controller._path_resolver = MagicMock()
         controller.dataChanged = MagicMock()
         controller.ui_state = MagicMock()
-        return controller
+        yield controller

@@ -185,10 +185,11 @@ def test_set_sort_mode_noop_when_unchanged(app_controller, tmp_path):
     imgs = _make_images(tmp_path, [("a.jpg", 1000)])
     _populate(app_controller, imgs)
 
+    prev = app_controller.sync_ui_state.call_count
     app_controller.set_sort_mode("default")  # already default
 
-    # sync_ui_state should not be called again (the fixture's mock tracks calls)
-    app_controller.sync_ui_state.assert_not_called()
+    # sync_ui_state should not be called again
+    assert app_controller.sync_ui_state.call_count == prev
 
 
 # --- invalid sort mode ignored ---
@@ -317,8 +318,7 @@ def test_batch_split_does_not_block_sort(app_controller, tmp_path):
         for i, img in enumerate(app_controller.image_files)
         if img.path.name == "b.jpg"
     )
-    assert a_idx in batch_indices
-    assert b_idx in batch_indices
+    assert batch_indices == {a_idx, b_idx}
 
 
 def test_pending_stack_start_remapped_without_completed_stacks(
@@ -343,6 +343,7 @@ def test_pending_stack_start_remapped_without_completed_stacks(
 
     assert app_controller.sort_mode == "date"
     # a.jpg moved to index 2 under date sort
+    assert app_controller.stack_start_index == 2
     assert (
         app_controller.image_files[app_controller.stack_start_index].path.name
         == "a.jpg"
