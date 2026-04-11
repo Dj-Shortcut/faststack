@@ -732,6 +732,7 @@ ApplicationWindow {
         id: actionsMenu
         parent: Overlay.overlay
         implicitWidth: 220
+        onClosed: sortSubMenu.close()
 
         background: Rectangle {
             implicitWidth: 220
@@ -755,7 +756,7 @@ ApplicationWindow {
                     actionsMenu.close()
                 }
                 background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                    color: (parent.enabled && parent.hovered) ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
                 }
                 contentItem: Text {
                     text: parent.text
@@ -941,6 +942,13 @@ ApplicationWindow {
                         sortSubMenu.popup(sortPhotosLauncher, sortPhotosLauncher.width - 4, 0)
                     }
                 }
+                onClicked: {
+                    sortSubMenu.popup(sortPhotosLauncher, sortPhotosLauncher.width - 4, 0)
+                }
+                // Ensure keyboard activation works reliably
+                Keys.onReturnPressed: clicked()
+                Keys.onEnterPressed: clicked()
+                Keys.onSpacePressed: clicked()
             }
 
             // Clear Filename Filter (from old Main.qml)
@@ -1044,11 +1052,12 @@ ApplicationWindow {
                     actionsMenu.close()
                 }
                 background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                    color: (parent.enabled && parent.hovered) ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
                 }
                 contentItem: Text {
                     text: parent.text
-                    color: root.currentTextColor
+                    color: parent.enabled ? root.currentTextColor : (root.isDarkTheme ? "#666666" : "#999999")
+                    opacity: parent.enabled ? 1.0 : 0.6
                     verticalAlignment: Text.AlignVCenter
                     leftPadding: 10
                 }
