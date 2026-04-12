@@ -1505,9 +1505,9 @@ class ImageEditor:
         q = max(0.0, min(100.0, float(percentile))) / 100.0
         rank = (total - 1) * q
         if method == "higher":
-            target_index = int(math.ceil(rank))
+            target_index = math.ceil(rank)
         else:
-            target_index = int(math.floor(rank))
+            target_index = math.floor(rank)
 
         cdf = np.cumsum(hist)
         value = int(np.searchsorted(cdf, target_index + 1, side="left"))

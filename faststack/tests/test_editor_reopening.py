@@ -341,17 +341,20 @@ class TestEditorReopening(unittest.TestCase):
         # Tokens equal → still_on_same_image is True → editor_was_open → clear called
         self.controller.image_editor.clear.assert_called_once()
 
-    def test_save_finished_updates_origin_sidecar_after_navigation(self):
-        """Metadata must be written to the sidecar captured at save start, not
-        whichever folder is current when the background save completes."""
-        saved_path = Path("/folder-a/test.jpg")
-        backup_path = Path("/folder-a/test-backup.jpg")
+    def test_save_finished_skips_undo_after_directory_navigation(self):
+        """A save finishing after folder navigation must not repopulate the
+        new directory's undo stack, but it must still update the origin sidecar."""
+        main_path = Path("/folder-a/test.jpg")
+        saved_path = Path("/folder-a/test-developed.jpg")
+        backup_path = Path("/folder-a/test-developed-backup.jpg")
         origin_sidecar = MagicMock()
         replacement_sidecar = MagicMock()
         origin_sidecar.get_metadata.return_value = EntryMetadata(favorite=True)
+        self.controller.image_files[0].path = main_path
 
         # Simulate the controller having navigated to another folder before the
         # save callback fires.
+        self.controller.image_dir = Path("/folder-b")
         self.controller.sidecar = replacement_sidecar
 
         save_result = {
@@ -360,6 +363,8 @@ class TestEditorReopening(unittest.TestCase):
             "target": self.controller._key(saved_path),
             "save_image_key": self.controller._key(Path("test.jpg")),
             "editor_was_open": False,
+            "save_directory_key": self.controller._key(Path("/folder-a")),
+            "save_metadata_path": str(main_path),
             "started_from_restore_override": False,
             "save_sidecar": origin_sidecar,
         }
@@ -370,16 +375,44 @@ class TestEditorReopening(unittest.TestCase):
 
         origin_sidecar.update_metadata.assert_called_once()
         update_path, update_data = origin_sidecar.update_metadata.call_args.args
-        self.assertEqual(update_path, saved_path)
+        self.assertEqual(update_path, main_path)
         self.assertTrue(update_data["edited"])
         self.assertTrue(update_data["edited_date"])
         self.assertTrue(update_data["favorite"])
         replacement_sidecar.update_metadata.assert_not_called()
+        self.assertEqual(self.controller.undo_history, [])
+
+    def test_save_finished_records_undo_in_active_directory(self):
+        main_path = Path("/folder-a/test.jpg")
+        saved_path = Path("/folder-a/test-developed.jpg")
+        backup_path = Path("/folder-a/test-developed-backup.jpg")
+        origin_sidecar = MagicMock()
+        origin_sidecar.get_metadata.return_value = EntryMetadata(favorite=True)
+        self.controller.image_dir = Path("/folder-a")
+        self.controller.sidecar = origin_sidecar
+        self.controller.image_files[0].path = main_path
+
+        save_result = {
+            "success": True,
+            "result": (saved_path, backup_path),
+            "target": self.controller._key(saved_path),
+            "save_image_key": self.controller._key(Path("test.jpg")),
+            "editor_was_open": False,
+            "save_directory_key": self.controller._key(Path("/folder-a")),
+            "save_metadata_path": str(main_path),
+            "started_from_restore_override": False,
+            "save_sidecar": origin_sidecar,
+        }
+
+        with patch.object(self.controller, "refresh_image_list"):
+            with patch.object(self.controller, "_reindex_after_save"):
+                self.controller._on_save_finished(save_result)
 
         action_type, action_data, _ = self.controller.undo_history[-1]
         self.assertEqual(action_type, "save_edit")
         self.assertEqual(action_data["saved_path"], str(saved_path))
         self.assertEqual(action_data["backup_path"], str(backup_path))
+        self.assertEqual(action_data["metadata_path"], str(main_path))
         self.assertEqual(
             action_data["metadata_before"],
             {
@@ -398,6 +431,9 @@ class TestEditorReopening(unittest.TestCase):
             },
         )
         self.assertIs(action_data["sidecar"], origin_sidecar)
+        origin_sidecar.update_metadata.assert_called_once()
+        update_path, _ = origin_sidecar.update_metadata.call_args.args
+        self.assertEqual(update_path, main_path)
 
     def test_save_finished_malformed_result_clears_saving_status_message(self):
         target = self.controller._key(Path("test.jpg"))
@@ -419,6 +455,35 @@ class TestEditorReopening(unittest.TestCase):
         mock_status.assert_called_once_with(
             "Save finished, but the result payload was malformed.", timeout=5000
         )
+
+    def test_undo_save_edit_restores_metadata_using_metadata_path(self):
+        main_path = Path("/folder-a/test.jpg")
+        saved_path = Path("/folder-a/test-developed.jpg")
+        backup_path = Path("/folder-a/test-developed-backup.jpg")
+        metadata_sidecar = MagicMock()
+        metadata_sidecar.data.entries = {}
+        metadata_sidecar.metadata_key_for_path.return_value = "test"
+
+        self.controller.undo_history = [
+            (
+                "save_edit",
+                {
+                    "saved_path": str(saved_path),
+                    "backup_path": str(backup_path),
+                    "metadata_path": str(main_path),
+                    "metadata_before": {"favorite": True},
+                    "sidecar": metadata_sidecar,
+                },
+                123.0,
+            )
+        ]
+
+        with patch.object(self.controller, "_restore_backup_safe", return_value=True):
+            with patch.object(self.controller, "_post_undo_refresh_and_select"):
+                self.controller.undo_delete()
+
+        metadata_sidecar.metadata_key_for_path.assert_called_once_with(main_path)
+        self.assertTrue(metadata_sidecar.data.entries["test"].favorite)
 
 
 if __name__ == "__main__":

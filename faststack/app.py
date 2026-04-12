@@ -1841,6 +1841,11 @@ class AppController(QObject):
             # if the user continued editing after save was submitted.
             getattr(self.image_editor, "_edits_rev", None),
         )
+        save_metadata_path = (
+            self.image_files[self.current_index].path
+            if 0 <= self.current_index < len(self.image_files)
+            else save_target_path or self.image_editor.current_filepath
+        )
 
         if save_image_key and save_image_key in self._saving_keys:
             self.update_status_message(
@@ -1871,6 +1876,10 @@ class AppController(QObject):
             "editor_was_open": editor_was_open,
             "save_image_key": save_image_key,
             "session_token": session_token,
+            "save_directory_key": self._key(self.image_dir),
+            "save_metadata_path": (
+                str(save_metadata_path) if save_metadata_path else None
+            ),
             "started_from_restore_override": started_from_restore_override,
             # Keep metadata writes bound to the sidecar that owned the save
             # request. The user can navigate to another folder before the
@@ -2033,21 +2042,43 @@ class AppController(QObject):
             # 1. Update sidecar metadata FIRST so all following refreshes see it
             if saved_path:
                 save_sidecar = save_result.get("save_sidecar") or self.sidecar
-                metadata_before = self._mark_image_edited_in_sidecar(
-                    save_sidecar, saved_path
+                metadata_path = (
+                    Path(save_result["save_metadata_path"])
+                    if save_result.get("save_metadata_path")
+                    else saved_path
                 )
-                if backup_path:
+                metadata_before = self._mark_image_edited_in_sidecar(
+                    save_sidecar, metadata_path
+                )
+                save_directory_key = save_result.get("save_directory_key")
+                current_directory_key = self._key(self.image_dir)
+                should_record_undo = (
+                    backup_path
+                    and (
+                        save_directory_key is None
+                        or save_directory_key == current_directory_key
+                    )
+                )
+                if should_record_undo:
                     self.undo_history.append(
                         (
                             "save_edit",
                             self._build_edit_undo_data(
                                 saved_path,
                                 backup_path,
+                                metadata_path=metadata_path,
                                 metadata_before=metadata_before,
                                 sidecar=save_sidecar,
                             ),
                             time.time(),
                         )
+                    )
+                elif backup_path:
+                    log.info(
+                        "Skipping save_edit undo for %s after directory change: %s -> %s",
+                        saved_path,
+                        save_directory_key,
+                        current_directory_key,
                     )
 
             # 2. Update variants and re-select index
@@ -5457,9 +5488,13 @@ class AppController(QObject):
             "crop",
         }:
             try:
-                saved_path, backup_path, metadata_before, metadata_sidecar = (
-                    self._parse_edit_undo_data(action_data)
-                )
+                (
+                    saved_path,
+                    backup_path,
+                    metadata_path,
+                    metadata_before,
+                    metadata_sidecar,
+                ) = self._parse_edit_undo_data(action_data)
             except ValueError as e:
                 self.update_status_message(f"Undo failed: {e}")
                 return
@@ -5467,8 +5502,11 @@ class AppController(QObject):
             try:
                 if self._restore_backup_safe(saved_path, backup_path):
                     restore_sidecar = metadata_sidecar or self.sidecar
+                    restore_metadata_path = (
+                        Path(metadata_path) if metadata_path else Path(saved_path)
+                    )
                     self._restore_metadata_snapshot(
-                        restore_sidecar, Path(saved_path), metadata_before
+                        restore_sidecar, restore_metadata_path, metadata_before
                     )
                     self._post_undo_refresh_and_select(
                         Path(saved_path),
@@ -5908,6 +5946,7 @@ class AppController(QObject):
         saved_path: Path,
         backup_path: Path,
         *,
+        metadata_path: Optional[Path] = None,
         metadata_before: Optional[dict] = None,
         sidecar: Optional[SidecarManager] = None,
     ) -> dict:
@@ -5915,12 +5954,15 @@ class AppController(QObject):
         return {
             "saved_path": str(saved_path),
             "backup_path": str(backup_path),
+            "metadata_path": str(metadata_path) if metadata_path else None,
             "metadata_before": metadata_before,
             "sidecar": sidecar,
         }
 
     @staticmethod
-    def _parse_edit_undo_data(action_data: Any) -> tuple[str, str, Optional[dict], Any]:
+    def _parse_edit_undo_data(
+        action_data: Any,
+    ) -> tuple[str, str, Optional[str], Optional[dict], Any]:
         """Read both legacy tuple undo payloads and new dict payloads."""
         if isinstance(action_data, dict):
             saved_path = action_data.get("saved_path")
@@ -5929,11 +5971,12 @@ class AppController(QObject):
                 return (
                     str(saved_path),
                     str(backup_path),
+                    action_data.get("metadata_path"),
                     action_data.get("metadata_before"),
                     action_data.get("sidecar"),
                 )
         elif isinstance(action_data, (tuple, list)) and len(action_data) >= 2:
-            return str(action_data[0]), str(action_data[1]), None, None
+            return str(action_data[0]), str(action_data[1]), None, None, None
 
         raise ValueError(f"Unexpected edit undo payload: {action_data!r}")
 
@@ -7461,8 +7504,9 @@ class AppController(QObject):
 
         if save_result:
             saved_path, backup_path = save_result
+            metadata_path = self.image_files[self.current_index].path
             metadata_before = self._mark_image_edited_in_sidecar(
-                self.sidecar, saved_path
+                self.sidecar, metadata_path
             )
 
             # IF we were restoring from a variant, clear the override now that it's "the truth"
@@ -7476,6 +7520,7 @@ class AppController(QObject):
                     self._build_edit_undo_data(
                         saved_path,
                         backup_path,
+                        metadata_path=metadata_path,
                         metadata_before=metadata_before,
                         sidecar=self.sidecar,
                     ),
@@ -7720,8 +7765,9 @@ class AppController(QObject):
 
         if save_result:
             saved_path, backup_path = save_result
+            metadata_path = self.image_files[self.current_index].path
             metadata_before = self._mark_image_edited_in_sidecar(
-                self.sidecar, saved_path
+                self.sidecar, metadata_path
             )
             timestamp = time.time()
             self.undo_history.append(
@@ -7730,6 +7776,7 @@ class AppController(QObject):
                     self._build_edit_undo_data(
                         saved_path,
                         backup_path,
+                        metadata_path=metadata_path,
                         metadata_before=metadata_before,
                         sidecar=self.sidecar,
                     ),
@@ -7829,8 +7876,9 @@ class AppController(QObject):
             if save_result:
                 saved_path, backup_path = save_result
                 timestamp = time.time()
+                metadata_path = image_file.path
                 metadata_before = self._mark_image_edited_in_sidecar(
-                    self.sidecar, saved_path
+                    self.sidecar, metadata_path
                 )
 
                 self.undo_history.append(
@@ -7839,6 +7887,7 @@ class AppController(QObject):
                         self._build_edit_undo_data(
                             saved_path,
                             backup_path,
+                            metadata_path=metadata_path,
                             metadata_before=metadata_before,
                             sidecar=self.sidecar,
                         ),
@@ -7995,8 +8044,9 @@ class AppController(QObject):
         if save_result:
             saved_path, backup_path = save_result
             timestamp = time.time()
+            metadata_path = self.image_files[self.current_index].path
             metadata_before = self._mark_image_edited_in_sidecar(
-                self.sidecar, saved_path
+                self.sidecar, metadata_path
             )
 
             # 2. Update list and model to pick up changes
@@ -8011,6 +8061,7 @@ class AppController(QObject):
                     self._build_edit_undo_data(
                         saved_path,
                         backup_path,
+                        metadata_path=metadata_path,
                         metadata_before=metadata_before,
                         sidecar=self.sidecar,
                     ),
@@ -8114,9 +8165,6 @@ class AppController(QObject):
         self.ui_state.white_balance_by = by_value
         self.ui_state.white_balance_mg = mg_value
 
-        self.ui_state.currentImageSourceChanged.emit()
-        if self.ui_state.isHistogramVisible:
-            self.update_histogram()
         self._kick_preview_worker()
 
         by_dir = _awb_direction(by_value, "warming", "cooling")
@@ -8177,9 +8225,6 @@ class AppController(QObject):
         self.ui_state.white_balance_by = by_value
         self.ui_state.white_balance_mg = mg_value
 
-        self.ui_state.currentImageSourceChanged.emit()
-        if self.ui_state.isHistogramVisible:
-            self.update_histogram()
         self._kick_preview_worker()
 
         by_dir = _awb_direction(by_value, "warming", "cooling")
