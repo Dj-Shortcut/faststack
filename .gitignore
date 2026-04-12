@@ -9,7 +9,6 @@ ANTIGRAVITY_RULES.md
 .claude/
 .agent/
 tools/
-.codex/
 
 # We don't have any good docs yet
 docs/
