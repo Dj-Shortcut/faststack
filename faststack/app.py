@@ -1980,7 +1980,7 @@ class AppController(QObject):
             return
 
         result = save_result.get("result")
-        if isinstance(result, tuple) and len(result) >= 2:
+        if isinstance(result, tuple) and len(result) == 2:
             saved_path, backup_path = result
 
             # --- Post-Save Cleanup ---
@@ -5517,7 +5517,7 @@ class AppController(QObject):
                         self.update_status_message("Undid auto levels")
                     else:
                         self.update_status_message("Undid crop")
-            except Exception as e:
+            except (FileNotFoundError, OSError, shutil.Error) as e:
                 self.update_status_message(f"Undo failed: {e}")
                 if Path(backup_path).exists():
                     self.undo_history.append((action_type, action_data, timestamp))
@@ -8251,12 +8251,15 @@ class AppController(QObject):
             f"{estimate['g_mean']:.3f}/{estimate['b_mean']:.3f}"
         )
         t_awb_end = time.perf_counter()
+        selected_pixels = int(estimate.get("selected_pixels", 0))
+        stride = int(estimate.get("stride", 0))
+        neutrality_limit = float(estimate.get("neutrality_limit", 0.0))
         log.debug(
             "[AUTO_COLOR] total=%dms  (selected=%d stride=%d neutral<=%.3f)",
             int((t_awb_end - t_awb_start) * 1000),
-            int(estimate["selected_pixels"]),
-            int(estimate["stride"]),
-            estimate["neutrality_limit"],
+            selected_pixels,
+            stride,
+            neutrality_limit,
         )
         self.update_status_message(msg)
         return msg

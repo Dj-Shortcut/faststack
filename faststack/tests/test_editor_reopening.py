@@ -456,6 +456,27 @@ class TestEditorReopening(unittest.TestCase):
             "Save finished, but the result payload was malformed.", timeout=5000
         )
 
+    def test_save_finished_oversized_tuple_uses_malformed_result_cleanup(self):
+        target = self.controller._key(Path("test.jpg"))
+        self.controller._saves_in_flight = {target}
+        self.controller._saving_keys = {target}
+        self.controller.ui_state.isSaving = True
+
+        with patch.object(self.controller, "update_status_message") as mock_status:
+            self.controller._on_save_finished(
+                {
+                    "success": True,
+                    "result": ("saved.jpg", "backup.jpg", "extra"),
+                    "target": target,
+                    "save_image_key": target,
+                }
+            )
+
+        self.assertFalse(self.controller.ui_state.isSaving)
+        mock_status.assert_called_once_with(
+            "Save finished, but the result payload was malformed.", timeout=5000
+        )
+
     def test_undo_save_edit_restores_only_owned_metadata_fields(self):
         main_path = Path("/folder-a/test.jpg")
         saved_path = Path("/folder-a/test-developed.jpg")
@@ -529,6 +550,54 @@ class TestEditorReopening(unittest.TestCase):
         metadata_sidecar.metadata_key_for_path.assert_called_once_with(main_path)
         self.assertNotIn("test", metadata_sidecar.data.entries)
         metadata_sidecar.save.assert_called_once()
+
+    def test_undo_save_edit_propagates_unexpected_restore_errors(self):
+        saved_path = Path("/folder-a/test-developed.jpg")
+        backup_path = Path("/folder-a/test-developed-backup.jpg")
+
+        self.controller.undo_history = [
+            (
+                "save_edit",
+                {
+                    "saved_path": str(saved_path),
+                    "backup_path": str(backup_path),
+                    "sidecar": MagicMock(),
+                },
+                123.0,
+            )
+        ]
+
+        with patch.object(self.controller, "_restore_backup_safe", return_value=True):
+            with patch.object(
+                self.controller,
+                "_restore_metadata_snapshot",
+                side_effect=RuntimeError("unexpected bug"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    self.controller.undo_delete()
+
+    def test_auto_white_balance_lab_tolerates_missing_estimate_diagnostics(self):
+        self.controller.image_editor.original_image = MagicMock()
+        self.controller.image_editor.estimate_auto_white_balance.return_value = {
+            "by_value": 0.25,
+            "mg_value": -0.1,
+            "r_mean": 0.40,
+            "g_mean": 0.42,
+            "b_mean": 0.38,
+        }
+
+        with patch("faststack.app.config.getfloat", return_value=0.7):
+            with patch("faststack.app.config.getint", return_value=0):
+                with patch.object(self.controller, "_kick_preview_worker"):
+                    message = self.controller.auto_white_balance_lab()
+
+        self.assertIn("AWB:", message)
+        self.controller.image_editor.set_edit_param.assert_any_call(
+            "white_balance_by", 0.25
+        )
+        self.controller.image_editor.set_edit_param.assert_any_call(
+            "white_balance_mg", -0.1
+        )
 
     def test_quick_awb_loads_viewed_developed_variant(self):
         main_path = Path("/folder-a/test.jpg")
