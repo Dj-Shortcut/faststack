@@ -15,6 +15,22 @@ Item {
     // Expose zoom state to parent (Main.qml title bar)
     readonly property real currentZoomScale: imageRotator.zoomScale
     readonly property real currentFitScale: imageRotator.fitScale
+    // Freeze source swaps during crop drags so async preview refreshes
+    // cannot change the visual scale in the middle of the gesture.
+    readonly property string requestedImageSource: uiState && uiState.imageCount > 0 ? uiState.currentImageSource : ""
+    property string cropDragImageSource: ""
+    readonly property bool isCropSourceFrozen: cropDragImageSource !== "" && ((mainMouseArea && mainMouseArea.isCropDragging) || (uiState && uiState.isCropping))
+    readonly property string displayedImageSource: isCropSourceFrozen ? cropDragImageSource : requestedImageSource
+
+    function freezeCropImageSource() {
+        if (cropDragImageSource === "") {
+            cropDragImageSource = mainImage && mainImage.source ? mainImage.source : requestedImageSource
+        }
+    }
+
+    function releaseCropImageSource() {
+        cropDragImageSource = ""
+    }
     
     Connections {
         target: uiState
@@ -32,29 +48,33 @@ Item {
                 if (uiState.isZoomed) uiState.setZoomed(false)
             }
         }
+        function onIsCroppingChanged() {
+            if (uiState && uiState.isCropping) {
+                loupeView.freezeCropImageSource()
+            } else {
+                loupeView.releaseCropImageSource()
+            }
+        }
     }
-    
+
     Keys.onEscapePressed: (event) => {
         if (uiState && uiState.isCropping) {
             if (mainMouseArea.isRotating) {
                 // Revert rotation
                 mainMouseArea.cropRotation = mainMouseArea.cropStartRotation
                 if (controller) controller.set_straighten_angle(mainMouseArea.cropRotation, -1)
-                
+
+                mainMouseArea.endCropInteraction()
                 mainMouseArea.isRotating = false
-                mainMouseArea.cropDragMode = "none"
-                mainMouseArea.isCropDragging = false
                 event.accepted = true
             } else if (controller) {
+                mainMouseArea.endCropInteraction()
                 controller.cancel_crop_mode()
                 mainMouseArea.cropRotation = 0 // Reset local rotation
                 event.accepted = true
             }
         }
     }
-
-
-
 
     Keys.onPressed: (event) => {
         // Zoom Shortcuts (Ctrl+1..4)
@@ -148,7 +168,18 @@ Item {
             // Fix C: Persist requested absolute zoom across source changes
             property real targetAbsoluteZoom: -1.0
             
+            // Zoom/pan lock: when >= 0, any change to zoomScale is reverted.
+            // Active only during crop drag to keep the coordinate system stable.
+            property real _lockedZoom: -1
+            property real _lockedPanX: -1e9
+            property real _lockedPanY: -1e9
+            
             onZoomScaleChanged: {
+                // During crop drag, revert any zoom changes to keep coordinates stable
+                if (_lockedZoom >= 0 && Math.abs(zoomScale - _lockedZoom) > 0.0001) {
+                    zoomScale = _lockedZoom
+                    return
+                }
                 mainImage.updateZoomState()
                 if (cropOverlay.visible) cropOverlay.updateCropRect()
             }
@@ -255,10 +286,18 @@ Item {
                 Translate {
                     id: panTransform
                     onXChanged: {
+                        if (imageRotator._lockedPanX > -1e8 && Math.abs(x - imageRotator._lockedPanX) > 0.01) {
+                            x = imageRotator._lockedPanX
+                            return
+                        }
                         mainImage.updateHistogramWithZoom()
                         if (cropOverlay.visible) cropOverlay.updateCropRect()
                     }
                     onYChanged: {
+                        if (imageRotator._lockedPanY > -1e8 && Math.abs(y - imageRotator._lockedPanY) > 0.01) {
+                            y = imageRotator._lockedPanY
+                            return
+                        }
                         mainImage.updateHistogramWithZoom()
                         if (cropOverlay.visible) cropOverlay.updateCropRect()
                     }
@@ -374,7 +413,7 @@ Item {
                     }
                 }
                 
-                source: uiState && uiState.imageCount > 0 ? uiState.currentImageSource : ""
+                source: loupeView.displayedImageSource
                 
                 function _currentDpr() {
                     // Per-window DPR is the safest (multi-monitor setups)
@@ -385,6 +424,12 @@ Item {
 
                 function handleSourceSizeChange() {
                     if (mainImage.sourceSize.width <= 0 || mainImage.sourceSize.height <= 0) return
+
+                    if (mainMouseArea.isCropDragging) {
+                        // Mark stale so onReleased will pick up the new geometry
+                        _sourceSizeStale = true
+                        return
+                    }
 
                     const dpr = _currentDpr()
 
@@ -411,7 +456,14 @@ Item {
 
                 // Force reset when source changes (existing logic)
                 onSourceChanged: {
-                    // Reset base size for new image so we pick up the new sourceSize
+                    if (mainMouseArea.isCropDragging) {
+                        // Source changed mid-drag (e.g. high-res edit buffer loading).
+                        // Defer ALL visual/geometry resets so the coordinate system
+                        // stays stable and the image doesn't flash black.
+                        mainImage._sourceSizeStale = true
+                        return
+                    }
+
                     imageRotator.baseW = 0
                     imageRotator.baseH = 0
                     
@@ -433,6 +485,7 @@ Item {
                 smooth: false // Crisp rendering for technical accuracy
                 mipmap: false // Crisp rendering
                 
+                property bool _sourceSizeStale: false
                 property bool isZooming: false
         
                 // IMPORTANT: tell Python the *viewport* size, not the sourceSize size
@@ -590,6 +643,51 @@ Item {
             }
         }
 
+        function setCropBoxStart(left, top, right, bottom) {
+            cropBoxStartLeft = left
+            cropBoxStartTop = top
+            cropBoxStartRight = right
+            cropBoxStartBottom = bottom
+        }
+
+        function setCropBoxStartFromBox(box) {
+            if (!box || box.length !== 4) return
+            setCropBoxStart(box[0], box[1], box[2], box[3])
+        }
+
+        function beginNewCrop(mouseX, mouseY, mx, my) {
+            cropDragMode = "new"
+            cropStartX = mouseX
+            cropStartY = mouseY
+            setCropBoxStart(mx, my, mx, my)
+            uiState.currentCropBox = [Math.round(mx), Math.round(my), Math.round(mx), Math.round(my)]
+        }
+
+        function beginCropInteraction() {
+            loupeView.freezeCropImageSource()
+            isCropDragging = true
+            imageRotator._lockedZoom = imageRotator.zoomScale
+            imageRotator._lockedPanX = panTransform.x
+            imageRotator._lockedPanY = panTransform.y
+        }
+
+        function endCropInteraction() {
+            isCropDragging = false
+            cropDragMode = "none"
+
+            imageRotator._lockedZoom = -1
+            imageRotator._lockedPanX = -1e9
+            imageRotator._lockedPanY = -1e9
+
+            if (mainMouseArea.isRotating) imageRotator.recomputeFitScale(true)
+            loupeView.forceActiveFocus()
+
+            if (mainImage._sourceSizeStale) {
+                mainImage._sourceSizeStale = false
+                mainImage.handleSourceSizeChange()
+            }
+        }
+
         onPressed: function(mouse) {
             lastX = mouse.x
             lastY = mouse.y
@@ -612,29 +710,28 @@ Item {
             }
 
             if (mouse.button === Qt.RightButton) {
+                // Activate drag guard BEFORE toggle_crop_mode so that any
+                // source/geometry changes it triggers are properly deferred.
+                beginCropInteraction()
+
                 if (!uiState.isCropping && controller) {
                     controller.toggle_crop_mode() // Ensure mode is ON
+                }
+
+                if (!uiState || !uiState.isCropping) {
+                    endCropInteraction()
+                    return
                 }
                 
                 // Ensure loupeView has active focus so Escape key works
                 loupeView.forceActiveFocus()
                 
                 // Start a NEW crop rectangle immediately from the clicked point
-                // This fulfills the "right-click drag crops immediately" requirement
                 var coords = mapToImageCoordinates(Qt.point(mouse.x, mouse.y))
                 var mx = coords.x * 1000
                 var my = coords.y * 1000
-                
-                cropDragMode = "new"
-                cropStartX = mouse.x
-                cropStartY = mouse.y
-                cropBoxStartLeft = mx
-                cropBoxStartTop = my
-                cropBoxStartRight = mx
-                cropBoxStartBottom = my
-                
-                uiState.currentCropBox = [Math.round(mx), Math.round(my), Math.round(mx), Math.round(my)]
-                isCropDragging = true
+
+                beginNewCrop(mouse.x, mouse.y, mx, my)
                 return
             }
             
@@ -657,7 +754,8 @@ Item {
                 // This ensures handles remain usable at all zoom levels
                 var edgeThreshold = Math.max(5, Math.min(40, Math.max(threshX, threshY)))
 
-                var inside = mx >= box[0] && mx <= box[2] && my >= box[1] && my <= box[3]
+                // Make it so the user doesn't have to click exactly on the crop box to modify it
+                var inside = mx >= (box[0] - edgeThreshold) && mx <= (box[2] + edgeThreshold) && my >= (box[1] - edgeThreshold) && my <= (box[3] + edgeThreshold)
                 
                 if (mainMouseArea.isRotating && cropOverlay.visible && rotateKnob.visible) {
                     // knob center in mainMouseArea coords (includes cropRect rotation)
@@ -694,13 +792,10 @@ Item {
 
                         // Seed cropBoxStart variables
                         if (box && box.length === 4) {
-                            cropBoxStartLeft = box[0]
-                            cropBoxStartTop = box[1]
-                            cropBoxStartRight = box[2]
-                            cropBoxStartBottom = box[3]
+                            setCropBoxStartFromBox(box)
                         }
 
-                        isCropDragging = true
+                        beginCropInteraction()
                         return
                     }
                 }
@@ -708,16 +803,7 @@ Item {
                 // If crop box is full image, always start a new crop
                 else if (isFullImage) {
                     // Start a new crop rectangle from the clicked point
-                    cropDragMode = "new"
-                    cropStartX = mouse.x
-                    cropStartY = mouse.y
-                    
-                    cropBoxStartLeft = mx
-                    cropBoxStartTop = my
-                    cropBoxStartRight = mx
-                    cropBoxStartBottom = my
-                    
-                    uiState.currentCropBox = [Math.round(mx), Math.round(my), Math.round(mx), Math.round(my)]
+                    beginNewCrop(mouse.x, mouse.y, mx, my)
                 } else if (inside) {
                     // Determine which edge/corner is being dragged (Image Space)
                     var nearLeft = Math.abs(mx - box[0]) < edgeThreshold
@@ -734,39 +820,24 @@ Item {
                     else if (nearTop) cropDragMode = "top"
                     else if (nearBottom) cropDragMode = "bottom"
                     else cropDragMode = "move"
-                    
-                    // Store initial crop box
-                    cropBoxStartLeft = box[0]
-                    cropBoxStartTop = box[1]
-                    cropBoxStartRight = box[2]
-                    cropBoxStartBottom = box[3]
+
+                    setCropBoxStartFromBox(box)
                 } else {
                     // Start new crop rectangle
-                    cropDragMode = "new"
-                    cropStartX = mouse.x
-                    cropStartY = mouse.y
-                    
-                    // Initialize anchors
-                    cropBoxStartLeft = mx
-                    cropBoxStartRight = mx
-                    cropBoxStartTop = my
-                    cropBoxStartBottom = my
-                    
-                    uiState.currentCropBox = [Math.round(mx), Math.round(my), Math.round(mx), Math.round(my)]
+                    beginNewCrop(mouse.x, mouse.y, mx, my)
                 }
-                isCropDragging = true
+                beginCropInteraction()
             }
         }        
         // Legacy getCropRect removed - using Image Space hit testing instead.
         // mapToImageCoordinates maps directly to mainImage
         function mapToImageCoordinates(screenPoint) {
-            if (!mainImage || mainImage.width <= 0) return {x:0, y:0}
-            
-            // Simplified: Use Qt-native mapping to handle scale, pan, and rotation
+            if (!mainImage) return {x:0, y:0}
+            var w = mainImage.width > 0 ? mainImage.width : mainImage.sourceSize.width
+            var h = mainImage.height > 0 ? mainImage.height : mainImage.sourceSize.height
+            if (w <= 0 || h <= 0) return {x:0, y:0}
             var p = mainImage.mapFromItem(mainMouseArea, screenPoint.x, screenPoint.y)
-            
-            // Normalize (0-1)
-            return { x: p.x / mainImage.width, y: p.y / mainImage.height }
+            return { x: p.x / w, y: p.y / h }
         }
         onPositionChanged: function(mouse) {
             // Darken painting drag — clamp to image bounds
@@ -891,13 +962,7 @@ Item {
 
             isDraggingOutside = false
             if (uiState && uiState.isCropping && isCropDragging) {
-
-                isCropDragging = false
-                cropDragMode = "none"
-                // Settle zoom/pan after rotation ends (Force recompute)
-                if (mainMouseArea.isRotating) imageRotator.recomputeFitScale(true)
-                // Ensure loupeView has active focus so Escape key works
-                loupeView.forceActiveFocus()
+                endCropInteraction()
             }
         }
 
@@ -964,7 +1029,7 @@ Item {
         }
         
         function updateCropBox(x1, y1, x2, y2, applyAspectRatio = false) {
-            if (!uiState || !mainImage.source || mainImage.width <= 0) return
+            if (!uiState || !mainImage.source) return
 
             var imgCoord1 = mapToImageCoordinates(Qt.point(x1, y1))
             var imgCoord2 = mapToImageCoordinates(Qt.point(x2, y2))
