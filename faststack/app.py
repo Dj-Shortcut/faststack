@@ -48,7 +48,7 @@ Image.MAX_IMAGE_PIXELS = 200_000_000  # 200 megapixels, enough for most photos
 # ⬇️ these are the ones that went missing
 from faststack.config import config
 from faststack.logging_setup import setup_logging
-from faststack.models import ImageFile, DecodedImage
+from faststack.models import ImageFile, DecodedImage, EntryMetadata
 from faststack.io.indexer import (
     find_images,
     find_images_with_variants,
@@ -101,8 +101,8 @@ from faststack.deletion_types import (
     UIStateRestoration,
 )
 
-# AWB thresholds on the -1..+1 normalised slider range.
-# NOOP: skip applying correction entirely (≈ 0.64 Lab units — below perceptible).
+# AWB thresholds on the -1..+1 normalized slider range.
+# NOOP: skip corrections that are effectively imperceptible in the current gain model.
 # LABEL: below this the direction word becomes "neutral" in the status message.
 _AWB_NOOP_EPS = 0.005
 _AWB_LABEL_EPS = 0.002
@@ -1841,6 +1841,11 @@ class AppController(QObject):
             # if the user continued editing after save was submitted.
             getattr(self.image_editor, "_edits_rev", None),
         )
+        save_metadata_path = (
+            self.image_files[self.current_index].path
+            if 0 <= self.current_index < len(self.image_files)
+            else save_target_path or self.image_editor.current_filepath
+        )
 
         if save_image_key and save_image_key in self._saving_keys:
             self.update_status_message(
@@ -1871,7 +1876,15 @@ class AppController(QObject):
             "editor_was_open": editor_was_open,
             "save_image_key": save_image_key,
             "session_token": session_token,
+            "save_directory_key": self._key(self.image_dir),
+            "save_metadata_path": (
+                str(save_metadata_path) if save_metadata_path else None
+            ),
             "started_from_restore_override": started_from_restore_override,
+            # Keep metadata writes bound to the sidecar that owned the save
+            # request. The user can navigate to another folder before the
+            # background save completes, and self.sidecar may change.
+            "save_sidecar": self.sidecar,
         }
 
         # Submit save work to background thread — operates only on the snapshot
@@ -1967,8 +1980,8 @@ class AppController(QObject):
             return
 
         result = save_result.get("result")
-        if isinstance(result, tuple) and len(result) >= 2:
-            saved_path, _ = result  # backup_path unused
+        if isinstance(result, tuple) and len(result) == 2:
+            saved_path, backup_path = result
 
             # --- Post-Save Cleanup ---
 
@@ -2028,7 +2041,42 @@ class AppController(QObject):
 
             # 1. Update sidecar metadata FIRST so all following refreshes see it
             if saved_path:
-                self.sidecar.update_metadata(saved_path, {"edited": True})
+                save_sidecar = save_result.get("save_sidecar") or self.sidecar
+                metadata_path = (
+                    Path(save_result["save_metadata_path"])
+                    if save_result.get("save_metadata_path")
+                    else saved_path
+                )
+                metadata_before = self._mark_image_edited_in_sidecar(
+                    save_sidecar, metadata_path
+                )
+                save_directory_key = save_result.get("save_directory_key")
+                current_directory_key = self._key(self.image_dir)
+                should_record_undo = backup_path and (
+                    save_directory_key is None
+                    or save_directory_key == current_directory_key
+                )
+                if should_record_undo:
+                    self.undo_history.append(
+                        (
+                            "save_edit",
+                            self._build_edit_undo_data(
+                                saved_path,
+                                backup_path,
+                                metadata_path=metadata_path,
+                                metadata_before=metadata_before,
+                                sidecar=save_sidecar,
+                            ),
+                            time.time(),
+                        )
+                    )
+                elif backup_path:
+                    log.info(
+                        "Skipping save_edit undo for %s after directory change: %s -> %s",
+                        saved_path,
+                        save_directory_key,
+                        current_directory_key,
+                    )
 
             # 2. Update variants and re-select index
             self.refresh_image_list()
@@ -2054,6 +2102,9 @@ class AppController(QObject):
         else:
             # Success reported but result shape unexpected
             log.warning("Save finished with unexpected result shape: %r", result)
+            self.update_status_message(
+                "Save finished, but the result payload was malformed.", timeout=5000
+            )
 
     # --- Actions ---
 
@@ -5427,46 +5478,49 @@ class AppController(QObject):
             if self._thumbnail_model and self._is_grid_view_active:
                 self._thumbnail_model.refresh()
 
-        elif action_type == "auto_white_balance":
-            saved_path, backup_path = action_data
+        elif action_type in {
+            "save_edit",
+            "auto_white_balance",
+            "auto_levels",
+            "crop",
+        }:
             try:
-                if self._restore_backup_safe(saved_path, backup_path):
-                    self._post_undo_refresh_and_select(
-                        Path(saved_path), update_hist=True
-                    )
-                    self.update_status_message("Undid auto white balance")
-            except Exception as e:
+                (
+                    saved_path,
+                    backup_path,
+                    metadata_path,
+                    metadata_before,
+                    metadata_sidecar,
+                ) = self._parse_edit_undo_data(action_data)
+            except ValueError as e:
                 self.update_status_message(f"Undo failed: {e}")
-                if Path(backup_path).exists():
-                    self.undo_history.append(
-                        ("auto_white_balance", action_data, timestamp)
-                    )
+                return
 
-        elif action_type == "auto_levels":
-            saved_path, backup_path = action_data
             try:
                 if self._restore_backup_safe(saved_path, backup_path):
-                    self._post_undo_refresh_and_select(
-                        Path(saved_path), update_hist=True
+                    restore_sidecar = metadata_sidecar or self.sidecar
+                    restore_metadata_path = (
+                        Path(metadata_path) if metadata_path else Path(saved_path)
                     )
-                    self.update_status_message("Undid auto levels")
-            except Exception as e:
+                    self._restore_metadata_snapshot(
+                        restore_sidecar, restore_metadata_path, metadata_before
+                    )
+                    self._post_undo_refresh_and_select(
+                        Path(saved_path),
+                        update_hist=action_type != "crop",
+                    )
+                    if action_type == "save_edit":
+                        self.update_status_message("Undid saved edit")
+                    elif action_type == "auto_white_balance":
+                        self.update_status_message("Undid auto white balance")
+                    elif action_type == "auto_levels":
+                        self.update_status_message("Undid auto levels")
+                    else:
+                        self.update_status_message("Undid crop")
+            except (FileNotFoundError, OSError, shutil.Error) as e:
                 self.update_status_message(f"Undo failed: {e}")
                 if Path(backup_path).exists():
-                    self.undo_history.append(("auto_levels", action_data, timestamp))
-
-        elif action_type == "crop":
-            saved_path, backup_path = action_data
-            try:
-                if self._restore_backup_safe(saved_path, backup_path):
-                    self._post_undo_refresh_and_select(
-                        Path(saved_path), update_hist=False
-                    )
-                    self.update_status_message("Undid crop")
-            except Exception as e:
-                self.update_status_message(f"Undo failed: {e}")
-                if Path(backup_path).exists():
-                    self.undo_history.append(("crop", action_data, timestamp))
+                    self.undo_history.append((action_type, action_data, timestamp))
 
     def shutdown_qt(self):
         """Shutdown Qt objects only - MUST run on main/Qt thread."""
@@ -5860,6 +5914,100 @@ class AppController(QObject):
 
         self.ui_state.statusMessage = message
         QTimer.singleShot(timeout, clear_message)
+
+    def _capture_metadata_snapshot(
+        self, sidecar: SidecarManager, image_path: Path
+    ) -> Optional[dict]:
+        """Capture the current sidecar metadata for undo/restore."""
+        meta = sidecar.get_metadata(image_path, create=False)
+        if meta is None:
+            return None
+        return {
+            field_name: getattr(meta, field_name)
+            for field_name in EntryMetadata.__dataclass_fields__
+        }
+
+    def _mark_image_edited_in_sidecar(
+        self, sidecar: SidecarManager, image_path: Path
+    ) -> Optional[dict]:
+        """Mark an image as edited and return the pre-save metadata snapshot."""
+        old_meta = self._capture_metadata_snapshot(sidecar, image_path)
+        new_meta = dict(old_meta or {})
+        new_meta["edited"] = True
+        new_meta["edited_date"] = datetime.now().strftime("%Y-%m-%d")
+        sidecar.update_metadata(image_path, new_meta)
+        return old_meta
+
+    @staticmethod
+    def _build_edit_undo_data(
+        saved_path: Path,
+        backup_path: Path,
+        *,
+        metadata_path: Optional[Path] = None,
+        metadata_before: Optional[dict] = None,
+        sidecar: Optional[SidecarManager] = None,
+    ) -> dict:
+        """Build a backward-compatible undo payload for saved edit operations."""
+        return {
+            "saved_path": str(saved_path),
+            "backup_path": str(backup_path),
+            "metadata_path": str(metadata_path) if metadata_path else None,
+            "metadata_before": metadata_before,
+            "sidecar": sidecar,
+        }
+
+    @staticmethod
+    def _parse_edit_undo_data(
+        action_data: Any,
+    ) -> tuple[str, str, Optional[str], Optional[dict], Any]:
+        """Read both legacy tuple undo payloads and new dict payloads."""
+        if isinstance(action_data, dict):
+            saved_path = action_data.get("saved_path")
+            backup_path = action_data.get("backup_path")
+            if saved_path and backup_path:
+                return (
+                    str(saved_path),
+                    str(backup_path),
+                    action_data.get("metadata_path"),
+                    action_data.get("metadata_before"),
+                    action_data.get("sidecar"),
+                )
+        elif isinstance(action_data, (tuple, list)) and len(action_data) >= 2:
+            return str(action_data[0]), str(action_data[1]), None, None, None
+
+        raise ValueError(f"Unexpected edit undo payload: {action_data!r}")
+
+    def _restore_metadata_snapshot(
+        self, sidecar: SidecarManager, image_path: Path, snapshot: Optional[dict]
+    ) -> None:
+        """Restore only the metadata fields owned by edit-save actions."""
+        stable_key = sidecar.metadata_key_for_path(image_path)
+        current_meta = sidecar.data.entries.get(stable_key)
+        restored_edited = bool(snapshot.get("edited", False)) if snapshot else False
+        restored_edited_date = snapshot.get("edited_date") if snapshot else None
+        changed = False
+
+        if current_meta is None:
+            if not restored_edited and restored_edited_date is None:
+                return
+            current_meta = sidecar.get_metadata(image_path, create=True)
+            changed = True
+
+        if current_meta.edited != restored_edited:
+            current_meta.edited = restored_edited
+            changed = True
+        if current_meta.edited_date != restored_edited_date:
+            current_meta.edited_date = restored_edited_date
+            changed = True
+
+        if snapshot is None:
+            default_meta = EntryMetadata()
+            if current_meta.__dict__ == default_meta.__dict__:
+                del sidecar.data.entries[stable_key]
+                changed = True
+
+        if changed:
+            sidecar.save()
 
     def _is_image_saving(self, file_path_str: str) -> bool:
         if not file_path_str or not hasattr(self, "_saving_keys"):
@@ -7363,6 +7511,10 @@ class AppController(QObject):
 
         if save_result:
             saved_path, backup_path = save_result
+            metadata_path = self.image_files[self.current_index].path
+            metadata_before = self._mark_image_edited_in_sidecar(
+                self.sidecar, metadata_path
+            )
 
             # IF we were restoring from a variant, clear the override now that it's "the truth"
             if is_restoring:
@@ -7370,11 +7522,18 @@ class AppController(QObject):
 
             timestamp = time.time()
             self.undo_history.append(
-                ("crop", (str(saved_path), str(backup_path)), timestamp)
+                (
+                    "crop",
+                    self._build_edit_undo_data(
+                        saved_path,
+                        backup_path,
+                        metadata_path=metadata_path,
+                        metadata_before=metadata_before,
+                        sidecar=self.sidecar,
+                    ),
+                    timestamp,
+                )
             )
-
-            # Mark as edited in sidecar
-            self.sidecar.update_metadata(saved_path, {"edited": True})
 
             # Exit crop mode
             self.ui_state.isCropping = False
@@ -7613,13 +7772,24 @@ class AppController(QObject):
 
         if save_result:
             saved_path, backup_path = save_result
+            metadata_path = self.image_files[self.current_index].path
+            metadata_before = self._mark_image_edited_in_sidecar(
+                self.sidecar, metadata_path
+            )
             timestamp = time.time()
             self.undo_history.append(
-                ("auto_levels", (saved_path, backup_path), timestamp)
+                (
+                    "auto_levels",
+                    self._build_edit_undo_data(
+                        saved_path,
+                        backup_path,
+                        metadata_path=metadata_path,
+                        metadata_before=metadata_before,
+                        sidecar=self.sidecar,
+                    ),
+                    timestamp,
+                )
             )
-
-            # 1. Update sidecar metadata FIRST so all following refreshes see it
-            self.sidecar.update_metadata(saved_path, {"edited": True})
 
             # 2. Update list and model to pick up changes
             self.refresh_image_list()
@@ -7713,12 +7883,23 @@ class AppController(QObject):
             if save_result:
                 saved_path, backup_path = save_result
                 timestamp = time.time()
-
-                # Mark as edited in sidecar
-                self.sidecar.update_metadata(saved_path, {"edited": True})
+                metadata_path = image_file.path
+                metadata_before = self._mark_image_edited_in_sidecar(
+                    self.sidecar, metadata_path
+                )
 
                 self.undo_history.append(
-                    ("auto_levels", (saved_path, backup_path), timestamp)
+                    (
+                        "auto_levels",
+                        self._build_edit_undo_data(
+                            saved_path,
+                            backup_path,
+                            metadata_path=metadata_path,
+                            metadata_before=metadata_before,
+                            sidecar=self.sidecar,
+                        ),
+                        timestamp,
+                    )
                 )
                 self.image_editor.clear()
                 self.image_cache.pop_path(saved_path)
@@ -7820,16 +8001,25 @@ class AppController(QObject):
         t_start = time.perf_counter()
 
         image_file = self.image_files[self.current_index]
-        filepath = str(image_file.path)
+        if self.view_override_path:
+            active_path = Path(self.view_override_path)
+        else:
+            active_path = self.get_active_edit_path(self.current_index)
+        filepath = str(active_path)
 
         # Ensure image is loaded in editor (skip if already loaded)
-        if (
-            not self.image_editor.current_filepath
-            or str(self.image_editor.current_filepath) != filepath
-        ):
+        editor_path = self.image_editor.current_filepath
+        paths_match = False
+        if editor_path:
+            try:
+                paths_match = Path(editor_path).resolve() == active_path.resolve()
+            except (OSError, ValueError):
+                paths_match = str(editor_path) == filepath
+
+        if not paths_match:
             cached_preview = self.get_decoded_image(self.current_index)
             if not self.image_editor.load_image(
-                filepath, cached_preview=cached_preview
+                filepath, cached_preview=cached_preview, preview_only=True
             ):
                 self.update_status_message("Failed to load image")
                 return
@@ -7847,7 +8037,14 @@ class AppController(QObject):
 
         # Save the edited image (this creates a backup automatically)
         try:
-            save_result = self.image_editor.save_image()
+            save_target_path = self._get_save_target_path_for_current_view()
+            save_result = self.image_editor.save_image_uint8_white_balance(
+                save_target_path=save_target_path
+            )
+            if save_result is None:
+                save_result = self.image_editor.save_image(
+                    save_target_path=save_target_path
+                )
         except RuntimeError as e:
             log.warning("quick_auto_white_balance: Save failed: %s", e)
             self.update_status_message(f"Failed to save image: {e}")
@@ -7863,8 +8060,10 @@ class AppController(QObject):
         if save_result:
             saved_path, backup_path = save_result
             timestamp = time.time()
-            # 1. Update sidecar metadata FIRST so all following refreshes see it
-            self.sidecar.update_metadata(saved_path, {"edited": True})
+            metadata_path = self.image_files[self.current_index].path
+            metadata_before = self._mark_image_edited_in_sidecar(
+                self.sidecar, metadata_path
+            )
 
             # 2. Update list and model to pick up changes
             self.refresh_image_list()
@@ -7873,7 +8072,17 @@ class AppController(QObject):
             self._reindex_after_save(saved_path)
 
             self.undo_history.append(
-                ("auto_white_balance", (saved_path, backup_path), timestamp)
+                (
+                    "auto_white_balance",
+                    self._build_edit_undo_data(
+                        saved_path,
+                        backup_path,
+                        metadata_path=metadata_path,
+                        metadata_before=metadata_before,
+                        sidecar=self.sidecar,
+                    ),
+                    timestamp,
+                )
             )
 
             # Force the image editor to clear its current state so it reloads fresh
@@ -7972,8 +8181,7 @@ class AppController(QObject):
         self.ui_state.white_balance_by = by_value
         self.ui_state.white_balance_mg = mg_value
 
-        self.ui_refresh_generation += 1
-        self.ui_state.currentImageSourceChanged.emit()
+        self._kick_preview_worker()
 
         by_dir = _awb_direction(by_value, "warming", "cooling")
         mg_dir = _awb_direction(mg_value, "magenta", "greener")
@@ -7988,8 +8196,8 @@ class AppController(QObject):
 
     def auto_white_balance_lab(self) -> Optional[str]:
         """
-        Calculates and applies auto white balance using the Lab color space,
-        filtering out clipped and saturated pixels for a more robust result.
+        Calculates and applies auto white balance using a robust preview-sized
+        neutral-pixel estimate aligned to the editor's slider model.
 
         Returns the detail message string if a correction was applied, or None.
         """
@@ -7997,114 +8205,30 @@ class AppController(QObject):
             log.warning("No image loaded in editor for auto white balance")
             return None
 
-        try:
-            import cv2  # numpy is already imported at module level (line 79)
-        except ImportError:
-            log.error(
-                "OpenCV not found. Please install with: pip install opencv-python"
-            )
-            self.update_status_message("Error: OpenCV not installed")
-            return None
-
         t_awb_start = time.perf_counter()
-
-        # Subsample from float_image for speed.  float_image is the authoritative
-        # display-referred sRGB float32 buffer (editor.py:504-505 does
-        # np.array(rgb) / 255.0 from Pillow sRGB), same colour space as the
-        # old PIL-based path, so the AWB result is identical (within subsampling noise).
-        img_arr = self.image_editor.float_image
-        if img_arr is not None:
-            h, w = img_arr.shape[:2]
-            TARGET_PIXELS = 2_000_000
-            stride = max(1, int(np.sqrt(h * w / TARGET_PIXELS)))
-            sub = np.ascontiguousarray(
-                img_arr[::stride, ::stride]
-            )  # contiguous for cv2
-            arr = (np.clip(sub, 0.0, 1.0) * 255).astype(np.uint8)
-            log.debug(
-                "AWB: subsampled %dx%d -> %dx%d (stride %d)",
-                w,
-                h,
-                arr.shape[1],
-                arr.shape[0],
-                stride,
-            )
-        else:
-            # Fallback: use original_image (full PIL Image)
-            img = self.image_editor.original_image
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            arr = np.array(img, dtype=np.uint8)
-
-        t_awb_subsample = time.perf_counter()
-
-        # --- Tunable Constants for Auto White Balance (from config) ---
-        _LOWER_BOUND_RGB = config.getint("awb", "rgb_lower_bound", 5)
-        _UPPER_BOUND_RGB = config.getint("awb", "rgb_upper_bound", 250)
-        _LUMA_LOWER_BOUND = config.getint("awb", "luma_lower_bound", 30)
-        _LUMA_UPPER_BOUND = config.getint("awb", "luma_upper_bound", 220)
+        strength = config.getfloat("awb", "strength", 0.7)
         warm_bias = config.getint("awb", "warm_bias", 6)
         tint_bias = config.getint("awb", "tint_bias", 0)
-        _TARGET_A_LAB = 128.0 + tint_bias
-        _TARGET_B_LAB = 128.0 + warm_bias
-        _SCALING_FACTOR_LAB_TO_SLIDER = 128.0
-        _CORRECTION_STRENGTH = config.getfloat("awb", "strength", 0.7)
+        rgb_lower_bound = config.getint("awb", "rgb_lower_bound", 5)
+        rgb_upper_bound = config.getint("awb", "rgb_upper_bound", 250)
+        luma_lower_bound = config.getint("awb", "luma_lower_bound", 30)
+        luma_upper_bound = config.getint("awb", "luma_upper_bound", 220)
 
-        # --- 1. Reject clipped channels and use a luma midtone mask ---
-        mask = (
-            (arr[:, :, 0] > _LOWER_BOUND_RGB)
-            & (arr[:, :, 0] < _UPPER_BOUND_RGB)
-            & (arr[:, :, 1] > _LOWER_BOUND_RGB)
-            & (arr[:, :, 1] < _UPPER_BOUND_RGB)
-            & (arr[:, :, 2] > _LOWER_BOUND_RGB)
-            & (arr[:, :, 2] < _UPPER_BOUND_RGB)
+        estimate = self.image_editor.estimate_auto_white_balance(
+            strength=strength,
+            warm_bias=warm_bias,
+            tint_bias=tint_bias,
+            rgb_lower_bound=rgb_lower_bound,
+            rgb_upper_bound=rgb_upper_bound,
+            luma_lower_bound=luma_lower_bound,
+            luma_upper_bound=luma_upper_bound,
         )
-
-        luma = 0.2126 * arr[:, :, 0] + 0.7152 * arr[:, :, 1] + 0.0722 * arr[:, :, 2]
-        mask &= (luma > _LUMA_LOWER_BOUND) & (luma < _LUMA_UPPER_BOUND)
-
-        if not np.any(mask):
-            log.warning(
-                "Auto white balance: No pixels found after clipping and luma filter. Aborting."
-            )
-            self.update_status_message("AWB failed: no valid pixels found")
+        if not estimate:
+            self.update_status_message("AWB failed: no valid neutral pixels found")
             return None
 
-        t_awb_mask = time.perf_counter()
-
-        # --- 2. Work in Lab color space ---
-        lab_image = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
-
-        a_channel = lab_image[:, :, 1]
-        b_channel = lab_image[:, :, 2]
-
-        masked_a = a_channel[mask]
-        masked_b = b_channel[mask]
-
-        a_mean = masked_a.mean()
-        b_mean = masked_b.mean()
-
-        a_shift = _TARGET_A_LAB - a_mean
-        b_shift = _TARGET_B_LAB - b_mean
-
-        log.info(
-            "Auto WB (Lab) - means: a*=%.1f, b*=%.1f; targets: a*=%.1f, b*=%.1f; shifts: a*=%.1f, b*=%.1f",
-            a_mean,
-            b_mean,
-            _TARGET_A_LAB,
-            _TARGET_B_LAB,
-            a_shift,
-            b_shift,
-        )
-
-        # --- 3. Convert Lab shift to our slider values with strength factor ---
-        by_value = (b_shift / _SCALING_FACTOR_LAB_TO_SLIDER) * _CORRECTION_STRENGTH
-        mg_value = (a_shift / _SCALING_FACTOR_LAB_TO_SLIDER) * _CORRECTION_STRENGTH
-
-        by_value = float(np.clip(by_value, -1.0, 1.0))
-        mg_value = float(np.clip(mg_value, -1.0, 1.0))
-
-        log.info("Auto white balance values: B/Y=%.3f, M/G=%.3f", by_value, mg_value)
+        by_value = estimate["by_value"]
+        mg_value = estimate["mg_value"]
 
         # No-change detection — see _AWB_NOOP_EPS definition for rationale
         if abs(by_value) < _AWB_NOOP_EPS and abs(mg_value) < _AWB_NOOP_EPS:
@@ -8117,25 +8241,25 @@ class AppController(QObject):
         self.ui_state.white_balance_by = by_value
         self.ui_state.white_balance_mg = mg_value
 
-        self.ui_refresh_generation += 1
-        self.ui_state.currentImageSourceChanged.emit()
+        self._kick_preview_worker()
 
         by_dir = _awb_direction(by_value, "warming", "cooling")
         mg_dir = _awb_direction(mg_value, "magenta", "greener")
         msg = (
             f"AWB: B/Y {by_value:+.2f} ({by_dir}), M/G {mg_value:+.2f} ({mg_dir})"
-            f" \u2014 a*={a_mean:.0f}\u2192{_TARGET_A_LAB:.0f},"
-            f" b*={b_mean:.0f}\u2192{_TARGET_B_LAB:.0f}"
+            f" \u2014 neutral RGB {estimate['r_mean']:.3f}/"
+            f"{estimate['g_mean']:.3f}/{estimate['b_mean']:.3f}"
         )
         t_awb_end = time.perf_counter()
+        selected_pixels = int(estimate.get("selected_pixels", 0))
+        stride = int(estimate.get("stride", 0))
+        neutrality_limit = float(estimate.get("neutrality_limit", 0.0))
         log.debug(
-            "[AUTO_COLOR] subsample=%dms mask=%dms lab+calc=%dms total=%dms  (%dx%d)",
-            int((t_awb_subsample - t_awb_start) * 1000),
-            int((t_awb_mask - t_awb_subsample) * 1000),
-            int((t_awb_end - t_awb_mask) * 1000),
+            "[AUTO_COLOR] total=%dms  (selected=%d stride=%d neutral<=%.3f)",
             int((t_awb_end - t_awb_start) * 1000),
-            arr.shape[1],
-            arr.shape[0],
+            selected_pixels,
+            stride,
+            neutrality_limit,
         )
         self.update_status_message(msg)
         return msg
