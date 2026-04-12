@@ -29,6 +29,19 @@ from faststack.thumbnail_view.folder_stats import (
 log = logging.getLogger(__name__)
 
 
+def _empty_folder_stats_payload() -> dict:
+    """Return a stable empty payload for folderStats delegate consumers."""
+    return {
+        "total_images": 0,
+        "stacked_count": 0,
+        "uploaded_count": 0,
+        "edited_count": 0,
+        "jpg_count": 0,
+        "raw_count": 0,
+        "coverage_buckets": [],
+    }
+
+
 def _is_filesystem_root(path: Path) -> bool:
     r"""Check if a path is a filesystem root.
 
@@ -221,7 +234,7 @@ class ThumbnailModel(QAbstractListModel):
                         list(t) for t in entry.folder_stats.coverage_buckets
                     ],
                 }
-            return None
+            return _empty_folder_stats_payload()
         elif role == self.IsSelectedRole:
             return row in self._selected_indices
         elif role == self.ThumbRevRole:

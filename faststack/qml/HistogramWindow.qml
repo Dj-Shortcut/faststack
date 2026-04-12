@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Window
-import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 
 Window {
@@ -10,7 +9,9 @@ Window {
     height: 450
     minimumWidth: 100
     minimumHeight: 50
-    visible: uiState ? uiState.isHistogramVisible : false
+    property var uiStateRef: typeof uiState !== "undefined" ? uiState : null
+    property var controllerRef: typeof controller !== "undefined" ? controller : null
+    visible: histogramWindow.uiStateRef ? histogramWindow.uiStateRef.isHistogramVisible : false
 
     FocusScope {
         id: histogramKeyScope
@@ -18,30 +19,30 @@ Window {
         focus: histogramWindow.visible
 
         Keys.onPressed: function(event) {
-            if (event.key === Qt.Key_H && controller) {
-                controller.toggle_histogram()
+            if (event.key === Qt.Key_H && histogramWindow.controllerRef) {
+                histogramWindow.controllerRef.toggle_histogram()
                 event.accepted = true
-            } else if (controller) {
+            } else if (histogramWindow.controllerRef) {
                 // Forward unhandled keys (e.g. arrow keys) to controller
-                controller.handle_key_from_histogram(event.key, event.modifiers, event.text)
+                histogramWindow.controllerRef.handle_key_from_histogram(event.key, event.modifiers, event.text)
                 event.accepted = true
             }
         }
     }
     
     Connections {
-        target: uiState
+        target: histogramWindow.uiStateRef
         function onCurrentImageSourceChanged() {
-            if (histogramWindow.visible && controller) {
-                controller.update_histogram()
+            if (histogramWindow.visible && histogramWindow.controllerRef) {
+                histogramWindow.controllerRef.update_histogram()
             }
         }
     }
 
     onVisibleChanged: {
-        if (visible && controller) {
+        if (visible && histogramWindow.controllerRef) {
             histogramKeyScope.forceActiveFocus()
-            controller.update_histogram()
+            histogramWindow.controllerRef.update_histogram()
         }
     }
 
@@ -68,9 +69,9 @@ Window {
             dangerColor: histogramWindow.dangerColor
             textColor: histogramWindow.primaryTextColor
             
-            histogramData: uiState && uiState.histogramData ? (uiState.histogramData["r"] || []) : []
-            clipCount: uiState && uiState.histogramData ? (uiState.histogramData["r_clip"] || 0) : 0
-            preClipCount: uiState && uiState.histogramData ? (uiState.histogramData["r_preclip"] || 0) : 0
+            histogramData: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["r"] || []) : []
+            clipCount: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["r_clip"] || 0) : 0
+            preClipCount: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["r_preclip"] || 0) : 0
         }
         
         SingleChannelHistogram {
@@ -83,9 +84,9 @@ Window {
             dangerColor: histogramWindow.dangerColor
             textColor: histogramWindow.primaryTextColor
             
-            histogramData: uiState && uiState.histogramData ? (uiState.histogramData["g"] || []) : []
-            clipCount: uiState && uiState.histogramData ? (uiState.histogramData["g_clip"] || 0) : 0
-            preClipCount: uiState && uiState.histogramData ? (uiState.histogramData["g_preclip"] || 0) : 0
+            histogramData: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["g"] || []) : []
+            clipCount: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["g_clip"] || 0) : 0
+            preClipCount: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["g_preclip"] || 0) : 0
         }
 
         SingleChannelHistogram {
@@ -98,9 +99,9 @@ Window {
             dangerColor: histogramWindow.dangerColor
             textColor: histogramWindow.primaryTextColor
             
-            histogramData: uiState && uiState.histogramData ? (uiState.histogramData["b"] || []) : []
-            clipCount: uiState && uiState.histogramData ? (uiState.histogramData["b_clip"] || 0) : 0
-            preClipCount: uiState && uiState.histogramData ? (uiState.histogramData["b_preclip"] || 0) : 0
+            histogramData: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["b"] || []) : []
+            clipCount: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["b_clip"] || 0) : 0
+            preClipCount: histogramWindow.uiStateRef && histogramWindow.uiStateRef.histogramData ? (histogramWindow.uiStateRef.histogramData["b_preclip"] || 0) : 0
         }
     }
 }

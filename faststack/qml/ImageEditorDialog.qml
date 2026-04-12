@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
@@ -8,8 +10,10 @@ Window {
     id: imageEditorDialog
     width: 800
     height: 820
-    title: uiState && uiState.editorFilename ? "Image Editor - " + uiState.editorFilename + " (" + uiState.editorBitDepth + "-bit)" : "Image Editor"
-    visible: uiState ? uiState.isEditorOpen : false
+    property var uiStateRef: null
+    property var controllerRef: null
+    title: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.editorFilename ? "Image Editor - " + imageEditorDialog.uiStateRef.editorFilename + " (" + imageEditorDialog.uiStateRef.editorBitDepth + "-bit)" : "Image Editor"
+    visible: imageEditorDialog.uiStateRef ? imageEditorDialog.uiStateRef.isEditorOpen : false
     flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
     property int updatePulse: 0
     property color backgroundColor: "#1e1e1e" // Default dark background
@@ -23,34 +27,39 @@ Window {
     readonly property color controlBorder: "#30ffffff"
     readonly property color separatorColor: "#20ffffff"
 
-    Material.theme: (uiState && uiState.theme === 0) ? Material.Dark : Material.Light
+    Component.onCompleted: {
+        imageEditorDialog.uiStateRef = uiState
+        imageEditorDialog.controllerRef = controller
+    }
+
+    Material.theme: (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.theme === 0) ? Material.Dark : Material.Light
     Material.accent: accentColor
 
     onClosing: (close) => {
-        uiState.isEditorOpen = false
+        if (imageEditorDialog.uiStateRef) imageEditorDialog.uiStateRef.isEditorOpen = false
     }
 
     onVisibleChanged: {
-        if (visible) {
-            if (controller) controller.update_histogram()
+        if (visible && imageEditorDialog.controllerRef) {
+            imageEditorDialog.controllerRef.update_histogram()
         }
     }
     
     // Auto-update histogram when pulse changes (buttons, double-taps, spinbox)
     onUpdatePulseChanged: {
-        if (visible && controller) {
-            controller.update_histogram()
+        if (visible && imageEditorDialog.controllerRef) {
+            imageEditorDialog.controllerRef.update_histogram()
         }
     }
 
     property int slidersPressedCount: 0
     onSlidersPressedCountChanged: {
-        uiState.setAnySliderPressed(slidersPressedCount > 0)
+        if (imageEditorDialog.uiStateRef) imageEditorDialog.uiStateRef.setAnySliderPressed(slidersPressedCount > 0)
     }
 
     function getBackendValue(key) {
         var _dependency = updatePulse;
-        if (uiState && key in uiState) return uiState[key];
+        if (imageEditorDialog.uiStateRef && key in imageEditorDialog.uiStateRef) return imageEditorDialog.uiStateRef[key];
         return 0.0;
     }
 
@@ -61,15 +70,15 @@ Window {
         sequence: "Escape"
         context: Qt.WindowShortcut
         onActivated: {
-            uiState.isEditorOpen = false
+            if (imageEditorDialog.uiStateRef) imageEditorDialog.uiStateRef.isEditorOpen = false
         }
     }
     Shortcut {
         sequence: "S"
         context: Qt.WindowShortcut
-        enabled: uiState ? !uiState.isSaving : true
+        enabled: imageEditorDialog.uiStateRef ? !imageEditorDialog.uiStateRef.isSaving : true
         onActivated: {
-            controller.save_edited_image()
+            if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.save_edited_image()
             // Note: Editor closes automatically via _on_save_finished callback
         }
     }
@@ -77,7 +86,7 @@ Window {
         sequence: "K"
         context: Qt.WindowShortcut
         onActivated: {
-            if (controller) controller.toggle_darken_mode()
+            if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.toggle_darken_mode()
         }
     }
 
@@ -132,13 +141,13 @@ Window {
                 }
                 ListModel {
                     id: lightModel
-                    ListElement { name: "Exposure"; key: "exposure" }
-                    ListElement { name: "Brightness"; key: "brightness" }
-                    ListElement { name: "Highlights"; key: "highlights" }
-                    ListElement { name: "Whites"; key: "whites" }
-                    ListElement { name: "Shadows"; key: "shadows" }
-                    ListElement { name: "Blacks"; key: "blacks" }
-                    ListElement { name: "Contrast"; key: "contrast" }
+                    ListElement { name: "Exposure"; key: "exposure"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Brightness"; key: "brightness"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Highlights"; key: "highlights"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Whites"; key: "whites"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Shadows"; key: "shadows"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Blacks"; key: "blacks"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Contrast"; key: "contrast"; reverse: false; min: -100; max: 100 }
                 }
                 Repeater { model: lightModel; delegate: editSlider }
 
@@ -151,9 +160,9 @@ Window {
                 }
                 ListModel {
                     id: detailModel
-                    ListElement { name: "Clarity"; key: "clarity" }
-                    ListElement { name: "Texture"; key: "texture" }
-                    ListElement { name: "Sharpness"; key: "sharpness" }
+                    ListElement { name: "Clarity"; key: "clarity"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Texture"; key: "texture"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Sharpness"; key: "sharpness"; reverse: false; min: -100; max: 100 }
                 }
                 Repeater { model: detailModel; delegate: editSlider }
 
@@ -175,9 +184,9 @@ Window {
                         textColor: imageEditorDialog.textColor
                         minimal: false
                         
-                        histogramData: uiState && uiState.histogramData ? (uiState.histogramData["r"] || []) : []
-                        clipCount: uiState && uiState.histogramData ? (uiState.histogramData["r_clip"] || 0) : 0
-                        preClipCount: uiState && uiState.histogramData ? (uiState.histogramData["r_preclip"] || 0) : 0
+                        histogramData: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["r"] || []) : []
+                        clipCount: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["r_clip"] || 0) : 0
+                        preClipCount: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["r_preclip"] || 0) : 0
                     }
                     
                     SingleChannelHistogram {
@@ -191,9 +200,9 @@ Window {
                         textColor: imageEditorDialog.textColor
                         minimal: false
                         
-                        histogramData: uiState && uiState.histogramData ? (uiState.histogramData["g"] || []) : []
-                        clipCount: uiState && uiState.histogramData ? (uiState.histogramData["g_clip"] || 0) : 0
-                        preClipCount: uiState && uiState.histogramData ? (uiState.histogramData["g_preclip"] || 0) : 0
+                        histogramData: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["g"] || []) : []
+                        clipCount: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["g_clip"] || 0) : 0
+                        preClipCount: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["g_preclip"] || 0) : 0
                     }
 
                     SingleChannelHistogram {
@@ -207,9 +216,9 @@ Window {
                         textColor: imageEditorDialog.textColor
                         minimal: false
                         
-                        histogramData: uiState && uiState.histogramData ? (uiState.histogramData["b"] || []) : []
-                        clipCount: uiState && uiState.histogramData ? (uiState.histogramData["b_clip"] || 0) : 0
-                        preClipCount: uiState && uiState.histogramData ? (uiState.histogramData["b_preclip"] || 0) : 0
+                        histogramData: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["b"] || []) : []
+                        clipCount: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["b_clip"] || 0) : 0
+                        preClipCount: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.histogramData ? (imageEditorDialog.uiStateRef.histogramData["b_preclip"] || 0) : 0
                     }
                 }
 
@@ -220,17 +229,17 @@ Window {
                     spacing: 15
                     
                     Label {
-                        visible: (uiState && uiState.highlightState && uiState.highlightState.headroom_pct > 0.001)
-                        text: "📈 Headroom: " + (uiState && uiState.highlightState ? (uiState.highlightState.headroom_pct * 100).toFixed(1) : "0.0") + "%"
+                        visible: (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.highlightState && imageEditorDialog.uiStateRef.highlightState.headroom_pct > 0.001)
+                        text: "📈 Headroom: " + (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.highlightState ? (imageEditorDialog.uiStateRef.highlightState.headroom_pct * 100).toFixed(1) : "0.0") + "%"
                         font.pixelSize: 10
                         color: "#50e150"  // Green - good, recoverable
                         opacity: 0.8
                     }
                     Label {
-                        visible: (uiState && uiState.highlightState && uiState.highlightState.source_clipped_pct > 0.01)
-                        text: "⚠ Clipped: " + (uiState && uiState.highlightState ? (uiState.highlightState.source_clipped_pct * 100).toFixed(1) : "0.0") + "%"
+                        visible: (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.highlightState && imageEditorDialog.uiStateRef.highlightState.source_clipped_pct > 0.01)
+                        text: "⚠ Clipped: " + (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.highlightState ? (imageEditorDialog.uiStateRef.highlightState.source_clipped_pct * 100).toFixed(1) : "0.0") + "%"
                         font.pixelSize: 10
-                        color: uiState && uiState.highlightState && uiState.highlightState.source_clipped_pct > 0.05 ? "#e15050" : "#e1a050"  // Red if severe, orange if mild
+                        color: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.highlightState && imageEditorDialog.uiStateRef.highlightState.source_clipped_pct > 0.05 ? "#e15050" : "#e1a050"  // Red if severe, orange if mild
                         opacity: 0.8
                     }
                     Item { Layout.fillWidth: true }  // Spacer
@@ -249,20 +258,20 @@ Window {
                     sourceComponent: sectionHeader 
                     Layout.topMargin: 0 // Remove top margin for the very first item
                     onLoaded: item.text = "📸 Source"
-                    visible: uiState ? uiState.hasRaw : false
+                    visible: imageEditorDialog.uiStateRef ? imageEditorDialog.uiStateRef.hasRaw : false
                 }
                 Button {
-                    text: (uiState && uiState.isRawActive) ? "RAW Loaded" : "Load RAW"
+                    text: (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.isRawActive) ? "RAW Loaded" : "Load RAW"
                     Layout.fillWidth: true
-                    visible: uiState ? uiState.hasRaw : false
-                    enabled: uiState ? !uiState.isRawActive : false
+                    visible: imageEditorDialog.uiStateRef ? imageEditorDialog.uiStateRef.hasRaw : false
+                    enabled: imageEditorDialog.uiStateRef ? !imageEditorDialog.uiStateRef.isRawActive : false
                     onClicked: {
-                        if (uiState) uiState.enableRawEditing()
+                        if (imageEditorDialog.uiStateRef) imageEditorDialog.uiStateRef.enableRawEditing()
                         imageEditorDialog.updatePulse++
                     }
                 }
                 Label {
-                    text: uiState ? uiState.saveBehaviorMessage : ""
+                    text: imageEditorDialog.uiStateRef ? imageEditorDialog.uiStateRef.saveBehaviorMessage : ""
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     font.pixelSize: 11
@@ -272,21 +281,21 @@ Window {
                 }
                 Loader { 
                     sourceComponent: sectionSeparator 
-                    visible: uiState ? uiState.hasRaw : false
+                    visible: imageEditorDialog.uiStateRef ? imageEditorDialog.uiStateRef.hasRaw : false
                 }
 
                 // --- Color Group ---
                 Loader { 
                     sourceComponent: sectionHeader 
-                    Layout.topMargin: (uiState && uiState.hasRaw) ? 5 : 0 // Adjust logic if needed
+                    Layout.topMargin: (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.hasRaw) ? 5 : 0 // Adjust logic if needed
                     onLoaded: item.text = "🎨 Color"
                 }
                 ListModel {
                     id: colorModel
-                    ListElement { name: "Saturation"; key: "saturation"; reverse: false }
-                    ListElement { name: "Vibrance"; key: "vibrance"; reverse: false }
-                    ListElement { name: "Temp (Blue/Yel)"; key: "white_balance_by"; reverse: false }
-                    ListElement { name: "Tint (Grn/Mag)"; key: "white_balance_mg"; reverse: false }
+                    ListElement { name: "Saturation"; key: "saturation"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Vibrance"; key: "vibrance"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Temp (Blue/Yel)"; key: "white_balance_by"; reverse: false; min: -100; max: 100 }
+                    ListElement { name: "Tint (Grn/Mag)"; key: "white_balance_mg"; reverse: false; min: -100; max: 100 }
                 }
                 Repeater { model: colorModel; delegate: editSlider }
                 
@@ -294,20 +303,22 @@ Window {
                     Layout.fillWidth: true
                     spacing: 10
                     Button {
+                        id: autoWbButton
                         text: "Auto WB"
                         Layout.fillWidth: true
                         font.pixelSize: 12
                         onClicked: {
-                            controller.auto_white_balance()
+                            if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.auto_white_balance()
                             imageEditorDialog.updatePulse++
                         }
                     }
                     Button {
+                        id: autoLevelsButton
                         text: "Auto Levels"
                         Layout.fillWidth: true
                         font.pixelSize: 12
                         onClicked: {
-                            controller.auto_levels()
+                            if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.auto_levels()
                             imageEditorDialog.updatePulse++
                         }
                     }
@@ -322,28 +333,29 @@ Window {
                 }
                 ListModel {
                     id: effectsModel
-                    ListElement { name: "Vignette"; key: "vignette"; min: 0; max: 100 }
+                    ListElement { name: "Vignette"; key: "vignette"; reverse: false; min: 0; max: 100 }
                 }
                 Repeater { model: effectsModel; delegate: editSlider }
 
                 Button {
+                    id: darkenModeButton
                     text: "Darken Background (K)"
                     Layout.fillWidth: true
                     font.pixelSize: 12
                     onClicked: {
-                        if (controller) controller.toggle_darken_mode()
+                        if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.toggle_darken_mode()
                     }
                     contentItem: Text {
-                        text: parent.text
-                        font: parent.font
-                        color: (uiState && uiState.isDarkening) ? "white" : imageEditorDialog.textColor
+                        text: darkenModeButton.text
+                        font: darkenModeButton.font
+                        color: (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.isDarkening) ? "white" : imageEditorDialog.textColor
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
-                        color: (uiState && uiState.isDarkening) ? imageEditorDialog.accentColor : (parent.pressed ? "#40ffffff" : "#20ffffff")
+                        color: (imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.isDarkening) ? imageEditorDialog.accentColor : (darkenModeButton.down ? "#40ffffff" : "#20ffffff")
                         radius: 4
-                        border.color: parent.hovered ? "#60ffffff" : "transparent"
+                        border.color: darkenModeButton.hovered ? "#60ffffff" : "transparent"
                     }
                 }
 
@@ -365,12 +377,12 @@ Window {
                     Item { Layout.fillWidth: true } // Spacer
                     Button { 
                         text: "↶ -90°" 
-                        onClicked: controller.rotate_image_ccw()
+                        onClicked: { if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.rotate_image_ccw() }
                         Layout.preferredWidth: 80
                     }
                     Button { 
                         text: "↷ +90°" 
-                        onClicked: controller.rotate_image_cw()
+                        onClicked: { if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.rotate_image_cw() }
                         Layout.preferredWidth: 80
                     }
                 }
@@ -384,18 +396,19 @@ Window {
 
                     // Reset (Tertiary)
                     Button { 
+                        id: resetButton
                         text: "Reset"
                         flat: true
                         Layout.preferredWidth: 80
                         Material.foreground: imageEditorDialog.textColor
                         onClicked: {
-                            controller.reset_edit_parameters()
+                            if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.reset_edit_parameters()
                             imageEditorDialog.updatePulse++
                         }
                         background: Rectangle {
-                            color: parent.pressed ? "#20ffffff" : "transparent"
+                            color: resetButton.down ? "#20ffffff" : "transparent"
                             radius: 4
-                            border.color: parent.hovered ? "#40ffffff" : "transparent"
+                            border.color: resetButton.hovered ? "#40ffffff" : "transparent"
                         }
                     }
 
@@ -403,39 +416,41 @@ Window {
 
                     // Close (Secondary)
                     Button { 
+                        id: closeEditorButton
                         text: "Close"
                         Layout.preferredWidth: 100
                         onClicked: { 
-                            uiState.isEditorOpen = false
+                            if (imageEditorDialog.uiStateRef) imageEditorDialog.uiStateRef.isEditorOpen = false
                         }
                         contentItem: Text {
-                            text: parent.text
-                            font: parent.font
-                            opacity: enabled ? 1.0 : 0.3
+                            text: closeEditorButton.text
+                            font: closeEditorButton.font
+                            opacity: closeEditorButton.enabled ? 1.0 : 0.3
                             color: imageEditorDialog.textColor
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                         }
                         background: Rectangle {
-                            color: parent.pressed ? "#40ffffff" : "#20ffffff"
+                            color: closeEditorButton.down ? "#40ffffff" : "#20ffffff"
                             radius: 4
-                            border.color: parent.hovered ? "#60ffffff" : "transparent"
+                            border.color: closeEditorButton.hovered ? "#60ffffff" : "transparent"
                         }
                     }
 
                     // Save (Primary)
                     Button { 
-                        text: uiState && uiState.isSaving ? "Saving..." : "Save"
+                        id: saveEditorButton
+                        text: imageEditorDialog.uiStateRef && imageEditorDialog.uiStateRef.isSaving ? "Saving..." : "Save"
                         Layout.preferredWidth: 100
                         highlighted: true
-                        enabled: uiState ? !uiState.isSaving : true
+                        enabled: imageEditorDialog.uiStateRef ? !imageEditorDialog.uiStateRef.isSaving : true
                         Material.background: imageEditorDialog.accentColor
                         onClicked: {
-                            controller.save_edited_image()
+                            if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.save_edited_image()
                             // Note: Editor closes automatically via _on_save_finished callback
                         }
                         background: Rectangle {
-                            color: parent.enabled ? (parent.pressed ? Qt.darker(imageEditorDialog.accentColor, 1.1) : imageEditorDialog.accentColor) : Qt.darker(imageEditorDialog.accentColor, 1.5)
+                            color: saveEditorButton.enabled ? (saveEditorButton.down ? Qt.darker(imageEditorDialog.accentColor, 1.1) : imageEditorDialog.accentColor) : Qt.darker(imageEditorDialog.accentColor, 1.5)
                             radius: 4
                             // Subtle shadow simulation
                             layer.enabled: true
@@ -449,16 +464,23 @@ Window {
     Component {
         id: editSlider
         RowLayout {
+            id: sliderRow
+            required property string name
+            required property string key
+            required property bool reverse
+            required property real min
+            required property real max
+
             Layout.fillWidth: true
             spacing: 15
             
-            property bool isReversed: model.reverse !== undefined ? model.reverse : false
-            property real minVal: model.min === undefined ? -100 : model.min
-            property real maxVal: model.max === undefined ? 100 : model.max
+            property bool isReversed: reverse
+            property real minVal: min
+            property real maxVal: max
             
             // Label
             Text {
-                text: model.name
+                text: sliderRow.name
                 color: imageEditorDialog.textColor
                 font.pixelSize: 13
                 font.weight: Font.Medium
@@ -472,13 +494,13 @@ Window {
                 id: slider
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
-                from: minVal
-                to: maxVal
+                from: sliderRow.minVal
+                to: sliderRow.maxVal
                 stepSize: 1
                 
                 property real backendValue: {
-                    var val = imageEditorDialog.getBackendValue(model.key) * maxVal
-                    return isReversed ? -val : val
+                    var val = imageEditorDialog.getBackendValue(sliderRow.key) * sliderRow.maxVal
+                    return sliderRow.isReversed ? -val : val
                 }
                 
                 // Auto-sync visual slider with backend changes when not dragging
@@ -497,8 +519,8 @@ Window {
                     repeat: true
                     onTriggered: {
                         if (Math.abs(slider._pendingValue - slider._lastSentValue) > 0.001) {
-                            var sendValue = isReversed ? -slider._pendingValue : slider._pendingValue
-                            controller.set_edit_parameter(model.key, sendValue / maxVal)
+                            var sendValue = sliderRow.isReversed ? -slider._pendingValue : slider._pendingValue
+                            if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.set_edit_parameter(sliderRow.key, sendValue / sliderRow.maxVal)
                             slider._lastSentValue = slider._pendingValue
                         }
                     }
@@ -529,7 +551,7 @@ Window {
                 function triggerReset() {
                     slider.isResetting = true
                     sendTimer.stop()
-                    controller.set_edit_parameter(model.key, 0.0)
+                    if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.set_edit_parameter(sliderRow.key, 0.0)
                     slider.value = 0.0
                     _pendingValue = 0.0
                     slider._lastSentValue = 0.0
@@ -553,14 +575,14 @@ Window {
                         
                         if (slider.isResetting) {
                              // Force backend to 0 on release (redundant but safe)
-                             controller.set_edit_parameter(model.key, 0.0)
+                             if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.set_edit_parameter(sliderRow.key, 0.0)
                         } else {
                              // Send final value immediately
-                             var sendValue = isReversed ? -value : value
-                             controller.set_edit_parameter(model.key, sendValue / maxVal)
+                             var sendValue = sliderRow.isReversed ? -value : value
+                             if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.set_edit_parameter(sliderRow.key, sendValue / sliderRow.maxVal)
                         }
                         
-                        if (controller) controller.update_histogram()
+                        if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.update_histogram()
                     }
                 }
                 
@@ -635,25 +657,25 @@ Window {
             // Refined SpinBox
             SpinBox {
                 id: valueInput
-                from: minVal
-                to: maxVal
+                from: sliderRow.minVal
+                to: sliderRow.maxVal
                 stepSize: 1
                 editable: true
                 Layout.preferredWidth: 80
                 Layout.alignment: Qt.AlignVCenter
                 
-                value: isReversed ? -slider.value : slider.value
+                value: sliderRow.isReversed ? -slider.value : slider.value
                 
                 onValueModified: {
                      var val = value
-                     var sendValue = isReversed ? -val : val
-                     controller.set_edit_parameter(model.key, sendValue / maxVal)
+                     var sendValue = sliderRow.isReversed ? -val : val
+                     if (imageEditorDialog.controllerRef) imageEditorDialog.controllerRef.set_edit_parameter(sliderRow.key, sendValue / sliderRow.maxVal)
                      imageEditorDialog.updatePulse++ 
                 }
 
                 contentItem: TextInput {
                     z: 2
-                    text: valueInput.textFromValue(valueInput.value, valueInput.locale)
+                    text: valueInput.displayText
                     font.pixelSize: 12
                     font.family: valueInput.font.family
                     color: imageEditorDialog.textColor

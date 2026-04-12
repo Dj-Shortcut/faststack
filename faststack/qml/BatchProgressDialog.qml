@@ -13,6 +13,7 @@ Dialog {
 
     property color backgroundColor: "#1e1e1e"
     property color textColor: "white"
+    property var uiStateRef: typeof uiState !== "undefined" ? uiState : null
 
     background: Rectangle {
         color: batchProgressDialog.backgroundColor
@@ -28,9 +29,9 @@ Dialog {
         Label {
             id: statusLabel
             text: {
-                if (!uiState) return ""
-                var current = uiState.batchAutoLevelsCurrent
-                var total = uiState.batchAutoLevelsTotal
+                if (!batchProgressDialog.uiStateRef) return ""
+                var current = batchProgressDialog.uiStateRef.batchAutoLevelsCurrent
+                var total = batchProgressDialog.uiStateRef.batchAutoLevelsTotal
                 return `Processing image ${current} of ${total}...`
             }
             color: batchProgressDialog.textColor
@@ -42,8 +43,8 @@ Dialog {
             id: progressBar
             width: parent.width - parent.padding * 2
             from: 0
-            to: uiState ? uiState.batchAutoLevelsTotal : 1
-            value: uiState ? uiState.batchAutoLevelsCurrent : 0
+            to: batchProgressDialog.uiStateRef ? batchProgressDialog.uiStateRef.batchAutoLevelsTotal : 1
+            value: batchProgressDialog.uiStateRef ? batchProgressDialog.uiStateRef.batchAutoLevelsCurrent : 0
 
             background: Rectangle {
                 implicitHeight: 12
@@ -62,17 +63,18 @@ Dialog {
         }
 
         Button {
+            id: cancelButton
             text: "Cancel"
             anchors.horizontalCenter: parent.horizontalCenter
             onClicked: {
-                if (uiState) uiState.cancelBatchAutoLevels()
+                if (batchProgressDialog.uiStateRef) batchProgressDialog.uiStateRef.cancelBatchAutoLevels()
             }
             background: Rectangle {
-                color: parent.pressed ? "#555555" : (parent.hovered ? "#666666" : "#444444")
+                color: cancelButton.down ? "#555555" : (cancelButton.hovered ? "#666666" : "#444444")
                 radius: 4
             }
             contentItem: Text {
-                text: parent.text
+                text: cancelButton.text
                 color: batchProgressDialog.textColor
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
@@ -81,9 +83,9 @@ Dialog {
     }
 
     Connections {
-        target: uiState
+        target: batchProgressDialog.uiStateRef
         function onBatchAutoLevelsActiveChanged() {
-            if (uiState && uiState.batchAutoLevelsActive) {
+            if (batchProgressDialog.uiStateRef && batchProgressDialog.uiStateRef.batchAutoLevelsActive) {
                 batchProgressDialog.open()
             } else {
                 batchProgressDialog.close()

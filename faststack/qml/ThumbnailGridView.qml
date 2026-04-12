@@ -1,6 +1,7 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 
 // Main grid view for thumbnail browser
 Item {
@@ -9,13 +10,15 @@ Item {
 
     // Theme property (bound by parent)
     property bool isDarkTheme: false
+    property var uiStateRef: typeof uiState !== "undefined" ? uiState : null
+    property var thumbnailModelRef: typeof thumbnailModel !== "undefined" ? thumbnailModel : null
 
     // Configuration
     property int cellWidth: 190
     property int cellHeight: 210
 
     // Selection count for keyboard handler (use gridSelectedCount for efficiency)
-    property int selectedCount: uiState ? uiState.gridSelectedCount : 0
+    property int selectedCount: gridViewRoot.uiStateRef ? gridViewRoot.uiStateRef.gridSelectedCount : 0
 
     // Wrapper to expose function to Loader
     function setPrefetchEnabled(enabled) {
@@ -39,7 +42,7 @@ Item {
         highlightFollowsCurrentItem: true
         currentIndex: 0  // Track cursor position
 
-        model: thumbnailModel
+        model: gridViewRoot.thumbnailModelRef
 
         delegate: ThumbnailTile {
             width: thumbnailGrid.cellWidth - 10
@@ -48,26 +51,6 @@ Item {
             // Theme binding from parent
             isDarkTheme: gridViewRoot.isDarkTheme
 
-            // Model role bindings - use attached property 'index' directly
-            // Model roles become context properties in delegate
-            tileIndex: index
-            tileFilePath: filePath || ""
-            tileFileName: fileName || ""
-            tileIsFolder: isFolder || false
-            tileIsStacked: isStacked || false
-            tileIsUploaded: isUploaded || false
-            tileIsEdited: isEdited || false
-            tileIsRestacked: isRestacked || false
-            tileIsFavorite: isFavorite || false
-            tileIsTodo: isTodo || false
-            tileIsInBatch: isInBatch || false
-            tileIsCurrent: isCurrent || false
-            tileThumbnailSource: thumbnailSource || ""
-            tileFolderStats: folderStats || null
-            tileIsSelected: isSelected || false
-            tileIsParentFolder: isParentFolder || false
-            tileHasBackups: hasBackups || false
-            tileHasDeveloped: hasDeveloped || false
             tileHasCursor: index === thumbnailGrid.currentIndex
         }
 
@@ -96,7 +79,7 @@ Item {
             } else {
                 prefetchTimer.stop()
                 // Cancel any queued work immediately to clear the backlog
-                if (uiState) uiState.cancelThumbnailPrefetch()
+                if (gridViewRoot.uiStateRef) gridViewRoot.uiStateRef.cancelThumbnailPrefetch()
             }
         }
 
@@ -115,7 +98,7 @@ Item {
 
         function triggerPrefetch() {
             if (!prefetchEnabled) return
-            if (!uiState || thumbnailGrid.count === 0) return
+            if (!gridViewRoot.uiStateRef || thumbnailGrid.count === 0) return
 
             var cellW = thumbnailGrid.cellWidth
             var cellH = thumbnailGrid.cellHeight
@@ -144,13 +127,13 @@ Item {
             maxCount = Math.max(200, Math.min(maxCount, 800))
 
             // Log for debugging
-            if (uiState && uiState.debugMode) {
+            if (gridViewRoot.uiStateRef && gridViewRoot.uiStateRef.debugMode) {
                 console.log("Prefetch range:", topIndex, "-", bottomIndex, "maxCount=" + maxCount + " cols=" + cols)
             }
 
             // Actually trigger prefetch
-            if (uiState) {
-                uiState.gridPrefetchRange(topIndex, bottomIndex, maxCount)
+            if (gridViewRoot.uiStateRef) {
+                gridViewRoot.uiStateRef.gridPrefetchRange(topIndex, bottomIndex, maxCount)
             }
         }
 
@@ -169,7 +152,7 @@ Item {
         // Empty state
         Text {
             anchors.centerIn: parent
-            visible: thumbnailGrid.count === 0 && uiState && uiState.isFolderLoaded
+            visible: thumbnailGrid.count === 0 && gridViewRoot.uiStateRef && gridViewRoot.uiStateRef.isFolderLoaded
             text: "No images in this folder"
             color: gridViewRoot.isDarkTheme ? "#888888" : "#666666"
             font.pixelSize: 16
@@ -177,7 +160,7 @@ Item {
 
         // Keyboard shortcuts (inside GridView so it receives focus)
         Keys.onPressed: function(event) {
-            if (!uiState) return
+            if (!gridViewRoot.uiStateRef) return
 
             // Calculate columns with epsilon to handle rounding issues during window resizing
             var cols = Math.max(1, Math.floor((thumbnailGrid.width + 1) / thumbnailGrid.cellWidth))
@@ -185,9 +168,9 @@ Item {
             if (event.key === Qt.Key_Escape) {
                 // Clear selection or switch to loupe
                 if (gridViewRoot.selectedCount > 0) {
-                    uiState.gridClearSelection()
+                    gridViewRoot.uiStateRef.gridClearSelection()
                 } else {
-                    uiState.toggleGridView()
+                    gridViewRoot.uiStateRef.toggleGridView()
                 }
                 event.accepted = true
             } else if (event.key === Qt.Key_Left) {
@@ -222,19 +205,19 @@ Item {
                 event.accepted = true
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 // Open current item in loupe view (or navigate into folder)
-                uiState.gridOpenIndex(thumbnailGrid.currentIndex)
+                gridViewRoot.uiStateRef.gridOpenIndex(thumbnailGrid.currentIndex)
                 event.accepted = true
             } else if (event.key === Qt.Key_Space) {
                 // Toggle selection on current item
-                uiState.gridSelectIndex(thumbnailGrid.currentIndex, false, true)
+                gridViewRoot.uiStateRef.gridSelectIndex(thumbnailGrid.currentIndex, false, true)
                 event.accepted = true
             } else if (event.key === Qt.Key_B) {
                 // Add selected images to batch
-                uiState.gridAddSelectionToBatch()
+                gridViewRoot.uiStateRef.gridAddSelectionToBatch()
                 event.accepted = true
             } else if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
                 // Delete selected images or cursor image
-                uiState.gridDeleteAtCursor(thumbnailGrid.currentIndex)
+                gridViewRoot.uiStateRef.gridDeleteAtCursor(thumbnailGrid.currentIndex)
                 event.accepted = true
             }
         }
@@ -245,22 +228,22 @@ Item {
     onHeightChanged: { if (thumbnailGrid.prefetchEnabled) prefetchTimer.restart() }
 
     Component.onCompleted: {
-        if (uiState && uiState.debugThumbTiming)
+        if (gridViewRoot.uiStateRef && gridViewRoot.uiStateRef.debugThumbTiming)
             console.log("[THUMB-TIMING] GridView Component.onCompleted t=" + Date.now() + "ms")
         thumbnailGrid.forceActiveFocus()
         
         // Sync initial cursor position from state to prevent top-of-list prefetch
-        if (uiState && uiState.currentIndex >= 0 && uiState.currentIndex < thumbnailGrid.count) {
-            thumbnailGrid.currentIndex = uiState.currentIndex
+        if (gridViewRoot.uiStateRef && gridViewRoot.uiStateRef.currentIndex >= 0 && gridViewRoot.uiStateRef.currentIndex < thumbnailGrid.count) {
+            thumbnailGrid.currentIndex = gridViewRoot.uiStateRef.currentIndex
             thumbnailGrid.positionViewAtIndex(thumbnailGrid.currentIndex, GridView.Center)
         }
     }
 
 
     Connections {
-        target: uiState
+        target: gridViewRoot.uiStateRef
         function onIsGridViewActiveChanged() {
-            if (uiState.isGridViewActive) {
+            if (gridViewRoot.uiStateRef.isGridViewActive) {
                 // Prefetch triggering is now handled by Main.qml via setPrefetchEnabled
                 // to avoid transient state issues.
                 thumbnailGrid.forceActiveFocus()

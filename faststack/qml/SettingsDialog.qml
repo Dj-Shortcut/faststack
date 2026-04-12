@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
@@ -41,6 +42,8 @@ Window {
     property int awbLumaUpperBound: 220
     property int awbRgbLowerBound: 5
     property int awbRgbUpperBound: 250
+    property var uiStateRef: null
+    property var controllerRef: null
 
     // Live cache usage value (updated by timer)
     property real cacheUsage: 0.0
@@ -59,81 +62,142 @@ Window {
     Material.accent: accentColor
     color: backgroundColor
 
+    Component.onCompleted: {
+        settingsDialog.uiStateRef = uiState
+        settingsDialog.controllerRef = controller
+    }
+
+    function loaderItem(loader) {
+        return loader ? loader.item : null
+    }
+
+    function loaderProperty(loader, propertyName, fallbackValue) {
+        var control = settingsDialog.loaderItem(loader)
+        var value = control ? control[propertyName] : undefined
+        return value === undefined ? fallbackValue : value
+    }
+
+    function setLoaderProperty(loader, propertyName, value) {
+        var control = settingsDialog.loaderItem(loader)
+        if (control) {
+            control[propertyName] = value
+        }
+    }
+
+    function setLoaderBinding(loader, propertyName, bindingFn) {
+        var control = settingsDialog.loaderItem(loader)
+        if (control) {
+            control[propertyName] = Qt.binding(bindingFn)
+        }
+    }
+
+    function connectLoaderSignal(loader, signalName, callback) {
+        var control = settingsDialog.loaderItem(loader)
+        var signal = control ? control[signalName] : null
+        if (signal && typeof signal.connect === "function") {
+            signal.connect(callback)
+        }
+    }
+
+    function openFileDialog() {
+        return settingsDialog.uiStateRef ? settingsDialog.uiStateRef.open_file_dialog() : ""
+    }
+
+    function openDirectoryDialog() {
+        return settingsDialog.uiStateRef ? settingsDialog.uiStateRef.open_directory_dialog() : ""
+    }
+
+    function pathExists(path) {
+        return settingsDialog.uiStateRef ? settingsDialog.uiStateRef.check_path_exists(path) : false
+    }
+
+    function refreshTextFields() {
+        settingsDialog.setLoaderProperty(heliconField, "text", settingsDialog.heliconPath)
+        settingsDialog.setLoaderProperty(photoshopField, "text", settingsDialog.photoshopPath)
+        settingsDialog.setLoaderProperty(rawtherapeeField, "text", settingsDialog.rawtherapeePath)
+        settingsDialog.setLoaderProperty(defaultDirField, "text", settingsDialog.defaultDirectory)
+        settingsDialog.setLoaderProperty(cacheSizeField, "text", settingsDialog.cacheSize.toFixed(1))
+    }
+
     // Helper to open the dialog
     function open() {
         // Reload all properties from uiState to ensure Cancel discards edits
-        if (uiState) {
-            heliconPath = uiState.get_helicon_path()
-            photoshopPath = uiState.get_photoshop_path()
-            rawtherapeePath = uiState.get_rawtherapee_path()
-            cacheSize = uiState.get_cache_size()
-            prefetchRadius = uiState.get_prefetch_radius()
-            theme = uiState.theme
-            defaultDirectory = uiState.get_default_directory()
-            optimizeFor = uiState.get_optimize_for()
-            autoLevelClippingThreshold = uiState.autoLevelClippingThreshold
-            autoLevelStrength = uiState.autoLevelStrength
-            autoLevelStrengthAuto = uiState.autoLevelStrengthAuto
-            awbMode = uiState.awbMode
-            awbStrength = uiState.awbStrength
-            awbWarmBias = uiState.awbWarmBias
-            awbTintBias = uiState.awbTintBias
-            awbLumaLowerBound = uiState.awbLumaLowerBound
-            awbLumaUpperBound = uiState.awbLumaUpperBound
-            awbRgbLowerBound = uiState.awbRgbLowerBound
-            awbRgbUpperBound = uiState.awbRgbUpperBound
+        if (settingsDialog.uiStateRef) {
+            settingsDialog.heliconPath = settingsDialog.uiStateRef.get_helicon_path()
+            settingsDialog.photoshopPath = settingsDialog.uiStateRef.get_photoshop_path()
+            settingsDialog.rawtherapeePath = settingsDialog.uiStateRef.get_rawtherapee_path()
+            settingsDialog.cacheSize = settingsDialog.uiStateRef.get_cache_size()
+            settingsDialog.prefetchRadius = settingsDialog.uiStateRef.get_prefetch_radius()
+            settingsDialog.theme = settingsDialog.uiStateRef.theme
+            settingsDialog.defaultDirectory = settingsDialog.uiStateRef.get_default_directory()
+            settingsDialog.optimizeFor = settingsDialog.uiStateRef.get_optimize_for()
+            settingsDialog.autoLevelClippingThreshold = settingsDialog.uiStateRef.autoLevelClippingThreshold
+            settingsDialog.autoLevelStrength = settingsDialog.uiStateRef.autoLevelStrength
+            settingsDialog.autoLevelStrengthAuto = settingsDialog.uiStateRef.autoLevelStrengthAuto
+            settingsDialog.awbMode = settingsDialog.uiStateRef.awbMode
+            settingsDialog.awbStrength = settingsDialog.uiStateRef.awbStrength
+            settingsDialog.awbWarmBias = settingsDialog.uiStateRef.awbWarmBias
+            settingsDialog.awbTintBias = settingsDialog.uiStateRef.awbTintBias
+            settingsDialog.awbLumaLowerBound = settingsDialog.uiStateRef.awbLumaLowerBound
+            settingsDialog.awbLumaUpperBound = settingsDialog.uiStateRef.awbLumaUpperBound
+            settingsDialog.awbRgbLowerBound = settingsDialog.uiStateRef.awbRgbLowerBound
+            settingsDialog.awbRgbUpperBound = settingsDialog.uiStateRef.awbRgbUpperBound
         }
-        visible = true
-        raise()
-        requestActivate()
+        settingsDialog.visible = true
+        settingsDialog.raise()
+        settingsDialog.requestActivate()
     }
 
     Shortcut {
         sequence: "Escape"
         context: Qt.WindowShortcut
-        onActivated: visible = false
+        onActivated: settingsDialog.visible = false
     }
 
     onVisibleChanged: {
-        cacheUsageTimer.running = visible
-        if (visible) {
-            controller.dialog_opened()
-            // Reset all text fields from properties
-            if (heliconField.item) heliconField.item.text = settingsDialog.heliconPath
-            if (photoshopField.item) photoshopField.item.text = settingsDialog.photoshopPath
-            if (rawtherapeeField.item) rawtherapeeField.item.text = settingsDialog.rawtherapeePath
-            if (defaultDirField.item) defaultDirField.item.text = settingsDialog.defaultDirectory
-            if (cacheSizeField.item) cacheSizeField.item.text = settingsDialog.cacheSize.toFixed(1)
-            // Note: ComboBoxes and SpinBoxes update automatically via bindings/connections
+        cacheUsageTimer.running = settingsDialog.visible
+        if (settingsDialog.visible) {
+            if (settingsDialog.controllerRef) {
+                settingsDialog.controllerRef.dialog_opened()
+            }
+            settingsDialog.refreshTextFields()
         } else {
-            controller.dialog_closed()
+            if (settingsDialog.controllerRef) {
+                settingsDialog.controllerRef.dialog_closed()
+            }
         }
     }
 
     function saveSettings() {
-        uiState.set_helicon_path(heliconPath)
-        uiState.set_photoshop_path(photoshopPath)
-        uiState.set_rawtherapee_path(rawtherapeePath)
-        uiState.set_cache_size(cacheSize)
-        uiState.set_prefetch_radius(prefetchRadius)
-        uiState.set_theme(theme)
-        uiState.set_default_directory(defaultDirectory)
-        uiState.set_optimize_for(optimizeFor)
-        uiState.autoLevelClippingThreshold = autoLevelClippingThreshold
-        uiState.autoLevelStrength = autoLevelStrength
-        uiState.autoLevelStrengthAuto = autoLevelStrengthAuto
-        
-        uiState.awbMode = awbMode
-        uiState.awbStrength = awbStrength
-        uiState.awbWarmBias = awbWarmBias
-        uiState.awbTintBias = awbTintBias
-        
-        uiState.awbLumaLowerBound = awbLumaLowerBound
-        uiState.awbLumaUpperBound = awbLumaUpperBound
-        uiState.awbRgbLowerBound = awbRgbLowerBound
-        uiState.awbRgbUpperBound = awbRgbUpperBound
+        var state = settingsDialog.uiStateRef
+        if (!state) {
+            settingsDialog.visible = false
+            return
+        }
 
-        visible = false
+        state.set_helicon_path(settingsDialog.heliconPath)
+        state.set_photoshop_path(settingsDialog.photoshopPath)
+        state.set_rawtherapee_path(settingsDialog.rawtherapeePath)
+        state.set_cache_size(settingsDialog.cacheSize)
+        state.set_prefetch_radius(settingsDialog.prefetchRadius)
+        state.set_theme(settingsDialog.theme)
+        state.set_default_directory(settingsDialog.defaultDirectory)
+        state.set_optimize_for(settingsDialog.optimizeFor)
+        state.autoLevelClippingThreshold = settingsDialog.autoLevelClippingThreshold
+        state.autoLevelStrength = settingsDialog.autoLevelStrength
+        state.autoLevelStrengthAuto = settingsDialog.autoLevelStrengthAuto
+
+        state.awbMode = settingsDialog.awbMode
+        state.awbStrength = settingsDialog.awbStrength
+        state.awbWarmBias = settingsDialog.awbWarmBias
+        state.awbTintBias = settingsDialog.awbTintBias
+
+        state.awbLumaLowerBound = settingsDialog.awbLumaLowerBound
+        state.awbLumaUpperBound = settingsDialog.awbLumaUpperBound
+        state.awbRgbLowerBound = settingsDialog.awbRgbLowerBound
+        state.awbRgbUpperBound = settingsDialog.awbRgbUpperBound
+
+        settingsDialog.visible = false
     }
 
     // Component for Section Separator
@@ -231,7 +295,7 @@ Window {
             
             contentItem: TextInput {
                 z: 2
-                text: control.textFromValue(control.value, control.locale)
+                text: control.displayText
                 font.pixelSize: 13
                 color: settingsDialog.textColor
                 selectionColor: settingsDialog.accentColor
@@ -244,7 +308,10 @@ Window {
                 
                 // Update control.value when user finishes typing
                 onEditingFinished: {
-                    control.value = control.valueFromText(text, control.locale)
+                    var parsedValue = parseInt(text, 10)
+                    if (!isNaN(parsedValue)) {
+                        control.value = parsedValue
+                    }
                 }
             }
 
@@ -299,6 +366,7 @@ Window {
     Component {
         id: tabButton
         Rectangle {
+            id: tabButtonRoot
             property string text
             property int index
             
@@ -309,15 +377,15 @@ Window {
                 anchors.bottom: parent.bottom
                 width: parent.width
                 height: 2
-                color: settingsDialog.currentTab === index ? settingsDialog.accentColor : "transparent"
+                color: settingsDialog.currentTab === tabButtonRoot.index ? settingsDialog.accentColor : "transparent"
                 Behavior on color { ColorAnimation { duration: 200 } }
             }
             
             Text {
                 anchors.centerIn: parent
-                text: parent.text
-                color: settingsDialog.currentTab === index ? settingsDialog.accentColor : "#80ffffff"
-                font.bold: settingsDialog.currentTab === index
+                text: tabButtonRoot.text
+                color: settingsDialog.currentTab === tabButtonRoot.index ? settingsDialog.accentColor : "#80ffffff"
+                font.bold: settingsDialog.currentTab === tabButtonRoot.index
                 font.pixelSize: 14
             }
             
@@ -325,7 +393,7 @@ Window {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: settingsDialog.currentTab = index
+                onClicked: settingsDialog.currentTab = tabButtonRoot.index
             }
         }
     }
@@ -406,28 +474,30 @@ Window {
                                 sourceComponent: styledTextField
                                 Layout.fillWidth: true
                                 onLoaded: {
-                                    // Text is set once in onVisibleChanged
-                                    item.text = settingsDialog.heliconPath
-                                    item.textEdited.connect(function() { settingsDialog.heliconPath = item.text })
+                                    settingsDialog.setLoaderProperty(heliconField, "text", settingsDialog.heliconPath)
+                                    settingsDialog.connectLoaderSignal(heliconField, "textEdited", function() {
+                                        settingsDialog.heliconPath = settingsDialog.loaderProperty(heliconField, "text", settingsDialog.heliconPath)
+                                    })
                                 }
                             }
                             Button {
+                                id: heliconBrowseButton
                                 text: "Browse"
                                 flat: true
                                 onClicked: {
-                                    var path = uiState.open_file_dialog()
+                                    var path = settingsDialog.openFileDialog()
                                     if (path) {
                                         settingsDialog.heliconPath = path
-                                        if (heliconField.item) heliconField.item.text = path
+                                        settingsDialog.setLoaderProperty(heliconField, "text", path)
                                     }
                                 }
-                                background: Rectangle { color: parent.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
-                                contentItem: Text { text: parent.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                background: Rectangle { color: heliconBrowseButton.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
+                                contentItem: Text { text: heliconBrowseButton.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                             Label {
                                 text: "✔"
                                 color: "#4ade80"
-                                visible: uiState && uiState.check_path_exists(settingsDialog.heliconPath)
+                                visible: settingsDialog.pathExists(settingsDialog.heliconPath)
                             }
                         }
 
@@ -440,28 +510,30 @@ Window {
                                 sourceComponent: styledTextField
                                 Layout.fillWidth: true
                                 onLoaded: {
-                                    // Text is set once in onVisibleChanged
-                                    item.text = settingsDialog.photoshopPath
-                                    item.textEdited.connect(function() { settingsDialog.photoshopPath = item.text })
+                                    settingsDialog.setLoaderProperty(photoshopField, "text", settingsDialog.photoshopPath)
+                                    settingsDialog.connectLoaderSignal(photoshopField, "textEdited", function() {
+                                        settingsDialog.photoshopPath = settingsDialog.loaderProperty(photoshopField, "text", settingsDialog.photoshopPath)
+                                    })
                                 }
                             }
                             Button {
+                                id: photoshopBrowseButton
                                 text: "Browse"
                                 flat: true
                                 onClicked: {
-                                    var path = uiState.open_file_dialog()
+                                    var path = settingsDialog.openFileDialog()
                                     if (path) {
                                         settingsDialog.photoshopPath = path
-                                        if (photoshopField.item) photoshopField.item.text = path
+                                        settingsDialog.setLoaderProperty(photoshopField, "text", path)
                                     }
                                 }
-                                background: Rectangle { color: parent.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
-                                contentItem: Text { text: parent.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                background: Rectangle { color: photoshopBrowseButton.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
+                                contentItem: Text { text: photoshopBrowseButton.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                             Label {
                                 text: "✔"
                                 color: "#4ade80"
-                                visible: uiState && uiState.check_path_exists(settingsDialog.photoshopPath)
+                                visible: settingsDialog.pathExists(settingsDialog.photoshopPath)
                             }
                         }
 
@@ -474,28 +546,30 @@ Window {
                                 sourceComponent: styledTextField
                                 Layout.fillWidth: true
                                 onLoaded: {
-                                    // Text is set once in onVisibleChanged
-                                    item.text = settingsDialog.rawtherapeePath
-                                    item.textEdited.connect(function() { settingsDialog.rawtherapeePath = item.text })
+                                    settingsDialog.setLoaderProperty(rawtherapeeField, "text", settingsDialog.rawtherapeePath)
+                                    settingsDialog.connectLoaderSignal(rawtherapeeField, "textEdited", function() {
+                                        settingsDialog.rawtherapeePath = settingsDialog.loaderProperty(rawtherapeeField, "text", settingsDialog.rawtherapeePath)
+                                    })
                                 }
                             }
                             Button {
+                                id: rawtherapeeBrowseButton
                                 text: "Browse"
                                 flat: true
                                 onClicked: {
-                                    var path = uiState.open_file_dialog()
+                                    var path = settingsDialog.openFileDialog()
                                     if (path) {
                                         settingsDialog.rawtherapeePath = path
-                                        if (rawtherapeeField.item) rawtherapeeField.item.text = path
+                                        settingsDialog.setLoaderProperty(rawtherapeeField, "text", path)
                                     }
                                 }
-                                background: Rectangle { color: parent.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
-                                contentItem: Text { text: parent.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                background: Rectangle { color: rawtherapeeBrowseButton.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
+                                contentItem: Text { text: rawtherapeeBrowseButton.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                             Label {
                                 text: "✔"
                                 color: "#4ade80"
-                                visible: uiState && uiState.check_path_exists(settingsDialog.rawtherapeePath)
+                                visible: settingsDialog.pathExists(settingsDialog.rawtherapeePath)
                             }
                         }
 
@@ -508,23 +582,25 @@ Window {
                                 sourceComponent: styledTextField
                                 Layout.fillWidth: true
                                 onLoaded: {
-                                    // Text is set once in onVisibleChanged
-                                    item.text = settingsDialog.defaultDirectory
-                                    item.textEdited.connect(function() { settingsDialog.defaultDirectory = item.text })
+                                    settingsDialog.setLoaderProperty(defaultDirField, "text", settingsDialog.defaultDirectory)
+                                    settingsDialog.connectLoaderSignal(defaultDirField, "textEdited", function() {
+                                        settingsDialog.defaultDirectory = settingsDialog.loaderProperty(defaultDirField, "text", settingsDialog.defaultDirectory)
+                                    })
                                 }
                             }
                             Button {
+                                id: defaultDirBrowseButton
                                 text: "Browse"
                                 flat: true
                                 onClicked: {
-                                    var path = uiState.open_directory_dialog()
+                                    var path = settingsDialog.openDirectoryDialog()
                                     if (path) {
                                         settingsDialog.defaultDirectory = path
-                                        if (defaultDirField.item) defaultDirField.item.text = path
+                                        settingsDialog.setLoaderProperty(defaultDirField, "text", path)
                                     }
                                 }
-                                background: Rectangle { color: parent.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
-                                contentItem: Text { text: parent.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                background: Rectangle { color: defaultDirBrowseButton.pressed ? "#20ffffff" : "#10ffffff"; radius: 4 }
+                                contentItem: Text { text: defaultDirBrowseButton.text; color: settingsDialog.textColor; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                         }
 
@@ -558,17 +634,14 @@ Window {
                                     sourceComponent: styledTextField
                                     Layout.preferredWidth: 80
                                     onLoaded: {
-                                        // Text is set once in onVisibleChanged
-                                        item.text = settingsDialog.cacheSize.toFixed(1)
-                                        item.editingFinished.connect(function() {
-                                            var value = parseFloat(item.text)
+                                        settingsDialog.setLoaderProperty(cacheSizeField, "text", settingsDialog.cacheSize.toFixed(1))
+                                        settingsDialog.connectLoaderSignal(cacheSizeField, "editingFinished", function() {
+                                            var value = parseFloat(settingsDialog.loaderProperty(cacheSizeField, "text", settingsDialog.cacheSize.toFixed(1)))
                                             if (!isNaN(value) && value >= 0.5 && value <= 16) {
                                                 settingsDialog.cacheSize = value
-                                                // Reformat to show consistent precision
-                                                item.text = settingsDialog.cacheSize.toFixed(1)
+                                                settingsDialog.setLoaderProperty(cacheSizeField, "text", settingsDialog.cacheSize.toFixed(1))
                                             } else {
-                                                // Reset to valid value if invalid input
-                                                item.text = settingsDialog.cacheSize.toFixed(1)
+                                                settingsDialog.setLoaderProperty(cacheSizeField, "text", settingsDialog.cacheSize.toFixed(1))
                                             }
                                         })
                                     }
@@ -595,11 +668,15 @@ Window {
                                 ToolTip.text: "Number of images around the current image to pre-load in the background. Higher values make browsing smoother but use more CPU/RAM. Lower values reduce resource usage. Recommended: 4-8 for smooth navigation."
                             }
                             Loader {
+                                id: prefetchRadiusLoader
                                 sourceComponent: styledSpinBox
                                 onLoaded: {
-                                    item.from = 1; item.to = 20
-                                    item.value = settingsDialog.prefetchRadius
-                                    item.valueChanged.connect(function() { settingsDialog.prefetchRadius = item.value })
+                                    settingsDialog.setLoaderProperty(prefetchRadiusLoader, "from", 1)
+                                    settingsDialog.setLoaderProperty(prefetchRadiusLoader, "to", 20)
+                                    settingsDialog.setLoaderProperty(prefetchRadiusLoader, "value", settingsDialog.prefetchRadius)
+                                    settingsDialog.connectLoaderSignal(prefetchRadiusLoader, "valueChanged", function() {
+                                        settingsDialog.prefetchRadius = settingsDialog.loaderProperty(prefetchRadiusLoader, "value", settingsDialog.prefetchRadius)
+                                    })
                                 }
                             }
 
@@ -618,32 +695,38 @@ Window {
                                 ToolTip.text: "Speed: Faster JPEG decoding using hardware acceleration (may have slight quality loss). Quality: Slower but pixel-perfect decoding. Choose Speed for general browsing, Quality for critical image inspection."
                             }
                             ComboBox {
+                                id: optimizeCombo
                                 model: ["speed", "quality"]
                                 currentIndex: Math.max(0, model.indexOf(settingsDialog.optimizeFor))
                                 onActivated: settingsDialog.optimizeFor = model[currentIndex]
                                 Layout.preferredWidth: 150
                                 delegate: ItemDelegate {
-                                    width: parent.width
-                                    contentItem: Text { text: modelData; color: settingsDialog.textColor; font: parent.font; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter }
-                                    background: Rectangle { color: parent.highlighted ? "#20ffffff" : "transparent" }
+                                    id: optimizeOption
+                                    required property string modelData
+                                    width: optimizeCombo.width
+                                    contentItem: Text { text: optimizeOption.modelData; color: settingsDialog.textColor; font: optimizeOption.font; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter }
+                                    background: Rectangle { color: optimizeOption.highlighted ? "#20ffffff" : "transparent" }
                                 }
-                                contentItem: Text { text: parent.displayText; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
+                                contentItem: Text { text: optimizeCombo.displayText; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
                                 background: Rectangle { color: "#10ffffff"; border.color: settingsDialog.controlBorder; radius: 4 }
                             }
 
                             // Theme
                             Label { text: "Theme"; color: settingsDialog.textColor }
                             ComboBox {
+                                id: themeCombo
                                 model: ["Dark", "Light"]
                                 currentIndex: settingsDialog.theme
                                 onActivated: settingsDialog.theme = currentIndex
                                 Layout.preferredWidth: 150
                                 delegate: ItemDelegate {
-                                    width: parent.width
-                                    contentItem: Text { text: modelData; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter }
-                                    background: Rectangle { color: parent.highlighted ? "#20ffffff" : "transparent" }
+                                    id: themeOption
+                                    required property string modelData
+                                    width: themeCombo.width
+                                    contentItem: Text { text: themeOption.modelData; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter }
+                                    background: Rectangle { color: themeOption.highlighted ? "#20ffffff" : "transparent" }
                                 }
-                                contentItem: Text { text: parent.displayText; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
+                                contentItem: Text { text: themeCombo.displayText; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
                                 background: Rectangle { color: "#10ffffff"; border.color: settingsDialog.controlBorder; radius: 4 }
                             }
                         }
@@ -695,18 +778,20 @@ Window {
                                 sourceComponent: styledTextField
                                 Layout.preferredWidth: 80
                                 onLoaded: {
-                                     item.text = settingsDialog.autoLevelClippingThreshold.toFixed(4)
-                                     item.editingFinished.connect(function() {
-                                         var value = parseFloat(item.text)
-                                         if (!isNaN(value) && value >= 0.0 && value <= 10.0) settingsDialog.autoLevelClippingThreshold = value
-                                         item.text = settingsDialog.autoLevelClippingThreshold.toFixed(4)
+                                     settingsDialog.setLoaderProperty(clipThresholdLoader, "text", settingsDialog.autoLevelClippingThreshold.toFixed(4))
+                                     settingsDialog.connectLoaderSignal(clipThresholdLoader, "editingFinished", function() {
+                                         var value = parseFloat(settingsDialog.loaderProperty(clipThresholdLoader, "text", settingsDialog.autoLevelClippingThreshold.toFixed(4)))
+                                         if (!isNaN(value) && value >= 0.0 && value <= 10.0) {
+                                             settingsDialog.autoLevelClippingThreshold = value
+                                         }
+                                         settingsDialog.setLoaderProperty(clipThresholdLoader, "text", settingsDialog.autoLevelClippingThreshold.toFixed(4))
                                      })
                                 }
                                 Binding {
                                     target: clipThresholdLoader.item
                                     property: "text"
                                     value: settingsDialog.autoLevelClippingThreshold.toFixed(4)
-                                    when: clipThresholdLoader.item && !clipThresholdLoader.item.activeFocus
+                                    when: clipThresholdLoader.item && !settingsDialog.loaderProperty(clipThresholdLoader, "activeFocus", false)
                                 }
                             }
 
@@ -730,17 +815,21 @@ Window {
                                     sourceComponent: styledSlider
                                     Layout.fillWidth: true
                                     onLoaded: {
-                                        item.from = 0.0; item.to = 1.0; item.stepSize = 0.05
-                                        item.value = settingsDialog.autoLevelStrength
-                                        item.valueChanged.connect(function() { settingsDialog.autoLevelStrength = item.value })
-                                        item.enabled = Qt.binding(function() { return !autoLvlAuto.checked })
-                                        item.opacity = Qt.binding(function() { return (!autoLvlAuto.checked) ? 1.0 : 0.5 })
+                                        settingsDialog.setLoaderProperty(autoLevelStrengthLoader, "from", 0.0)
+                                        settingsDialog.setLoaderProperty(autoLevelStrengthLoader, "to", 1.0)
+                                        settingsDialog.setLoaderProperty(autoLevelStrengthLoader, "stepSize", 0.05)
+                                        settingsDialog.setLoaderProperty(autoLevelStrengthLoader, "value", settingsDialog.autoLevelStrength)
+                                        settingsDialog.connectLoaderSignal(autoLevelStrengthLoader, "valueChanged", function() {
+                                            settingsDialog.autoLevelStrength = settingsDialog.loaderProperty(autoLevelStrengthLoader, "value", settingsDialog.autoLevelStrength)
+                                        })
+                                        settingsDialog.setLoaderBinding(autoLevelStrengthLoader, "enabled", function() { return !autoLvlAuto.checked })
+                                        settingsDialog.setLoaderBinding(autoLevelStrengthLoader, "opacity", function() { return autoLvlAuto.checked ? 0.5 : 1.0 })
                                     }
                                     Binding {
                                         target: autoLevelStrengthLoader.item
                                         property: "value"
                                         value: settingsDialog.autoLevelStrength
-                                        when: autoLevelStrengthLoader.item && !autoLevelStrengthLoader.item.pressed
+                                        when: autoLevelStrengthLoader.item && !settingsDialog.loaderProperty(autoLevelStrengthLoader, "pressed", false)
                                     }
                                 }
                                 CheckBox {
@@ -748,14 +837,14 @@ Window {
                                     text: "Auto"
                                     checked: settingsDialog.autoLevelStrengthAuto
                                     onCheckedChanged: settingsDialog.autoLevelStrengthAuto = checked
-                                    contentItem: Text { text: parent.text; color: settingsDialog.textColor; leftPadding: parent.indicator.width + parent.spacing; verticalAlignment: Text.AlignVCenter }
+                                    contentItem: Text { text: autoLvlAuto.text; color: settingsDialog.textColor; leftPadding: autoLvlAuto.indicator.width + autoLvlAuto.spacing; verticalAlignment: Text.AlignVCenter }
                                     indicator: Rectangle {
                                         implicitWidth: 18; implicitHeight: 18
-                                        x: parent.leftPadding; y: parent.height / 2 - height / 2
+                                        x: autoLvlAuto.leftPadding; y: parent.height / 2 - height / 2
                                         radius: 3
                                         border.color: settingsDialog.accentColor
-                                        color: parent.checked ? settingsDialog.accentColor : "transparent"
-                                        Text { text: "✓"; color: "white"; anchors.centerIn: parent; visible: parent.parent.checked; font.bold: true }
+                                        color: autoLvlAuto.checked ? settingsDialog.accentColor : "transparent"
+                                        Text { text: "✓"; color: "white"; anchors.centerIn: parent; visible: autoLvlAuto.checked; font.bold: true }
                                     }
                                 }
                             }
@@ -790,22 +879,25 @@ Window {
                                 ToolTip.text: "Algorithm for auto white balance. 'lab' analyzes in LAB color space for perceptually uniform results. 'rgb' works directly in RGB space. Most users should use 'lab'."
                             }
                             ComboBox {
+                                id: awbModeCombo
                                 model: ["lab", "rgb"]
                                 currentIndex: Math.max(0, model.indexOf(settingsDialog.awbMode))
                                 onActivated: settingsDialog.awbMode = model[currentIndex]
                                 Layout.preferredWidth: 150
                                 delegate: ItemDelegate {
-                                    width: parent.width
-                                    contentItem: Text { text: modelData; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter }
-                                    background: Rectangle { color: parent.highlighted ? "#20ffffff" : "transparent" }
+                                    id: awbModeOption
+                                    required property string modelData
+                                    width: awbModeCombo.width
+                                    contentItem: Text { text: awbModeOption.modelData; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter }
+                                    background: Rectangle { color: awbModeOption.highlighted ? "#20ffffff" : "transparent" }
                                 }
-                                contentItem: Text { text: parent.displayText; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
+                                contentItem: Text { text: awbModeCombo.displayText; color: settingsDialog.textColor; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
                                 background: Rectangle { color: "#10ffffff"; border.color: settingsDialog.controlBorder; radius: 4 }
                             }
 
                             // Strength
                             Label { 
-                                text: "Strength (" + (awbStrSlider.item ? Math.round(awbStrSlider.item.value * 100) : 0) + "%)"
+                                text: "Strength (" + Math.round(settingsDialog.loaderProperty(awbStrSlider, "value", 0) * 100) + "%)"
                                 color: settingsDialog.textColor
                                 
                                 MouseArea {
@@ -822,15 +914,18 @@ Window {
                                 sourceComponent: styledSlider
                                 Layout.fillWidth: true
                                 onLoaded: {
-                                    item.from = 0.3; item.to = 1.0
-                                    item.value = settingsDialog.awbStrength
-                                    item.valueChanged.connect(function() { settingsDialog.awbStrength = item.value })
+                                    settingsDialog.setLoaderProperty(awbStrSlider, "from", 0.3)
+                                    settingsDialog.setLoaderProperty(awbStrSlider, "to", 1.0)
+                                    settingsDialog.setLoaderProperty(awbStrSlider, "value", settingsDialog.awbStrength)
+                                    settingsDialog.connectLoaderSignal(awbStrSlider, "valueChanged", function() {
+                                        settingsDialog.awbStrength = settingsDialog.loaderProperty(awbStrSlider, "value", settingsDialog.awbStrength)
+                                    })
                                 }
                                 Binding {
                                     target: awbStrSlider.item
                                     property: "value"
                                     value: settingsDialog.awbStrength
-                                    when: awbStrSlider.item && !awbStrSlider.item.pressed
+                                    when: awbStrSlider.item && !settingsDialog.loaderProperty(awbStrSlider, "pressed", false)
                                 }
                             }
 
@@ -852,15 +947,18 @@ Window {
                                 id: awbWarmBiasLoader
                                 sourceComponent: styledSpinBox
                                 onLoaded: {
-                                    item.from = -50; item.to = 50
-                                    item.value = settingsDialog.awbWarmBias
-                                    item.valueChanged.connect(function() { settingsDialog.awbWarmBias = item.value })
+                                    settingsDialog.setLoaderProperty(awbWarmBiasLoader, "from", -50)
+                                    settingsDialog.setLoaderProperty(awbWarmBiasLoader, "to", 50)
+                                    settingsDialog.setLoaderProperty(awbWarmBiasLoader, "value", settingsDialog.awbWarmBias)
+                                    settingsDialog.connectLoaderSignal(awbWarmBiasLoader, "valueChanged", function() {
+                                        settingsDialog.awbWarmBias = settingsDialog.loaderProperty(awbWarmBiasLoader, "value", settingsDialog.awbWarmBias)
+                                    })
                                 }
                                 Binding {
                                     target: awbWarmBiasLoader.item
                                     property: "value"
                                     value: settingsDialog.awbWarmBias
-                                    when: awbWarmBiasLoader.item && !awbWarmBiasLoader.item.activeFocus
+                                    when: awbWarmBiasLoader.item && !settingsDialog.loaderProperty(awbWarmBiasLoader, "activeFocus", false)
                                 }
                             }
 
@@ -882,9 +980,12 @@ Window {
                                 id: awbTintBiasLoader
                                 sourceComponent: styledSpinBox
                                 onLoaded: {
-                                    item.from = -50; item.to = 50
-                                    item.value = settingsDialog.awbTintBias
-                                    item.valueChanged.connect(function() { settingsDialog.awbTintBias = item.value })
+                                    settingsDialog.setLoaderProperty(awbTintBiasLoader, "from", -50)
+                                    settingsDialog.setLoaderProperty(awbTintBiasLoader, "to", 50)
+                                    settingsDialog.setLoaderProperty(awbTintBiasLoader, "value", settingsDialog.awbTintBias)
+                                    settingsDialog.connectLoaderSignal(awbTintBiasLoader, "valueChanged", function() {
+                                        settingsDialog.awbTintBias = settingsDialog.loaderProperty(awbTintBiasLoader, "value", settingsDialog.awbTintBias)
+                                    })
                                 }
                                 Binding {
                                     target: awbTintBiasLoader.item
@@ -924,7 +1025,14 @@ Window {
                             Loader {
                                 id: awbLumaLowerLoader
                                 sourceComponent: styledSpinBox
-                                onLoaded: { item.from=0; item.to=255; item.value=settingsDialog.awbLumaLowerBound; item.valueChanged.connect(function(){ settingsDialog.awbLumaLowerBound=item.value})}
+                                onLoaded: {
+                                    settingsDialog.setLoaderProperty(awbLumaLowerLoader, "from", 0)
+                                    settingsDialog.setLoaderProperty(awbLumaLowerLoader, "to", 255)
+                                    settingsDialog.setLoaderProperty(awbLumaLowerLoader, "value", settingsDialog.awbLumaLowerBound)
+                                    settingsDialog.connectLoaderSignal(awbLumaLowerLoader, "valueChanged", function() {
+                                        settingsDialog.awbLumaLowerBound = settingsDialog.loaderProperty(awbLumaLowerLoader, "value", settingsDialog.awbLumaLowerBound)
+                                    })
+                                }
                                 Binding {
                                     target: awbLumaLowerLoader.item
                                     property: "value"
@@ -949,7 +1057,14 @@ Window {
                             Loader {
                                 id: awbLumaUpperLoader
                                 sourceComponent: styledSpinBox
-                                onLoaded: { item.from=0; item.to=255; item.value=settingsDialog.awbLumaUpperBound; item.valueChanged.connect(function(){ settingsDialog.awbLumaUpperBound=item.value})}
+                                onLoaded: {
+                                    settingsDialog.setLoaderProperty(awbLumaUpperLoader, "from", 0)
+                                    settingsDialog.setLoaderProperty(awbLumaUpperLoader, "to", 255)
+                                    settingsDialog.setLoaderProperty(awbLumaUpperLoader, "value", settingsDialog.awbLumaUpperBound)
+                                    settingsDialog.connectLoaderSignal(awbLumaUpperLoader, "valueChanged", function() {
+                                        settingsDialog.awbLumaUpperBound = settingsDialog.loaderProperty(awbLumaUpperLoader, "value", settingsDialog.awbLumaUpperBound)
+                                    })
+                                }
                                 Binding {
                                     target: awbLumaUpperLoader.item
                                     property: "value"
@@ -974,7 +1089,14 @@ Window {
                             Loader {
                                 id: awbRgbLowerLoader
                                 sourceComponent: styledSpinBox
-                                onLoaded: { item.from=0; item.to=255; item.value=settingsDialog.awbRgbLowerBound; item.valueChanged.connect(function(){ settingsDialog.awbRgbLowerBound=item.value})}
+                                onLoaded: {
+                                    settingsDialog.setLoaderProperty(awbRgbLowerLoader, "from", 0)
+                                    settingsDialog.setLoaderProperty(awbRgbLowerLoader, "to", 255)
+                                    settingsDialog.setLoaderProperty(awbRgbLowerLoader, "value", settingsDialog.awbRgbLowerBound)
+                                    settingsDialog.connectLoaderSignal(awbRgbLowerLoader, "valueChanged", function() {
+                                        settingsDialog.awbRgbLowerBound = settingsDialog.loaderProperty(awbRgbLowerLoader, "value", settingsDialog.awbRgbLowerBound)
+                                    })
+                                }
                                 Binding {
                                     target: awbRgbLowerLoader.item
                                     property: "value"
@@ -999,7 +1121,14 @@ Window {
                             Loader {
                                 id: awbRgbUpperLoader
                                 sourceComponent: styledSpinBox
-                                onLoaded: { item.from=0; item.to=255; item.value=settingsDialog.awbRgbUpperBound; item.valueChanged.connect(function(){ settingsDialog.awbRgbUpperBound=item.value})}
+                                onLoaded: {
+                                    settingsDialog.setLoaderProperty(awbRgbUpperLoader, "from", 0)
+                                    settingsDialog.setLoaderProperty(awbRgbUpperLoader, "to", 255)
+                                    settingsDialog.setLoaderProperty(awbRgbUpperLoader, "value", settingsDialog.awbRgbUpperBound)
+                                    settingsDialog.connectLoaderSignal(awbRgbUpperLoader, "valueChanged", function() {
+                                        settingsDialog.awbRgbUpperBound = settingsDialog.loaderProperty(awbRgbUpperLoader, "value", settingsDialog.awbRgbUpperBound)
+                                    })
+                                }
                                 Binding {
                                     target: awbRgbUpperLoader.item
                                     property: "value"
@@ -1035,39 +1164,41 @@ Window {
             Item { Layout.fillWidth: true } // Spacer left
 
             Button {
+                id: cancelButton
                 text: "Cancel"
                 Layout.preferredWidth: 100
                 onClicked: settingsDialog.visible = false
                 
                 contentItem: Text {
-                    text: parent.text
-                    font: parent.font
+                    text: cancelButton.text
+                    font: cancelButton.font
                     color: settingsDialog.textColor
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
                 background: Rectangle {
-                    color: parent.pressed ? "#40ffffff" : "#20ffffff"
+                    color: cancelButton.pressed ? "#40ffffff" : "#20ffffff"
                     radius: 4
-                    border.color: parent.hovered ? "#60ffffff" : "transparent"
+                    border.color: cancelButton.hovered ? "#60ffffff" : "transparent"
                 }
             }
 
             Button {
+                id: saveButton
                 text: "Save"
                 Layout.preferredWidth: 100
                 highlighted: true
                 onClicked: settingsDialog.saveSettings()
                 
                 contentItem: Text {
-                    text: parent.text
-                    font: parent.font
+                    text: saveButton.text
+                    font: saveButton.font
                     color: "white"
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
                 background: Rectangle {
-                    color: parent.pressed ? Qt.darker(settingsDialog.accentColor, 1.1) : settingsDialog.accentColor
+                    color: saveButton.pressed ? Qt.darker(settingsDialog.accentColor, 1.1) : settingsDialog.accentColor
                     radius: 4
                 }
             }
@@ -1080,7 +1211,7 @@ Window {
         repeat: true
         running: false
         onTriggered: {
-            if (uiState) settingsDialog.cacheUsage = uiState.get_cache_usage_gb()
+            if (settingsDialog.uiStateRef) settingsDialog.cacheUsage = settingsDialog.uiStateRef.get_cache_usage_gb()
         }
     }
 }
