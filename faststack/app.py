@@ -2052,12 +2052,9 @@ class AppController(QObject):
                 )
                 save_directory_key = save_result.get("save_directory_key")
                 current_directory_key = self._key(self.image_dir)
-                should_record_undo = (
-                    backup_path
-                    and (
-                        save_directory_key is None
-                        or save_directory_key == current_directory_key
-                    )
+                should_record_undo = backup_path and (
+                    save_directory_key is None
+                    or save_directory_key == current_directory_key
                 )
                 if should_record_undo:
                     self.undo_history.append(
