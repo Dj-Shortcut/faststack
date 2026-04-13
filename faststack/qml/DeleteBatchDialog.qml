@@ -14,6 +14,7 @@ Dialog {
     property int batchCount: 0
     property color backgroundColor: "#1e1e1e"
     property color textColor: "white"
+    property var controllerRef: typeof controller !== "undefined" ? controller : null
 
     background: Rectangle {
         color: deleteBatchDialog.backgroundColor
@@ -27,7 +28,7 @@ Dialog {
         padding: 20
 
         Label {
-            text: `You have ${batchCount} image${batchCount === 1 ? '' : 's'} selected in a batch.`
+            text: `You have ${deleteBatchDialog.batchCount} image${deleteBatchDialog.batchCount === 1 ? '' : 's'} selected in a batch.`
             wrapMode: Text.WordWrap
             width: parent.width - parent.padding * 2
             color: deleteBatchDialog.textColor
@@ -47,19 +48,20 @@ Dialog {
             anchors.horizontalCenter: parent.horizontalCenter
 
             Button {
+                id: deleteCurrentButton
                 text: "Delete Current Image"
                 onClicked: {
                     deleteBatchDialog.close()
-                    if (controller) {
-                        controller.delete_current_image_only()
+                    if (deleteBatchDialog.controllerRef) {
+                        deleteBatchDialog.controllerRef.delete_current_image_only()
                     }
                 }
                 background: Rectangle {
-                    color: parent.pressed ? "#555555" : (parent.hovered ? "#666666" : "#444444")
+                    color: deleteCurrentButton.down ? "#555555" : (deleteCurrentButton.hovered ? "#666666" : "#444444")
                     radius: 4
                 }
                 contentItem: Text {
-                    text: parent.text
+                    text: deleteCurrentButton.text
                     color: deleteBatchDialog.textColor
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
@@ -67,19 +69,20 @@ Dialog {
             }
 
             Button {
-                text: `Delete All (${batchCount})`
+                id: deleteAllButton
+                text: `Delete All (${deleteBatchDialog.batchCount})`
                 onClicked: {
                     deleteBatchDialog.close()
-                    if (controller) {
-                        controller.delete_batch_images()
+                    if (deleteBatchDialog.controllerRef) {
+                        deleteBatchDialog.controllerRef.delete_batch_images()
                     }
                 }
                 background: Rectangle {
-                    color: parent.pressed ? "#cc0000" : (parent.hovered ? "#ff0000" : "#aa0000")
+                    color: deleteAllButton.down ? "#cc0000" : (deleteAllButton.hovered ? "#ff0000" : "#aa0000")
                     radius: 4
                 }
                 contentItem: Text {
-                    text: parent.text
+                    text: deleteAllButton.text
                     color: deleteBatchDialog.textColor
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
@@ -88,16 +91,17 @@ Dialog {
             }
 
             Button {
+                id: cancelDeleteButton
                 text: "Cancel"
                 onClicked: {
                     deleteBatchDialog.close()
                 }
                 background: Rectangle {
-                    color: parent.pressed ? "#555555" : (parent.hovered ? "#666666" : "#444444")
+                    color: cancelDeleteButton.down ? "#555555" : (cancelDeleteButton.hovered ? "#666666" : "#444444")
                     radius: 4
                 }
                 contentItem: Text {
-                    text: parent.text
+                    text: cancelDeleteButton.text
                     color: deleteBatchDialog.textColor
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
@@ -108,15 +112,15 @@ Dialog {
 
     onOpened: {
         // Notify Python that a dialog is open
-        if (controller) {
-            controller.dialog_opened()
+        if (deleteBatchDialog.controllerRef) {
+            deleteBatchDialog.controllerRef.dialog_opened()
         }
     }
     
     onClosed: {
         // Notify Python that dialog is closed
-        if (controller) {
-            controller.dialog_closed()
+        if (deleteBatchDialog.controllerRef) {
+            deleteBatchDialog.controllerRef.dialog_closed()
         }
     }
 }

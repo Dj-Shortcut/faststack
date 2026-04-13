@@ -18,6 +18,7 @@ Dialog {
     // Theme properties (can be bound from Main.qml)
     property color backgroundColor: "#333333"
     property color textColor: "#ffffff"
+    property var controllerRef: typeof controller !== "undefined" ? controller : null
 
     background: Rectangle {
         color: exifDialog.backgroundColor
@@ -29,14 +30,14 @@ Dialog {
         // Reset to summary view when opened
         showFull = false
         // Notify Python that a dialog is open
-        if (controller) {
-            controller.dialog_opened()
+        if (exifDialog.controllerRef) {
+            exifDialog.controllerRef.dialog_opened()
         }
     }
     
     onClosed: {
-        if (controller) {
-            controller.dialog_closed()
+        if (exifDialog.controllerRef) {
+            exifDialog.controllerRef.dialog_closed()
         }
     }
 

@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -6,29 +8,50 @@ import QtQuick.Layouts
 Item {
     id: tile
 
-    // Properties from model (prefixed to avoid shadowing model roles)
-    property int tileIndex: 0
-    property string tileFilePath: ""
-    property string tileFileName: ""
-    property bool tileIsFolder: false
-    property bool tileIsStacked: false
-    property bool tileIsUploaded: false
-    property bool tileIsEdited: false
-    property bool tileIsRestacked: false
-    property bool tileIsFavorite: false
-    property bool tileIsTodo: false
-    property bool tileIsInBatch: false
-    property bool tileIsCurrent: false
-    property string tileThumbnailSource: ""
-    property var tileFolderStats: null
-    property bool tileIsSelected: false
-    property bool tileIsParentFolder: false
+    // Required delegate properties from the model.
+    required property int index
+    required property string filePath
+    required property string fileName
+    required property bool isFolder
+    required property bool isStacked
+    required property bool isUploaded
+    required property bool isEdited
+    required property bool isRestacked
+    required property bool isFavorite
+    required property bool isTodo
+    required property bool isInBatch
+    required property bool isCurrent
+    required property string thumbnailSource
+    required property var folderStats
+    required property bool isSelected
+    required property bool isParentFolder
+    required property bool hasBackups
+    required property bool hasDeveloped
+
+    // Prefixed mirror properties to keep the rest of the file stable.
+    property int tileIndex: index
+    property string tileFilePath: filePath || ""
+    property string tileFileName: fileName || ""
+    property bool tileIsFolder: isFolder || false
+    property bool tileIsStacked: isStacked || false
+    property bool tileIsUploaded: isUploaded || false
+    property bool tileIsEdited: isEdited || false
+    property bool tileIsRestacked: isRestacked || false
+    property bool tileIsFavorite: isFavorite || false
+    property bool tileIsTodo: isTodo || false
+    property bool tileIsInBatch: isInBatch || false
+    property bool tileIsCurrent: isCurrent || false
+    property string tileThumbnailSource: thumbnailSource || ""
+    property var tileFolderStats: folderStats || null
+    property bool tileIsSelected: isSelected || false
+    property bool tileIsParentFolder: isParentFolder || false
     property bool tileHasCursor: false  // Keyboard cursor position
-    property bool tileHasBackups: false
-    property bool tileHasDeveloped: false
+    property bool tileHasBackups: hasBackups || false
+    property bool tileHasDeveloped: hasDeveloped || false
 
     // Theme property (bound by parent)
     property bool isDarkTheme: false
+    property var uiStateRef: typeof uiState !== "undefined" ? uiState : null
 
     // Configuration
     property int tileSize: 180
@@ -65,29 +88,29 @@ Item {
         anchors.fill: parent
         color: {
             if (tile.tileIsCurrent && !tile.tileIsFolder) {
-                return Qt.rgba(currentColor.r, currentColor.g, currentColor.b, 0.25)
+                return Qt.rgba(tile.currentColor.r, tile.currentColor.g, tile.currentColor.b, 0.25)
             } else if (tile.tileIsSelected) {
-                return Qt.rgba(selectedColor.r, selectedColor.g, selectedColor.b, 0.3)
+                return Qt.rgba(tile.selectedColor.r, tile.selectedColor.g, tile.selectedColor.b, 0.3)
             } else if (tile.tileHasCursor) {
-                return Qt.rgba(cursorColor.r, cursorColor.g, cursorColor.b, 0.15)
+                return Qt.rgba(tile.cursorColor.r, tile.cursorColor.g, tile.cursorColor.b, 0.15)
             } else if (tileMouseArea.containsMouse) {
-                return hoverColor
+                return tile.hoverColor
             }
             if (tile.tileIsFolder) {
                 return tile.isDarkTheme ? "#181818" : "#f0f0f0"
             }
-            return backgroundColor
+            return tile.backgroundColor
         }
         radius: 4
 
         // Border - current gets gold, selected gets green, cursor gets cyan
         border.color: {
             if (tile.tileIsCurrent && !tile.tileIsFolder) {
-                return currentColor
+                return tile.currentColor
             } else if (tile.tileIsSelected) {
-                return selectedColor
+                return tile.selectedColor
             } else if (tile.tileHasCursor) {
-                return cursorColor
+                return tile.cursorColor
             }
             return "transparent"
         }
@@ -103,7 +126,7 @@ Item {
         // Thumbnail container
         Item {
             Layout.fillWidth: true
-            Layout.preferredHeight: thumbnailSize
+            Layout.preferredHeight: tile.thumbnailSize
             Layout.alignment: Qt.AlignHCenter
 
             // Thumbnail image
@@ -111,8 +134,8 @@ Item {
                 id: thumbnailImage
                 anchors.centerIn: parent
                 visible: !tile.tileIsFolder
-                width: Math.min(thumbnailSize, parent.width)
-                height: Math.min(thumbnailSize, parent.height)
+                width: Math.min(tile.thumbnailSize, parent.width)
+                height: Math.min(tile.thumbnailSize, parent.height)
                 fillMode: Image.PreserveAspectFit
                 source: tile.tileIsFolder ? "" : tile.tileThumbnailSource
                 asynchronous: true
@@ -149,7 +172,7 @@ Item {
                 visible: tile.tileIsParentFolder
                 text: "\u2B06"  // Up arrow
                 font.pixelSize: 48
-                color: textColor
+                color: tile.textColor
                 opacity: 0.8
             }
 
@@ -167,7 +190,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: uploadedColor
+                    color: tile.uploadedColor
                     Text {
                         anchors.centerIn: parent
                         text: "U"
@@ -183,7 +206,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: editedColor
+                    color: tile.editedColor
                     Text {
                         anchors.centerIn: parent
                         text: "E"
@@ -199,7 +222,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: restackedColor
+                    color: tile.restackedColor
                     Text {
                         anchors.centerIn: parent
                         text: "R"
@@ -215,7 +238,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: todoColor
+                    color: tile.todoColor
                     Text {
                         anchors.centerIn: parent
                         text: "D"
@@ -231,7 +254,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: favoriteColor
+                    color: tile.favoriteColor
                     Text {
                         anchors.centerIn: parent
                         text: "F"
@@ -247,7 +270,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: batchColor
+                    color: tile.batchColor
                     Text {
                         anchors.centerIn: parent
                         text: "B"
@@ -263,7 +286,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: stackedColor
+                    color: tile.stackedColor
                     Text {
                         anchors.centerIn: parent
                         text: "S"
@@ -289,7 +312,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: backupsColor
+                    color: tile.backupsColor
                     Text {
                         anchors.centerIn: parent
                         text: "Bk"
@@ -305,7 +328,7 @@ Item {
                     width: 18
                     height: 18
                     radius: 3
-                    color: developedColor
+                    color: tile.developedColor
                     Text {
                         anchors.centerIn: parent
                         text: "D"
@@ -466,6 +489,7 @@ Item {
                         Repeater {
                             model: tile.tileFolderStats ? tile.tileFolderStats.coverage_buckets : []
                             delegate: Rectangle {
+                                required property var modelData
                                 width: 3
                                 height: 3
                                 radius: 0.5
@@ -482,6 +506,7 @@ Item {
                         Repeater {
                             model: tile.tileFolderStats ? tile.tileFolderStats.coverage_buckets : []
                             delegate: Rectangle {
+                                required property var modelData
                                 width: 3
                                 height: 3
                                 radius: 0.5
@@ -497,6 +522,7 @@ Item {
                         Repeater {
                             model: tile.tileFolderStats ? tile.tileFolderStats.coverage_buckets : []
                             delegate: Rectangle {
+                                required property var modelData
                                 width: 3
                                 height: 3
                                 radius: 0.5
@@ -512,6 +538,7 @@ Item {
                         Repeater {
                             model: tile.tileFolderStats ? tile.tileFolderStats.coverage_buckets : []
                             delegate: Rectangle {
+                                required property var modelData
                                 width: 3
                                 height: 3
                                 radius: 0.5
@@ -571,9 +598,9 @@ Item {
         // Filename text
         Text {
             Layout.fillWidth: true
-            Layout.preferredHeight: textHeight
+            Layout.preferredHeight: tile.textHeight
             text: tile.tileIsParentFolder ? "(Parent Folder)" : tile.tileFileName
-            color: textColor
+            color: tile.textColor
             font.pixelSize: 11
             elide: Text.ElideMiddle
             horizontalAlignment: Text.AlignHCenter
@@ -582,9 +609,7 @@ Item {
     }
 
     Component.onCompleted: {
-        // Use robust check for uiState which might not be defined in all contexts
-        var hasUiState = (typeof uiState !== 'undefined' && uiState !== null);
-        if (tile.tileIndex === 0 && hasUiState && uiState.debugThumbTiming)
+        if (tile.tileIndex === 0 && tile.uiStateRef && tile.uiStateRef.debugThumbTiming)
             console.log("[THUMB-TIMING] first delegate created (index 0) t=" + Date.now() + "ms")
     }
 
@@ -598,7 +623,7 @@ Item {
         onClicked: function(mouse) {
             if (tile.tileIsFolder) {
                 // Navigate into folder (or parent)
-                uiState.gridNavigateTo(tile.tileFilePath)
+                if (tile.uiStateRef) tile.uiStateRef.gridNavigateTo(tile.tileFilePath)
             } else {
                 // Handle selection or opening
                 var hasShift = (mouse.modifiers & Qt.ShiftModifier)
@@ -607,13 +632,13 @@ Item {
 
                 if (isRightClick) {
                     // Right-click: toggle selection (as per help text)
-                    uiState.gridSelectIndex(tile.tileIndex, false, true)
+                    if (tile.uiStateRef) tile.uiStateRef.gridSelectIndex(tile.tileIndex, false, true)
                 } else if (hasShift || hasCtrl) {
                     // Shift: range select, Ctrl: add to selection
-                    uiState.gridSelectIndex(tile.tileIndex, hasShift, hasCtrl)
+                    if (tile.uiStateRef) tile.uiStateRef.gridSelectIndex(tile.tileIndex, hasShift, hasCtrl)
                 } else {
                     // Left-click without modifiers: open in loupe view
-                    uiState.gridOpenIndex(tile.tileIndex)
+                    if (tile.uiStateRef) tile.uiStateRef.gridOpenIndex(tile.tileIndex)
                 }
             }
         }

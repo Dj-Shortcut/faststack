@@ -15,6 +15,7 @@ Dialog {
     property var filterFlags: []
     property color backgroundColor: "#1e1e1e"
     property color textColor: "white"
+    property var controllerRef: typeof controller !== "undefined" ? controller : null
 
 
     // Match the app's theme dynamically
@@ -84,7 +85,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#4fc3f7"
-                onCheckedChanged: _collectFlags()
+                onCheckedChanged: filterDialog._collectFlags()
             }
             CheckBox {
                 id: cbStacked
@@ -92,7 +93,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#81c784"
-                onCheckedChanged: _collectFlags()
+                onCheckedChanged: filterDialog._collectFlags()
             }
             CheckBox {
                 id: cbEdited
@@ -100,7 +101,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#ffb74d"
-                onCheckedChanged: _collectFlags()
+                onCheckedChanged: filterDialog._collectFlags()
             }
             CheckBox {
                 id: cbRestacked
@@ -108,7 +109,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#ce93d8"
-                onCheckedChanged: _collectFlags()
+                onCheckedChanged: filterDialog._collectFlags()
             }
             CheckBox {
                 id: cbTodo
@@ -116,7 +117,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#64B5F6"
-                onCheckedChanged: _collectFlags()
+                onCheckedChanged: filterDialog._collectFlags()
             }
             CheckBox {
                 id: cbFavorite
@@ -124,7 +125,7 @@ Dialog {
                 checked: false
                 Material.foreground: filterDialog.textColor
                 Material.accent: "#ffd54f"
-                onCheckedChanged: _collectFlags()
+                onCheckedChanged: filterDialog._collectFlags()
             }
         }
 
@@ -155,12 +156,12 @@ Dialog {
 
     onOpened: {
         // Load current filter string from controller
-        var current = controller && controller.get_filter_string ? controller.get_filter_string() : ""
+        var current = filterDialog.controllerRef && filterDialog.controllerRef.get_filter_string ? filterDialog.controllerRef.get_filter_string() : ""
         filterDialog.filterString = current || ""
         filterField.text = filterDialog.filterString
 
         // Load current filter flags from controller
-        var currentFlags = controller && controller.get_filter_flags ? controller.get_filter_flags() : []
+        var currentFlags = filterDialog.controllerRef && filterDialog.controllerRef.get_filter_flags ? filterDialog.controllerRef.get_filter_flags() : []
         cbUploaded.checked = currentFlags.indexOf("uploaded") >= 0
         cbStacked.checked = currentFlags.indexOf("stacked") >= 0
         cbEdited.checked = currentFlags.indexOf("edited") >= 0
@@ -171,15 +172,15 @@ Dialog {
         filterField.forceActiveFocus()
         filterField.selectAll()
         // Notify Python that a dialog is open
-        if (controller && controller.dialog_opened) {
-            controller.dialog_opened()
+        if (filterDialog.controllerRef && filterDialog.controllerRef.dialog_opened) {
+            filterDialog.controllerRef.dialog_opened()
         }
     }
 
     onClosed: {
         // Notify Python that dialog is closed
-        if (controller && controller.dialog_closed) {
-            controller.dialog_closed()
+        if (filterDialog.controllerRef && filterDialog.controllerRef.dialog_closed) {
+            filterDialog.controllerRef.dialog_closed()
         }
     }
 }

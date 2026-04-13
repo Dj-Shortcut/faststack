@@ -14,6 +14,7 @@ Dialog {
     property int maxImageCount: 0
     property color backgroundColor: "red" // Placeholder, will be set from Main.qml
     property color textColor: "white" // Placeholder, will be set from Main.qml
+    property var controllerRef: typeof controller !== "undefined" ? controller : null
 
 
     // Inherit Material theme from parent
@@ -27,18 +28,18 @@ Dialog {
         imageNumberField.text = ""
         imageNumberField.forceActiveFocus()
         // Notify Python that a dialog is open
-        controller.dialog_opened()
+        if (jumpDialog.controllerRef) jumpDialog.controllerRef.dialog_opened()
     }
     
     onClosed: {
         // Notify Python that dialog is closed
-        controller.dialog_closed()
+        if (jumpDialog.controllerRef) jumpDialog.controllerRef.dialog_closed()
     }
 
     onAccepted: {
         var num = parseInt(imageNumberField.text)
         if (!isNaN(num) && num >= 1 && num <= maxImageCount) {
-            controller.jump_to_image(num - 1) // Convert 1-based to 0-based index
+            if (jumpDialog.controllerRef) jumpDialog.controllerRef.jump_to_image(num - 1) // Convert 1-based to 0-based index
         }
     }
 

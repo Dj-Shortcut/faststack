@@ -1,6 +1,6 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Window
-import QtQuick.Dialogs
 import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
 import QtQuick.Layouts 1.15
@@ -16,12 +16,14 @@ ApplicationWindow {
     flags: Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint
     title: "FastStack"
 
+    property var uiStateRef: null
+    property var controllerRef: null
     property bool allowCloseWithRecycleBins: false
     property bool fullScreenLoupe: false
     property var savedWindowGeometry: ({})
 
     function enterFullScreenLoupe() {
-        if (!uiState || uiState.isGridViewActive) return
+        if (!root.uiStateRef || root.uiStateRef.isGridViewActive) return
 
         savedWindowGeometry = {
             x: root.x,
@@ -63,13 +65,13 @@ ApplicationWindow {
     }
 
     onClosing: function(close) {
-        if (allowCloseWithRecycleBins) {
+        if (root.allowCloseWithRecycleBins) {
             close.accepted = true
             return
         }
-        if (uiState && uiState.hasRecycleBinItems) {
+        if (root.uiStateRef && root.uiStateRef.hasRecycleBinItems) {
             close.accepted = false
-            uiState.refreshRecycleBinStats()
+            root.uiStateRef.refreshRecycleBinStats()
             recycleBinCleanupDialog.open()
         } else {
             close.accepted = true
@@ -77,10 +79,12 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        root.uiStateRef = uiState
+        root.controllerRef = controller
         // Initialization complete
     }
 
-    Material.theme: (uiState && uiState.theme === 0) ? Material.Dark : Material.Light
+    Material.theme: (root.uiStateRef && root.uiStateRef.theme === 0) ? Material.Dark : Material.Light
     Material.accent: "#4fb360"
 
     // Frameless windows on Windows report FullScreen instead of Maximized
@@ -89,17 +93,19 @@ ApplicationWindow {
     property bool isMaximized: root.visibility === Window.Maximized
                                || (root.visibility === Window.FullScreen
                                    && !root.fullScreenLoupe)
-    property bool isDarkTheme: uiState ? uiState.theme === 0 : true
+    property bool isDarkTheme: root.uiStateRef ? root.uiStateRef.theme === 0 : true
     property color currentBackgroundColor: isDarkTheme ? "#000000" : "#ffffff"
     property color currentTextColor: isDarkTheme ? "white" : "black"
     property color hoverColor: isDarkTheme ? Qt.lighter(currentBackgroundColor, 1.5) : Qt.darker(currentBackgroundColor, 1.1)
+    property color menuHoverColor: isDarkTheme ? "#555555" : "#e0e0e0"
+    property color menuSelectedColor: isDarkTheme ? "#505050" : "#d0ffd0"
 
 
     background: Rectangle { color: root.currentBackgroundColor }
 
     function toggleTheme() {
-        if (uiState) {
-            uiState.theme = (uiState.theme === 0 ? 1 : 0)
+        if (root.uiStateRef) {
+            root.uiStateRef.theme = (root.uiStateRef.theme === 0 ? 1 : 0)
         }
     }
 
@@ -107,6 +113,14 @@ ApplicationWindow {
         exifDialog.summaryData = data.summary
         exifDialog.fullData = data.full
         exifDialog.open()
+    }
+
+    function setGridPrefetch(item, enabled) {
+        var methodName = "set" + "PrefetchEnabled"
+        var setter = item ? item[methodName] : null
+        if (typeof setter === "function") {
+            setter.call(item, enabled)
+        }
     }
 
 
@@ -305,7 +319,7 @@ ApplicationWindow {
 
             TapHandler {
                 onDoubleTapped: {
-                    if (uiState && uiState.debugMode)
+                    if (root.uiStateRef && root.uiStateRef.debugMode)
                         console.log("[TitleBar] double-tap: visibility =", root.visibility,
                                     "isMaximized =", root.isMaximized,
                                     "fullScreenLoupe =", root.fullScreenLoupe)
@@ -314,7 +328,7 @@ ApplicationWindow {
                     } else {
                         root.showMaximized()
                     }
-                    if (uiState && uiState.debugMode)
+                    if (root.uiStateRef && root.uiStateRef.debugMode)
                         console.log("[TitleBar] double-tap: after visibility =", root.visibility,
                                     "isMaximized =", root.isMaximized)
                 }
@@ -325,7 +339,7 @@ ApplicationWindow {
                 target: null  // we move the window, not this item
                 onActiveChanged: {
                     if (active) {
-                        if (uiState && uiState.debugMode)
+                        if (root.uiStateRef && root.uiStateRef.debugMode)
                             console.log("[TitleBar] drag-start: starting system move")
                         root.startSystemMove()
                     }
@@ -350,7 +364,7 @@ ApplicationWindow {
 
             text: {
                 if (!loupe || fs <= 0 || zs <= 0) return ""
-                if (uiState && uiState.isGridViewActive) return ""
+                if (root.uiStateRef && root.uiStateRef.isGridViewActive) return ""
                 var ratio = zs / fs
                 if (Math.abs(ratio - 1.0) < 0.03) return "Zoom: Fit to window (" + Math.round(zs * 100) + "%)"
                 return "Zoom: " + Math.round(zs * 100) + "%"
@@ -550,63 +564,39 @@ ApplicationWindow {
         contentItem: Column {
             id: fileMenuColumn
 
-            ItemDelegate {
+            MenuActionItem {
                 width: 200
-                height: 36
                 text: "Open Folder..."
+                hoverFillColor: root.hoverColor
                 onClicked: {
-                    if (uiState) {
-                        uiState.open_folder()
+                    if (root.uiStateRef) {
+                        root.uiStateRef.open_folder()
                     }
                     fileMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? hoverColor : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                defaultTextColor: root.currentTextColor
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 200
-                height: 36
                 text: "Settings..."
+                hoverFillColor: root.menuHoverColor
                 onClicked: {
                     settingsDialog.open()
                     fileMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                defaultTextColor: root.currentTextColor
             }
             Rectangle {
                 width: 200
                 height: 1
                 color: root.isDarkTheme ? "#666666" : "#cccccc"
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 200
-                height: 36
                 text: "Exit"
+                hoverFillColor: root.menuHoverColor
                 onClicked: Qt.quit()
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                defaultTextColor: root.currentTextColor
             }
         }
     }
@@ -628,23 +618,15 @@ ApplicationWindow {
             id: viewMenuColumn
 
             // Toggle theme
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Toggle Light/Dark Mode"
+                hoverFillColor: root.menuHoverColor
                 onClicked: {
                     root.toggleTheme()
                     viewMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                defaultTextColor: root.currentTextColor
             }
 
             // Separator
@@ -655,74 +637,44 @@ ApplicationWindow {
             }
 
             // Color: None (Original)
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Color: None (Original)"
+                hoverFillColor: root.menuHoverColor
+                selectedFillColor: root.menuSelectedColor
+                selected: root.uiStateRef && root.uiStateRef.colorMode === "none"
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) controller.set_color_mode("none")
+                    if (root.controllerRef) root.controllerRef.set_color_mode("none")
                     viewMenu.close()
-                }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0")
-                                          : ((uiState && uiState.colorMode === "none")
-                                             ? (root.isDarkTheme ? "#505050" : "#d0ffd0")
-                                             : "transparent")
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    font.bold: uiState && uiState.colorMode === "none"
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
 
             // Color: Saturation Compensation
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Color: Saturation Compensation"
+                hoverFillColor: root.menuHoverColor
+                selectedFillColor: root.menuSelectedColor
+                selected: root.uiStateRef && root.uiStateRef.colorMode === "saturation"
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) controller.set_color_mode("saturation")
+                    if (root.controllerRef) root.controllerRef.set_color_mode("saturation")
                     viewMenu.close()
-                }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0")
-                                          : ((uiState && uiState.colorMode === "saturation")
-                                             ? (root.isDarkTheme ? "#505050" : "#d0ffd0")
-                                             : "transparent")
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    font.bold: uiState && uiState.colorMode === "saturation"
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
 
             // Color: Full ICC Profile
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Color: Full ICC Profile"
+                hoverFillColor: root.menuHoverColor
+                selectedFillColor: root.menuSelectedColor
+                selected: root.uiStateRef && root.uiStateRef.colorMode === "icc"
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) controller.set_color_mode("icc")
+                    if (root.controllerRef) root.controllerRef.set_color_mode("icc")
                     viewMenu.close()
-                }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0")
-                                          : ((uiState && uiState.colorMode === "icc")
-                                             ? (root.isDarkTheme ? "#505050" : "#d0ffd0")
-                                             : "transparent")
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    font.bold: uiState && uiState.colorMode === "icc"
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
         }
@@ -746,160 +698,89 @@ ApplicationWindow {
             id: actionsMenuColumn
 
             // Develop RAW (True Headroom)
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
-                text: (uiState && uiState.hasWorkingTif) ? "Re-develop RAW" : "Develop RAW"
-                enabled: uiState ? uiState.hasRaw : false
+                text: (root.uiStateRef && root.uiStateRef.hasWorkingTif) ? "Re-develop RAW" : "Develop RAW"
+                enabled: root.uiStateRef ? root.uiStateRef.hasRaw : false
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
+                disabledTextColor: root.isDarkTheme ? "#666666" : "#999999"
                 onClicked: {
-                    if (uiState) uiState.developRaw()
+                    if (root.uiStateRef) root.uiStateRef.developRaw()
                     actionsMenu.close()
-                }
-                background: Rectangle {
-                    color: (parent.enabled && parent.hovered) ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: enabled ? root.currentTextColor : (root.isDarkTheme ? "#666666" : "#999999")
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
 
             // Edit Image (from old Main.qml)
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Edit Image"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (uiState) {
-                        uiState.isEditorOpen = !uiState.isEditorOpen
-                        if (uiState.isEditorOpen && controller) {
-                            controller.load_image_for_editing()
+                    if (root.uiStateRef) {
+                        root.uiStateRef.isEditorOpen = !root.uiStateRef.isEditorOpen
+                        if (root.uiStateRef.isEditorOpen && root.controllerRef) {
+                            root.controllerRef.load_image_for_editing()
                         }
                     }
                     actionsMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Crop Image"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) {
-                        controller.toggle_crop_mode()
+                    if (root.controllerRef) {
+                        root.controllerRef.toggle_crop_mode()
                     }
                     actionsMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
 
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Run Stacks (raw)"
-                onClicked: { if (uiState) uiState.launch_helicon(true); actionsMenu.close() }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
+                onClicked: { if (root.uiStateRef) root.uiStateRef.launch_helicon(true); actionsMenu.close() }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Run Stacks (jpg)"
-                onClicked: { if (uiState) uiState.launch_helicon(false); actionsMenu.close() }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
+                onClicked: { if (root.uiStateRef) root.uiStateRef.launch_helicon(false); actionsMenu.close() }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Clear Stacks"
-                onClicked: { if (uiState) uiState.clear_all_stacks(); actionsMenu.close() }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
+                onClicked: { if (root.uiStateRef) root.uiStateRef.clear_all_stacks(); actionsMenu.close() }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Show Stacks"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: { showStacksDialog.open(); actionsMenu.close() }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Preload All Images"
-                onClicked: { if (uiState) uiState.preloadAllImages(); actionsMenu.close() }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
+                onClicked: { if (root.uiStateRef) root.uiStateRef.preloadAllImages(); actionsMenu.close() }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Filter Images..."
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: { filterDialog.open(); actionsMenu.close() }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
 
             // Separator before Sort options
@@ -915,7 +796,7 @@ ApplicationWindow {
                 height: 36
                 hoverEnabled: true
                 background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
+                    color: sortPhotosLauncher.hovered ? root.menuHoverColor : "transparent"
                 }
                 contentItem: Item {
                     Text {
@@ -952,114 +833,66 @@ ApplicationWindow {
             }
 
             // Clear Filename Filter (from old Main.qml)
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Clear Filename Filter"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) controller.clear_filter()
+                    if (root.controllerRef) root.controllerRef.clear_filter()
                     actionsMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Add Favorites to Batch"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (uiState) uiState.addFavoritesToBatch()
+                    if (root.uiStateRef) root.uiStateRef.addFavoritesToBatch()
                     actionsMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Add Uploaded to Batch"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (uiState) uiState.addUploadedToBatch()
+                    if (root.uiStateRef) root.uiStateRef.addUploadedToBatch()
                     actionsMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Jump to Last Uploaded"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (uiState) uiState.jumpToLastUploaded()
+                    if (root.uiStateRef) root.uiStateRef.jumpToLastUploaded()
                     actionsMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Auto-Level Batch"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (uiState) uiState.batchAutoLevels()
+                    if (root.uiStateRef) root.uiStateRef.batchAutoLevels()
                     actionsMenu.close()
-                }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
                 text: "Stack Source RAWs"
-                enabled: uiState ? uiState.isStackedJpg : false
+                enabled: root.uiStateRef ? root.uiStateRef.isStackedJpg : false
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
+                disabledTextColor: root.isDarkTheme ? "#666666" : "#999999"
                 onClicked: {
-                    if (uiState) uiState.stack_source_raws();
+                    if (root.uiStateRef) root.uiStateRef.stack_source_raws();
                     actionsMenu.close()
-                }
-                background: Rectangle {
-                    color: (parent.enabled && parent.hovered) ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: parent.enabled ? root.currentTextColor : (root.isDarkTheme ? "#666666" : "#999999")
-                    opacity: parent.enabled ? 1.0 : 0.6
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
 
@@ -1071,22 +904,14 @@ ApplicationWindow {
             }
 
             // Toggle Grid/Loupe View
-            ItemDelegate {
+            MenuActionItem {
                 width: 220
-                height: 36
-                text: uiState && uiState.isGridViewActive ? "Single Image View" : "Thumbnail View"
+                text: root.uiStateRef && root.uiStateRef.isGridViewActive ? "Single Image View" : "Thumbnail View"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (uiState) uiState.toggleGridView();
+                    if (root.uiStateRef) root.uiStateRef.toggleGridView();
                     actionsMenu.close()
-                }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
         }
@@ -1108,73 +933,43 @@ ApplicationWindow {
         contentItem: Column {
             id: sortSubMenuColumn
 
-            ItemDelegate {
+            MenuActionItem {
                 width: 180
-                height: 36
                 text: "Default"
+                hoverFillColor: root.menuHoverColor
+                selectedFillColor: root.menuSelectedColor
+                selected: root.uiStateRef && root.uiStateRef.sortMode === "default"
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) controller.set_sort_mode("default")
+                    if (root.controllerRef) root.controllerRef.set_sort_mode("default")
                     sortSubMenu.close()
                     actionsMenu.close()
                 }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0")
-                                          : ((uiState && uiState.sortMode === "default")
-                                             ? (root.isDarkTheme ? "#505050" : "#d0ffd0")
-                                             : "transparent")
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    font.bold: uiState && uiState.sortMode === "default"
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 180
-                height: 36
                 text: "By Filename"
+                hoverFillColor: root.menuHoverColor
+                selectedFillColor: root.menuSelectedColor
+                selected: root.uiStateRef && root.uiStateRef.sortMode === "filename"
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) controller.set_sort_mode("filename")
+                    if (root.controllerRef) root.controllerRef.set_sort_mode("filename")
                     sortSubMenu.close()
                     actionsMenu.close()
-                }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0")
-                                          : ((uiState && uiState.sortMode === "filename")
-                                             ? (root.isDarkTheme ? "#505050" : "#d0ffd0")
-                                             : "transparent")
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    font.bold: uiState && uiState.sortMode === "filename"
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
-            ItemDelegate {
+            MenuActionItem {
                 width: 180
-                height: 36
                 text: "By Date"
+                hoverFillColor: root.menuHoverColor
+                selectedFillColor: root.menuSelectedColor
+                selected: root.uiStateRef && root.uiStateRef.sortMode === "date"
+                defaultTextColor: root.currentTextColor
                 onClicked: {
-                    if (controller) controller.set_sort_mode("date")
+                    if (root.controllerRef) root.controllerRef.set_sort_mode("date")
                     sortSubMenu.close()
                     actionsMenu.close()
-                }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0")
-                                          : ((uiState && uiState.sortMode === "date")
-                                             ? (root.isDarkTheme ? "#505050" : "#d0ffd0")
-                                             : "transparent")
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    font.bold: uiState && uiState.sortMode === "date"
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
                 }
             }
         }
@@ -1196,20 +991,12 @@ ApplicationWindow {
         contentItem: Column {
             id: helpMenuColumn
 
-            ItemDelegate {
+            MenuActionItem {
                 width: 200
-                height: 36
                 text: "Key Bindings"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
                 onClicked: { aboutDialog.open(); helpMenu.close() }
-                background: Rectangle {
-                    color: parent.hovered ? (root.isDarkTheme ? "#555555" : "#e0e0e0") : "transparent"
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: root.currentTextColor
-                    verticalAlignment: Text.AlignVCenter
-                    leftPadding: 10
-                }
             }
         }
     }
@@ -1220,7 +1007,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "F11"
         context: Qt.ApplicationShortcut
-        enabled: uiState ? !uiState.isGridViewActive && !uiState.isDialogOpen : false
+        enabled: root.uiStateRef ? !root.uiStateRef.isGridViewActive && !root.uiStateRef.isDialogOpen : false
         onActivated: root.toggleFullScreenLoupe()
     }
 
@@ -1234,16 +1021,16 @@ ApplicationWindow {
     Shortcut {
         sequence: "E"
         context: Qt.ApplicationShortcut
-        enabled: uiState ? !uiState.isDialogOpen : true
+        enabled: root.uiStateRef ? !root.uiStateRef.isDialogOpen : true
         onActivated: {
-            if (!uiState) return
+            if (!root.uiStateRef) return
 
-            if (uiState.isEditorOpen) {
-                uiState.isEditorOpen = false
+            if (root.uiStateRef.isEditorOpen) {
+                root.uiStateRef.isEditorOpen = false
             } else {
-                uiState.isEditorOpen = true
-                if (controller) {
-                    controller.load_image_for_editing()
+                root.uiStateRef.isEditorOpen = true
+                if (root.controllerRef) {
+                    root.controllerRef.load_image_for_editing()
                 }
             }
         }
@@ -1253,13 +1040,13 @@ ApplicationWindow {
     Shortcut {
         sequence: "K"
         context: Qt.ApplicationShortcut
-        enabled: uiState ? !uiState.isDialogOpen && !uiState.isCropping : false
+        enabled: root.uiStateRef ? !root.uiStateRef.isDialogOpen && !root.uiStateRef.isCropping : false
         onActivated: {
-            if (!uiState || !controller) return
-            if (uiState.isDarkening) {
-                controller.toggle_darken_mode()
+            if (!root.uiStateRef || !root.controllerRef) return
+            if (root.uiStateRef.isDarkening) {
+                root.controllerRef.toggle_darken_mode()
             } else {
-                controller.open_darken_tool()
+                root.controllerRef.open_darken_tool()
             }
         }
     }
@@ -1268,45 +1055,41 @@ ApplicationWindow {
     Shortcut {
         sequence: "T"
         context: Qt.ApplicationShortcut
-        enabled: uiState ? !uiState.isDialogOpen : true
+        enabled: root.uiStateRef ? !root.uiStateRef.isDialogOpen : true
         onActivated: {
-            if (uiState) uiState.toggleGridView()
+            if (root.uiStateRef) root.uiStateRef.toggleGridView()
         }
     }
 
     // Handle View Switching and Prefetch Gating
     Connections {
-        target: uiState
+        target: root.uiStateRef
         function onIsGridViewActiveChanged() {
-            if (uiState.isGridViewActive && root.fullScreenLoupe) {
+            if (root.uiStateRef.isGridViewActive && root.fullScreenLoupe) {
                 root.exitFullScreenLoupe()
             }
 
             var gridItem = gridViewLoader.item
             if (!gridItem) return
 
-            if (uiState.isGridViewActive) {
+            if (root.uiStateRef.isGridViewActive) {
                 // Switching TO grid:
                 // 1. Immediately disable prefetch to block transient top-of-list requests
                 //    that happen before the view layout/scroll is restored.
-                if (typeof gridItem.setPrefetchEnabled === "function") {
-                    gridItem.setPrefetchEnabled(false)
-                }
+                root.setGridPrefetch(gridItem, false)
 
                 // 2. Re-enable on next event loop tick.
                 //    This allows the GridView to restore its currentIndex/contentY position.
                 Qt.callLater(function() {
                     var it = gridViewLoader.item
-                    if (uiState.isGridViewActive && it && typeof it.setPrefetchEnabled === "function") {
-                        it.setPrefetchEnabled(true)
+                    if (root.uiStateRef.isGridViewActive && it) {
+                        root.setGridPrefetch(it, true)
                     }
                 })
             } else {
                 // Switching AWAY from grid:
                 // Disable immediately to stop background work.
-                if (typeof gridItem.setPrefetchEnabled === "function") {
-                    gridItem.setPrefetchEnabled(false)
-                }
+                root.setGridPrefetch(gridItem, false)
             }
         }
     }
@@ -1319,7 +1102,7 @@ ApplicationWindow {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        currentIndex: uiState && uiState.isGridViewActive ? 1 : 0
+        currentIndex: root.uiStateRef && root.uiStateRef.isGridViewActive ? 1 : 0
 
         // Index 0: Loupe View (single image)
         Item {
@@ -1331,19 +1114,22 @@ ApplicationWindow {
                 id: mainViewLoader
                 anchors.fill: parent
                 source: "Components.qml"
-                focus: !uiState || !uiState.isGridViewActive
-                onLoaded: item.footerHeight = Qt.binding(function() { return root.effectiveFooterHeight })
+                focus: !root.uiStateRef || !root.uiStateRef.isGridViewActive
+                onLoaded: {
+                    item.footerHeight = Qt.binding(function() { return root.effectiveFooterHeight })
+                    item.isDarkTheme = Qt.binding(function() { return root.isDarkTheme })
+                }
 
                 // Key bindings implemented in old Main.qml
                 Keys.onPressed: function(event) {
-                    if (!uiState || !controller) {
+                    if (!root.uiStateRef || !root.controllerRef) {
                         return
                     }
 
                     // Global Key for saving edited image (Ctrl+S) when editor is open
                     if (event.key === Qt.Key_S && (event.modifiers & Qt.ControlModifier)) {
-                        if (uiState.isEditorOpen) {
-                            controller.save_edited_image()
+                        if (root.uiStateRef.isEditorOpen) {
+                            root.controllerRef.save_edited_image()
                             event.accepted = true
                         }
                     }
@@ -1362,17 +1148,17 @@ ApplicationWindow {
                 anchors.fill: parent
                 source: "ThumbnailGridView.qml"
                 active: true  // Keep loaded to preserve state during view toggle
-                visible: uiState && uiState.isGridViewActive
-                focus: uiState && uiState.isGridViewActive
+                visible: root.uiStateRef && root.uiStateRef.isGridViewActive
+                focus: root.uiStateRef && root.uiStateRef.isGridViewActive
 
                 onLoaded: {
                     // Enable prefetch on startup if grid is active (single owner)
                     var loadedItem = item
-                    if (uiState && uiState.isGridViewActive && loadedItem && typeof loadedItem.setPrefetchEnabled === "function") {
+                    if (root.uiStateRef && root.uiStateRef.isGridViewActive && loadedItem) {
                         // Delay to match the toggle behavior (allow layout to settle)
                         Qt.callLater(function() {
-                            if (gridViewLoader.item === loadedItem && uiState.isGridViewActive) {
-                                loadedItem.setPrefetchEnabled(true)
+                            if (gridViewLoader.item === loadedItem && root.uiStateRef.isGridViewActive) {
+                                root.setGridPrefetch(loadedItem, true)
                             }
                         })
                     }
@@ -1413,31 +1199,31 @@ ApplicationWindow {
 
             Label {
                 Layout.leftMargin: 10
-                text: uiState ? `Image: ${uiState.currentIndex + 1} / ${uiState.imageCount}` : "Image: - / -"
+                text: root.uiStateRef ? `Image: ${root.uiStateRef.currentIndex + 1} / ${root.uiStateRef.imageCount}` : "Image: - / -"
                 color: root.currentTextColor
             }
             Label {
-                text: (uiState && uiState.imageCount > 0)
-                      ? (uiState.currentFilename || "N/A")
+                text: (root.uiStateRef && root.uiStateRef.imageCount > 0)
+                      ? (root.uiStateRef.currentFilename || "N/A")
                       : "N/A"
                 color: root.currentTextColor
             }
             Label {
-                visible: (uiState && uiState.imageCount > 0 && uiState.exifBrief && uiState.exifBrief.length > 0)
-                text: uiState ? (uiState.exifBrief || "") : ""
+                visible: (root.uiStateRef && root.uiStateRef.imageCount > 0 && root.uiStateRef.exifBrief && root.uiStateRef.exifBrief.length > 0)
+                text: root.uiStateRef ? (root.uiStateRef.exifBrief || "") : ""
                 color: root.currentTextColor
             }
             Label {
                 id: directoryPathLabel
-                visible: uiState && uiState.currentDirectory !== ""
-                text: uiState ? uiState.currentDirectory : ""
+                visible: root.uiStateRef && root.uiStateRef.currentDirectory !== ""
+                text: root.uiStateRef ? root.uiStateRef.currentDirectory : ""
                 color: root.isDarkTheme ? "#888888" : "#777777"
                 font.pixelSize: 11
                 elide: Text.ElideMiddle
                 Layout.maximumWidth: 300
 
                 ToolTip.visible: directoryPathMouse.containsMouse && text !== ""
-                ToolTip.text: uiState ? uiState.currentDirectory : ""
+                ToolTip.text: root.uiStateRef ? root.uiStateRef.currentDirectory : ""
                 ToolTip.delay: 500
 
                 MouseArea {
@@ -1449,82 +1235,82 @@ ApplicationWindow {
             }
             Item { Layout.fillWidth: true }
             Label {
-                text: uiState ? ` Stacked: ${uiState.stackedDate}` : ""
+                text: root.uiStateRef ? ` Stacked: ${root.uiStateRef.stackedDate}` : ""
                 color: "lightgreen"
-                visible: uiState ? (uiState.imageCount > 0 && uiState.isStacked) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.isStacked) : false
             }
             Label {
-                text: uiState ? ` Uploaded on ${uiState.uploadedDate}` : ""
+                text: root.uiStateRef ? ` Uploaded on ${root.uiStateRef.uploadedDate}` : ""
                 color: "lightgreen"
-                visible: uiState ? (uiState.imageCount > 0 && uiState.isUploaded) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.isUploaded) : false
             }
             Label {
-                text: uiState ? (uiState.todoDate ? ` Todo since ${uiState.todoDate}` : " Todo") : ""
+                text: root.uiStateRef ? (root.uiStateRef.todoDate ? ` Todo since ${root.uiStateRef.todoDate}` : " Todo") : ""
                 color: "#64B5F6"
-                visible: uiState ? (uiState.imageCount > 0 && uiState.isTodo) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.isTodo) : false
             }
             Label {
-                text: uiState ? ` Edited on ${uiState.editedDate}` : ""
+                text: root.uiStateRef ? ` Edited on ${root.uiStateRef.editedDate}` : ""
                 color: "lightgreen"
-                visible: uiState ? (uiState.imageCount > 0 && uiState.isEdited) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.isEdited) : false
             }
             Label {
-                text: uiState ? ` Restacked on ${uiState.restackedDate}` : ""
+                text: root.uiStateRef ? ` Restacked on ${root.uiStateRef.restackedDate}` : ""
                 color: "cyan"
-                visible: uiState ? (uiState.imageCount > 0 && uiState.isRestacked) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.isRestacked) : false
             }
             Label {
                 text: " Favorite"
                 color: "gold"
-                visible: uiState ? (uiState.imageCount > 0 && uiState.isFavorite) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.isFavorite) : false
             }
             Label {
-                text: uiState ? ` Filter: "${uiState.filterString}"` : ""
+                text: root.uiStateRef ? ` Filter: "${root.uiStateRef.filterString}"` : ""
                 color: "yellow"
                 font.bold: true
-                visible: uiState ? (uiState.filterString !== "") : false
+                visible: root.uiStateRef ? (root.uiStateRef.filterString !== "") : false
             }
             Rectangle {
-                visible: uiState ? uiState.isPreloading : false
+                visible: root.uiStateRef ? root.uiStateRef.isPreloading : false
                 Layout.preferredWidth: 200
-                height: 10 // give it some height
+                Layout.preferredHeight: 10
                 color: "gray"
                 border.color: "red"
                 border.width: 1
 
                 Rectangle {
                     color: "lightblue"
-                    width: parent.width * (uiState ? uiState.preloadProgress / 100 : 0)
+                    width: parent.width * (root.uiStateRef ? root.uiStateRef.preloadProgress / 100 : 0)
                     height: parent.height
                 }
             }
             Rectangle {
-                color: (uiState && uiState.imageCount > 0 && uiState.stackInfoText) ? "orange" : "transparent"
+                color: (root.uiStateRef && root.uiStateRef.imageCount > 0 && root.uiStateRef.stackInfoText) ? "orange" : "transparent"
                 radius: 3
                 implicitWidth: stackInfoLabel.implicitWidth + 10
                 implicitHeight: stackInfoLabel.implicitHeight + 5
-                visible: uiState ? (uiState.imageCount > 0 && uiState.stackInfoText) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.stackInfoText) : false
 
                 Label {
                     id: stackInfoLabel
                     anchors.centerIn: parent
-                    text: uiState ? `Stack: ${uiState.stackInfoText}` : ""
+                    text: root.uiStateRef ? `Stack: ${root.uiStateRef.stackInfoText}` : ""
                     color: "black"
                     font.bold: true
                     font.pixelSize: 16
                 }
             }
             Rectangle {
-                color: (uiState && uiState.imageCount > 0 && uiState.batchInfoText) ? "#4fb360" : "transparent"
+                color: (root.uiStateRef && root.uiStateRef.imageCount > 0 && root.uiStateRef.batchInfoText) ? "#4fb360" : "transparent"
                 radius: 3
                 implicitWidth: batchInfoLabel.implicitWidth + 10
                 implicitHeight: batchInfoLabel.implicitHeight + 5
-                visible: uiState ? (uiState.imageCount > 0 && uiState.batchInfoText) : false
+                visible: root.uiStateRef ? (root.uiStateRef.imageCount > 0 && root.uiStateRef.batchInfoText) : false
 
                 Label {
                     id: batchInfoLabel
                     anchors.centerIn: parent
-                    text: uiState ? `Batch: ${uiState.batchInfoText}` : ""
+                    text: root.uiStateRef ? `Batch: ${root.uiStateRef.batchInfoText}` : ""
                     color: "white"
                     font.bold: true
                     font.pixelSize: 16
@@ -1533,12 +1319,15 @@ ApplicationWindow {
             // Variant badges (loupe view only, when multiple variants exist)
             Row {
                 spacing: 4
-                visible: uiState && !uiState.isGridViewActive && uiState.variantBadges.length > 1
+                visible: root.uiStateRef && !root.uiStateRef.isGridViewActive && root.uiStateRef.variantBadges.length > 1
 
                 Repeater {
-                    model: uiState ? uiState.variantBadges : []
+                    model: root.uiStateRef ? root.uiStateRef.variantBadges : []
 
                     delegate: Rectangle {
+                        id: variantBadge
+                        required property var modelData
+
                         width: badgeLabel.implicitWidth + 12
                         height: 22
                         radius: 3
@@ -1549,24 +1338,24 @@ ApplicationWindow {
                         Text {
                             id: badgeLabel
                             anchors.centerIn: parent
-                            text: modelData.label
+                            text: variantBadge.modelData.label
                             font.pixelSize: 11
                             font.bold: true
-                            color: modelData.active ? "black" : "white"
+                            color: variantBadge.modelData.active ? "black" : "white"
                         }
 
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                if (uiState) uiState.setVariantOverride(modelData.path)
+                                if (root.uiStateRef) root.uiStateRef.setVariantOverride(variantBadge.modelData.path)
                             }
                         }
                     }
                 }
 
                 Label {
-                    text: uiState ? uiState.variantSaveHint : ""
+                    text: root.uiStateRef ? root.uiStateRef.variantSaveHint : ""
                     color: root.isDarkTheme ? "#aaa" : "#666"
                     font.pixelSize: 11
                     font.italic: true
@@ -1581,17 +1370,17 @@ ApplicationWindow {
             }
 
             Label {
-                text: uiState ? uiState.cacheStats : ""
+                text: root.uiStateRef ? root.uiStateRef.cacheStats : ""
                 color: "#00FFFF" // Cyan
                 font.family: "Monospace"
-                visible: uiState ? uiState.debugCache : false
+                visible: root.uiStateRef ? root.uiStateRef.debugCache : false
                 Layout.rightMargin: 10
             }
 
 
             // Saturation slider (only visible in saturation mode)
             Row {
-                visible: uiState && uiState.colorMode === "saturation"
+                visible: root.uiStateRef && root.uiStateRef.colorMode === "saturation"
                 spacing: 5
                 Layout.rightMargin: 10
 
@@ -1605,12 +1394,12 @@ ApplicationWindow {
                     id: saturationSlider
                     from: 0.0
                     to: 1.0
-                    value: uiState ? uiState.saturationFactor : 1.0
+                    value: root.uiStateRef ? root.uiStateRef.saturationFactor : 1.0
                     stepSize: 0.01
                     width: 150
 
                     onMoved: {
-                        if (controller) controller.set_saturation_factor(value)
+                        if (root.controllerRef) root.controllerRef.set_saturation_factor(value)
                     }
                 }
 
@@ -1624,23 +1413,23 @@ ApplicationWindow {
 
             Label {
                 id: statusMessageLabel
-                text: uiState ? uiState.statusMessage : ""
-                color: (uiState && uiState.isSaving) ? "#4CAF50" : root.currentTextColor
-                font.bold: (uiState && uiState.isSaving) ? true : false
-                font.pixelSize: (uiState && uiState.isSaving) ? 14 : 12
-                visible: uiState ? (uiState.statusMessage !== "") : false
+                text: root.uiStateRef ? root.uiStateRef.statusMessage : ""
+                color: (root.uiStateRef && root.uiStateRef.isSaving) ? "#4CAF50" : root.currentTextColor
+                font.bold: (root.uiStateRef && root.uiStateRef.isSaving) ? true : false
+                font.pixelSize: (root.uiStateRef && root.uiStateRef.isSaving) ? 14 : 12
+                visible: root.uiStateRef ? (root.uiStateRef.statusMessage !== "") : false
                 Layout.rightMargin: 10
             }
 
             // Grid view controls (visible when in grid view) - right side
             Row {
-                visible: uiState && uiState.isGridViewActive
+                visible: root.uiStateRef && root.uiStateRef.isGridViewActive
                 spacing: 10
                 Layout.rightMargin: 15
 
                 // Selection info (uses efficient count property, not full list)
                 Label {
-                    property int selCount: uiState ? uiState.gridSelectedCount : 0
+                    property int selCount: root.uiStateRef ? root.uiStateRef.gridSelectedCount : 0
                     text: selCount > 0 ? selCount + " selected" : ""
                     color: "#4CAF50"
                     font.bold: true
@@ -1650,7 +1439,7 @@ ApplicationWindow {
 
                 // Clear selection button
                 Rectangle {
-                    visible: uiState ? uiState.gridSelectedCount > 0 : false
+                    visible: root.uiStateRef ? root.uiStateRef.gridSelectedCount > 0 : false
                     width: clearLabel.implicitWidth + 16
                     height: 26
                     radius: 4
@@ -1670,13 +1459,13 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: { if (uiState) uiState.gridClearSelection() }
+                        onClicked: { if (root.uiStateRef) root.uiStateRef.gridClearSelection() }
                     }
                 }
 
                 // Back button (only shown when there's history)
                 Rectangle {
-                    visible: uiState && uiState.gridCanGoBack
+                    visible: root.uiStateRef && root.uiStateRef.gridCanGoBack
                     width: backLabel.implicitWidth + 16
                     height: 26
                     radius: 4
@@ -1696,7 +1485,7 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: { if (uiState) uiState.gridGoBack() }
+                        onClicked: { if (root.uiStateRef) root.uiStateRef.gridGoBack() }
                     }
                 }
 
@@ -1721,7 +1510,7 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: { if (uiState) uiState.gridRefresh() }
+                        onClicked: { if (root.uiStateRef) root.uiStateRef.gridRefresh() }
                     }
                 }
 
@@ -1746,7 +1535,7 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: { if (uiState) uiState.toggleGridView() }
+                        onClicked: { if (root.uiStateRef) root.uiStateRef.toggleGridView() }
                     }
                 }
             }
@@ -1871,7 +1660,7 @@ ApplicationWindow {
         }
 
         contentItem: Text {
-            text: (uiState && uiState.stackSummary) ? uiState.stackSummary : "No stacks defined."
+            text: (root.uiStateRef && root.uiStateRef.stackSummary) ? root.uiStateRef.stackSummary : "No stacks defined."
             padding: 10
             wrapMode: Text.WordWrap
             color: root.currentTextColor
@@ -1887,7 +1676,7 @@ ApplicationWindow {
         backgroundColor: root.currentBackgroundColor
         textColor: root.currentTextColor
         onAccepted: {
-            if (uiState) uiState.applyFilter(filterString, filterFlags)
+            if (root.uiStateRef) root.uiStateRef.applyFilter(filterString, filterFlags)
         }
     }
 
@@ -1895,7 +1684,7 @@ ApplicationWindow {
         id: jumpToImageDialog
         backgroundColor: root.currentBackgroundColor
         textColor: root.currentTextColor
-        maxImageCount: uiState ? uiState.imageCount : 0
+        maxImageCount: root.uiStateRef ? root.uiStateRef.imageCount : 0
     }
 
     DeleteBatchDialog {
@@ -1957,7 +1746,7 @@ ApplicationWindow {
         anchors.bottom: parent.bottom
         anchors.margins: 20
         z: 9999 // Ensure it is on top of everything, including footer
-        visible: uiState ? (uiState.debugCache && uiState.isDecoding) : false
+        visible: root.uiStateRef ? (root.uiStateRef.debugCache && root.uiStateRef.isDecoding) : false
         
         Text {
             anchors.centerIn: parent
@@ -1980,8 +1769,8 @@ ApplicationWindow {
         property var binInfo: []
 
         function refreshBinInfo() {
-            if (uiState) {
-                binInfo = uiState.getPerBinRestoreInfo()
+            if (root.uiStateRef) {
+                binInfo = root.uiStateRef.getPerBinRestoreInfo()
             }
         }
 
@@ -2027,7 +1816,7 @@ ApplicationWindow {
             // Summary line
             Label {
                 width: dialogContent.width - 40
-                text: uiState ? uiState.recycleBinStatsText : "Loading..."
+                text: root.uiStateRef ? root.uiStateRef.recycleBinStatsText : "Loading..."
                 color: root.isDarkTheme ? "#efefef" : "#333333"
                 wrapMode: Text.WordWrap
                 font.pixelSize: 15
@@ -2040,6 +1829,9 @@ ApplicationWindow {
                 model: recycleBinCleanupDialog.binInfo.filter(function(b) { return b.status === "restorable" })
 
                 delegate: Rectangle {
+                    id: restorableBin
+                    required property var modelData
+
                     width: dialogContent.width - 40
                     height: binRowLayout.implicitHeight + 20
                     radius: 8
@@ -2060,7 +1852,7 @@ ApplicationWindow {
                             spacing: 2
 
                             Label {
-                                text: modelData.label
+                                text: restorableBin.modelData.label
                                 color: root.isDarkTheme ? "#efefef" : "#333333"
                                 font.pixelSize: 14
                                 font.bold: true
@@ -2068,7 +1860,7 @@ ApplicationWindow {
                                 width: parent.width
                             }
                             Label {
-                                text: modelData.dest_dir
+                                text: restorableBin.modelData.dest_dir
                                 color: root.isDarkTheme ? "#888888" : "#999999"
                                 font.pixelSize: 11
                                 elide: Text.ElideMiddle
@@ -2077,13 +1869,13 @@ ApplicationWindow {
                             Label {
                                 text: {
                                     var parts = []
-                                    if (modelData.jpg_count > 0) parts.push(modelData.jpg_count + " JPG")
-                                    if (modelData.raw_count > 0) parts.push(modelData.raw_count + " RAW")
-                                    if (modelData.other_count > 0) parts.push(modelData.other_count + " other")
+                                    if (restorableBin.modelData.jpg_count > 0) parts.push(restorableBin.modelData.jpg_count + " JPG")
+                                    if (restorableBin.modelData.raw_count > 0) parts.push(restorableBin.modelData.raw_count + " RAW")
+                                    if (restorableBin.modelData.other_count > 0) parts.push(restorableBin.modelData.other_count + " other")
                                     var s = parts.join(", ")
-                                    if (modelData.legacy_count > 0)
-                                        s += " + " + modelData.legacy_count + " legacy"
-                                    return s + " \u2014 " + modelData.total_restorable + " restorable"
+                                    if (restorableBin.modelData.legacy_count > 0)
+                                        s += " + " + restorableBin.modelData.legacy_count + " legacy"
+                                    return s + " \u2014 " + restorableBin.modelData.total_restorable + " restorable"
                                 }
                                 color: root.isDarkTheme ? "#aaaaaa" : "#666666"
                                 font.pixelSize: 13
@@ -2092,8 +1884,8 @@ ApplicationWindow {
 
                         // Per-bin Restore button
                         Rectangle {
-                            width: restoreBinBtnText.implicitWidth + 30
-                            height: 34
+                            Layout.preferredWidth: restoreBinBtnText.implicitWidth + 30
+                            Layout.preferredHeight: 34
                             radius: 17
                             color: "#4fb360"
                             Layout.alignment: Qt.AlignVCenter
@@ -2111,8 +1903,8 @@ ApplicationWindow {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
-                                    if (uiState) {
-                                        uiState.restoreSingleBin(modelData.bin_path)
+                                    if (root.uiStateRef) {
+                                        root.uiStateRef.restoreSingleBin(restorableBin.modelData.bin_path)
                                         recycleBinCleanupDialog.refreshBinInfo()
                                         // Auto-close if nothing left
                                         if (recycleBinCleanupDialog.binInfo.length === 0) {
@@ -2155,8 +1947,11 @@ ApplicationWindow {
                     model: recycleBinCleanupDialog.binInfo.filter(function(b) { return b.status === "unavailable" })
 
                     delegate: Label {
+                        id: unavailableBin
+                        required property var modelData
+
                         width: dialogContent.width - 40
-                        text: modelData.dest_dir + " \u2014 " + modelData.total_files + " file" + (modelData.total_files !== 1 ? "s" : "")
+                        text: unavailableBin.modelData.dest_dir + " \u2014 " + unavailableBin.modelData.total_files + " file" + (unavailableBin.modelData.total_files !== 1 ? "s" : "")
                         color: root.isDarkTheme ? "#aaaaaa" : "#666666"
                         font.pixelSize: 13
                         elide: Text.ElideMiddle
@@ -2228,7 +2023,7 @@ ApplicationWindow {
                     TextArea {
                         id: detailsText
                         width: detailsScrollView.availableWidth
-                        text: uiState ? uiState.recycleBinDetailedText : ""
+                        text: root.uiStateRef ? root.uiStateRef.recycleBinDetailedText : ""
                         color: root.isDarkTheme ? "#efefef" : "#333333"
                         font.family: "Consolas, 'Courier New', monospace"
                         font.pixelSize: 13
@@ -2295,7 +2090,7 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         onClicked: {
-                            allowCloseWithRecycleBins = true
+                            root.allowCloseWithRecycleBins = true
                             recycleBinCleanupDialog.close()
                             Qt.quit()
                         }
@@ -2324,8 +2119,8 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         onClicked: {
-                            if (uiState) uiState.cleanupRecycleBins()
-                            allowCloseWithRecycleBins = true
+                            if (root.uiStateRef) root.uiStateRef.cleanupRecycleBins()
+                            root.allowCloseWithRecycleBins = true
                             recycleBinCleanupDialog.close()
                             Qt.quit()
                         }

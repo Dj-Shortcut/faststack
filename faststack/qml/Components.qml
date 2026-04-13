@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Window
 
@@ -10,17 +12,32 @@ Item {
     focus: true
     
     // Height of the status bar footer in Main.qml
+    property var uiStateRef: null
+    property var controllerRef: null
+    property bool isDarkTheme: true
     property int footerHeight: 60
 
     // Expose zoom state to parent (Main.qml title bar)
     readonly property real currentZoomScale: imageRotator.zoomScale
     readonly property real currentFitScale: imageRotator.fitScale
-    // Freeze source swaps during crop drags so async preview refreshes
-    // cannot change the visual scale in the middle of the gesture.
-    readonly property string requestedImageSource: uiState && uiState.imageCount > 0 ? uiState.currentImageSource : ""
+    // Freeze the displayed source for the full crop session once crop mode
+    // starts. Zoom-triggered high-res swaps stay blocked until crop mode exits,
+    // because any async source swap during cropping can rescale the image and
+    // invalidate the crop box's visual alignment.
+    readonly property string requestedImageSource: loupeView.uiStateRef && loupeView.uiStateRef.imageCount > 0 ? loupeView.uiStateRef.currentImageSource : ""
     property string cropDragImageSource: ""
-    readonly property bool isCropSourceFrozen: cropDragImageSource !== "" && ((mainMouseArea && mainMouseArea.isCropDragging) || (uiState && uiState.isCropping))
+    readonly property bool isCropSourceFrozen: cropDragImageSource !== "" && ((mainMouseArea && mainMouseArea.isCropDragging) || (loupeView.uiStateRef && loupeView.uiStateRef.isCropping))
     readonly property string displayedImageSource: isCropSourceFrozen ? cropDragImageSource : requestedImageSource
+
+    Component.onCompleted: {
+        loupeView.uiStateRef = uiState
+        loupeView.controllerRef = controller
+        // mainImage may complete before uiStateRef is wired, so retry the
+        // initial size report once from the parent if the child call no-op'd.
+        if (mainImage && !mainImage.initialDisplaySizeReported) {
+            mainImage.reportDisplaySize()
+        }
+    }
 
     function freezeCropImageSource() {
         if (cropDragImageSource === "") {
@@ -33,7 +50,7 @@ Item {
     }
     
     Connections {
-        target: uiState
+        target: loupeView.uiStateRef
         function onCurrentIndexChanged() {
             // Smart High-Res Logic:
             // Before the new image loads, decide if we should keep high-res mode.
@@ -42,14 +59,16 @@ Item {
             
             if (imageRotator.zoomScale > imageRotator.fitScale * 1.1) {
                 // Keep high-res (setZoomed true if not already)
-                if (!uiState.isZoomed) uiState.setZoomed(true)
+                if (!loupeView.uiStateRef.isZoomed) loupeView.uiStateRef.setZoomed(true)
             } else {
                 // Drop to low-res for the next image
-                if (uiState.isZoomed) uiState.setZoomed(false)
+                if (loupeView.uiStateRef.isZoomed) loupeView.uiStateRef.setZoomed(false)
             }
         }
         function onIsCroppingChanged() {
-            if (uiState && uiState.isCropping) {
+            if (loupeView.uiStateRef && loupeView.uiStateRef.isCropping) {
+                // Capture the session's visual source when crop mode turns on,
+                // then keep it stable until crop mode exits.
                 loupeView.freezeCropImageSource()
             } else {
                 if (mainMouseArea) {
@@ -64,20 +83,20 @@ Item {
     }
 
     Keys.onEscapePressed: (event) => {
-        if (uiState && uiState.isCropping) {
+        if (loupeView.uiStateRef && loupeView.uiStateRef.isCropping) {
             if (mainMouseArea.isRotating) {
                 // Revert rotation
                 mainMouseArea.cropRotation = mainMouseArea.cropStartRotation
                 mainMouseArea.clearPendingRotation(mainMouseArea.cropRotation)
-                if (controller) controller.set_straighten_angle(mainMouseArea.cropRotation, -1)
+                if (loupeView.controllerRef) loupeView.controllerRef.set_straighten_angle(mainMouseArea.cropRotation, -1)
 
                 mainMouseArea.endCropInteraction()
                 mainMouseArea.isRotating = false
                 event.accepted = true
-            } else if (controller) {
+            } else if (loupeView.controllerRef) {
                 mainMouseArea.clearPendingRotation(0)
                 mainMouseArea.endCropInteraction()
-                controller.cancel_crop_mode()
+                loupeView.controllerRef.cancel_crop_mode()
                 mainMouseArea.cropRotation = 0 // Reset local rotation
                 mainMouseArea.isRotating = false
                 event.accepted = true
@@ -89,20 +108,20 @@ Item {
         // Zoom Shortcuts (Ctrl+1..4)
         if (event.modifiers & Qt.ControlModifier) {
              if (event.key === Qt.Key_1) {
-                 uiState.request_absolute_zoom(1.0)
+                 loupeView.uiStateRef.request_absolute_zoom(1.0)
                  event.accepted = true
                  return
              } else if (event.key === Qt.Key_2) {
-                 uiState.request_absolute_zoom(2.0)
+                 loupeView.uiStateRef.request_absolute_zoom(2.0)
                  event.accepted = true
                  return
              } else if (event.key === Qt.Key_3) {
-                 uiState.request_absolute_zoom(3.0)
+                 loupeView.uiStateRef.request_absolute_zoom(3.0)
                  event.accepted = true
                  return
              } else if (event.key === Qt.Key_4) {
                  // 400% zoom
-                 uiState.request_absolute_zoom(4.0)
+                 loupeView.uiStateRef.request_absolute_zoom(4.0)
                  event.accepted = true
                  return
              }
@@ -110,14 +129,14 @@ Item {
         
         // Handle Enter for Crop Execution (formerly Keys.onEnterPressed)
         // We only accept the event if we actually act on it.
-        if ((event.key === Qt.Key_Enter || event.key === Qt.Key_Return) && uiState && uiState.isCropping && controller) {
+        if ((event.key === Qt.Key_Enter || event.key === Qt.Key_Return) && loupeView.uiStateRef && loupeView.uiStateRef.isCropping && loupeView.controllerRef) {
             // Force immediate rotation update before executing crop
             if (mainMouseArea.cropRotation !== 0) {
-                controller.set_straighten_angle(mainMouseArea.cropRotation, -1)
+                loupeView.controllerRef.set_straighten_angle(mainMouseArea.cropRotation, -1)
             }
 
-            uiState.setZoomed(false) // Force unzoom
-            controller.execute_crop()
+            loupeView.uiStateRef.setZoomed(false) // Force unzoom
+            loupeView.controllerRef.execute_crop()
             event.accepted = true
             return
         }
@@ -130,7 +149,7 @@ Item {
 
     // Connection to handle zoom/pan reset signal from Python
     Connections {
-        target: uiState
+        target: loupeView.uiStateRef
         function onResetZoomPanRequested() {
             imageRotator.zoomScale = imageRotator.fitScale
             panTransform.x = 0
@@ -141,9 +160,9 @@ Item {
              
              // If we need to switch to high-res, flag this scale as the target 
              // for the incoming source change so recomputeFitScale doesn't clobber it.
-             if (uiState && !uiState.isZoomed) {
+             if (loupeView.uiStateRef && !loupeView.uiStateRef.isZoomed) {
                  imageRotator.targetAbsoluteZoom = scale
-                 uiState.setZoomed(true)
+                 loupeView.uiStateRef.setZoomed(true)
              }
         }
     }
@@ -155,7 +174,7 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: footerHeight
+        anchors.bottomMargin: loupeView.footerHeight
         clip: true
 
         // Container that handles Rotation (Straightening)
@@ -317,7 +336,7 @@ Item {
             Image {
                 id: mainImage
                 anchors.centerIn: parent
-                visible: uiState && !uiState.isGridViewActive
+                visible: loupeView.uiStateRef && !loupeView.uiStateRef.isGridViewActive
                 
                 // Image size is now updated atomically in updateRotatorGeometry to prevent distortion
                 // width: sourceSize.width
@@ -330,9 +349,9 @@ Item {
                     id: darkenOverlay
                     anchors.fill: parent
                     z: 90
-                    visible: uiState && uiState.isDarkening && uiState.darkenOverlayVisible
-                    source: (uiState && uiState.isDarkening && uiState.darkenOverlayVisible)
-                            ? "image://provider/mask_overlay/" + uiState.darkenOverlayGeneration
+                    visible: loupeView.uiStateRef && loupeView.uiStateRef.isDarkening && loupeView.uiStateRef.darkenOverlayVisible
+                    source: (loupeView.uiStateRef && loupeView.uiStateRef.isDarkening && loupeView.uiStateRef.darkenOverlayVisible)
+                            ? "image://provider/mask_overlay/" + loupeView.uiStateRef.darkenOverlayGeneration
                             : ""
                     fillMode: Image.Stretch
                     cache: false
@@ -342,13 +361,13 @@ Item {
                 // Crop overlay - anchored to mainImage to rotate with it
                 Item {
                     id: cropOverlay
-                    property var cropBox: uiState ? uiState.currentCropBox : [0, 0, 1000, 1000]
+                    property var cropBox: loupeView.uiStateRef ? loupeView.uiStateRef.currentCropBox : [0, 0, 1000, 1000]
                     property bool hasActiveCrop: cropBox && cropBox.length === 4 && !(cropBox[0]===0 && cropBox[1]===0 && cropBox[2]===1000 && cropBox[3]===1000)
                     // Show visual content only when there is an actual user-drawn crop or rotate mode.
                     // The overlay Item itself stays alive (visible: isCropping) so updateCropRect() always fires.
                     property bool showCropContent: hasActiveCrop || mainMouseArea.isRotating
                     
-                    visible: uiState && uiState.isCropping
+                    visible: loupeView.uiStateRef && loupeView.uiStateRef.isCropping
                     anchors.fill: parent // Fills mainImage
                     z: 100
                     
@@ -356,7 +375,7 @@ Item {
                     Component.onCompleted: { if (parent.source) updateCropRect() }
                     
                     Connections {
-                        target: uiState
+                        target: loupeView.uiStateRef
                         function onCurrentCropBoxChanged() { if (mainImage.source) cropOverlay.updateCropRect() }
                     }
                     
@@ -367,8 +386,8 @@ Item {
                     }
                     
                     function updateCropRect() {
-                        if (!uiState || !uiState.currentCropBox || uiState.currentCropBox.length !== 4) return
-                        var box = uiState.currentCropBox
+                        if (!loupeView.uiStateRef || !loupeView.uiStateRef.currentCropBox || loupeView.uiStateRef.currentCropBox.length !== 4) return
+                        var box = loupeView.uiStateRef.currentCropBox
                         
                         // Local coords in mainImage (Source Space)
                         var localLeft = (box[0] / 1000) * parent.width
@@ -425,9 +444,8 @@ Item {
                 source: loupeView.displayedImageSource
                 
                 function _currentDpr() {
-                    // Per-window DPR is the safest (multi-monitor setups)
-                    if (mainImage.window && mainImage.window.devicePixelRatio)
-                        return mainImage.window.devicePixelRatio
+                    // Fall back to the current screen DPR; qmllint does not
+                    // recognize a stable per-window DPR property here.
                     return Screen.devicePixelRatio
                 }
 
@@ -479,7 +497,7 @@ Item {
                     // Smart Zoom Reset:
                     // If we intended to keep high-res (isZoomed is true), preserve capabilities.
                     // If not (isZoomed is false), reset to "fit" state for speed and consistency.
-                    if (uiState && !uiState.isZoomed) {
+                    if (loupeView.uiStateRef && !loupeView.uiStateRef.isZoomed) {
                         mainMouseArea.cropRotation = 0
                         mainMouseArea.isRotating = false
                         mainMouseArea.cropDragMode = "none"
@@ -496,15 +514,17 @@ Item {
                 
                 property bool _sourceSizeStale: false
                 property bool isZooming: false
+                property bool initialDisplaySizeReported: false
         
                 // IMPORTANT: tell Python the *viewport* size, not the sourceSize size
                 function reportDisplaySize() {
-                    if (imageViewport.width > 0 && imageViewport.height > 0) {
+                    if (loupeView.uiStateRef && imageViewport.width > 0 && imageViewport.height > 0) {
                         var dpr = Screen.devicePixelRatio
-                        uiState.onDisplaySizeChanged(
+                        loupeView.uiStateRef.onDisplaySizeChanged(
                             Math.round(imageViewport.width * dpr),
                             Math.round(imageViewport.height * dpr)
                         )
+                        initialDisplaySizeReported = true
                     }
                 }
 
@@ -523,14 +543,14 @@ Item {
                     interval: 200 // 200ms debounce to prevent thrashing
                     repeat: false
                     onTriggered: {
-                        if (uiState && uiState.isZoomed) {
-                            uiState.setZoomed(false)
+                        if (loupeView.uiStateRef && loupeView.uiStateRef.isZoomed) {
+                            loupeView.uiStateRef.setZoomed(false)
                         }
                     }
                 }
 
                 function updateZoomState() {
-                    if (!uiState) return;
+                    if (!loupeView.uiStateRef) return;
                     
                     // Thresholds for hysteresis
                     var highResThreshold = imageRotator.fitScale * 1.1
@@ -539,14 +559,14 @@ Item {
                     // Enable High-Res if zoomed in significantly
                     if (imageRotator.zoomScale > highResThreshold) {
                          lowResDebounceTimer.stop()
-                         if (!uiState.isZoomed) {
-                             uiState.setZoomed(true);
+                         if (!loupeView.uiStateRef.isZoomed) {
+                             loupeView.uiStateRef.setZoomed(true);
                          }
                     } 
                     // Disable High-Res (return to low-res) if zoomed out to near-fit
                     // formatting note: added hysteresis check AND debounce
                     else if (imageRotator.zoomScale <= lowResThreshold) {
-                        if (uiState.isZoomed) {
+                        if (loupeView.uiStateRef.isZoomed) {
                             // Only drop to low-res after delay to handle wheel overshoot/jitter
                             if (!lowResDebounceTimer.running) lowResDebounceTimer.start()
                         }
@@ -559,12 +579,12 @@ Item {
                 }
                 
                 function updateHistogramWithZoom() {
-                    if (uiState && uiState.isHistogramVisible && controller) {
+                    if (loupeView.uiStateRef && loupeView.uiStateRef.isHistogramVisible && loupeView.controllerRef) {
                         var zoom = imageRotator.zoomScale
                         var panX = panTransform.x
                         var panY = panTransform.y
                         var imageScale = imageRotator.zoomScale
-                        controller.update_histogram(zoom, panX, panY, imageScale)
+                        loupeView.controllerRef.update_histogram(zoom, panX, panY, imageScale)
                     }
                 }
 
@@ -587,8 +607,8 @@ Item {
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             hoverEnabled: true
             cursorShape: {
-                if (uiState && uiState.isDarkening) return Qt.CrossCursor
-                if (!uiState || !uiState.isCropping) return Qt.ArrowCursor
+                if (loupeView.uiStateRef && loupeView.uiStateRef.isDarkening) return Qt.CrossCursor
+                if (!loupeView.uiStateRef || !loupeView.uiStateRef.isCropping) return Qt.ArrowCursor
                 return Qt.CrossCursor
             }
 
@@ -619,7 +639,7 @@ Item {
         
         // Reset rotation when image changes or updates (e.g. after crop save) to avoid persistence
         Connections {
-            target: uiState
+            target: loupeView.uiStateRef
             function onCurrentIndexChanged() {
                 mainMouseArea.cropRotation = 0
             }
@@ -627,12 +647,12 @@ Item {
 
 
         onIsRotatingChanged: {
-            if (uiState) {
+            if (loupeView.uiStateRef) {
                 if (isRotating) {
-                    uiState.statusMessage = "Press ESC to exit rotate mode"
+                    loupeView.uiStateRef.statusMessage = "Press ESC to exit rotate mode"
                 } else {
-                    if (uiState.statusMessage === "Press ESC to exit rotate mode") {
-                        uiState.statusMessage = ""
+                    if (loupeView.uiStateRef.statusMessage === "Press ESC to exit rotate mode") {
+                        loupeView.uiStateRef.statusMessage = ""
                     }
                 }
             }
@@ -646,8 +666,8 @@ Item {
             interval: 32 // ~30 fps
             repeat: false
             onTriggered: {
-                if (controller && uiState && uiState.isCropping) {
-                    controller.set_straighten_angle(mainMouseArea.pendingRotation, mainMouseArea.pendingAspect)
+                if (loupeView.controllerRef && loupeView.uiStateRef && loupeView.uiStateRef.isCropping) {
+                    loupeView.controllerRef.set_straighten_angle(mainMouseArea.pendingRotation, mainMouseArea.pendingAspect)
                 }
             }
         }
@@ -677,7 +697,7 @@ Item {
             cropStartX = mouseX
             cropStartY = mouseY
             setCropBoxStart(clampedMx, clampedMy, clampedMx, clampedMy)
-            uiState.currentCropBox = [Math.round(clampedMx), Math.round(clampedMy), Math.round(clampedMx), Math.round(clampedMy)]
+            loupeView.uiStateRef.currentCropBox = [Math.round(clampedMx), Math.round(clampedMy), Math.round(clampedMx), Math.round(clampedMy)]
         }
 
         function beginCropInteraction() {
@@ -713,7 +733,7 @@ Item {
             isDraggingOutside = false
 
             // Darken painting mode
-            if (uiState && uiState.isDarkening && !uiState.isCropping && controller) {
+            if (loupeView.uiStateRef && loupeView.uiStateRef.isDarkening && !loupeView.uiStateRef.isCropping && loupeView.controllerRef) {
                 var imgCoords = mapToImageCoordinates(Qt.point(mouse.x, mouse.y))
                 var sx = Math.max(0, Math.min(1, imgCoords.x))
                 var sy = Math.max(0, Math.min(1, imgCoords.y))
@@ -721,7 +741,7 @@ Item {
                     return  // click outside image bounds
                 }
                 var strokeType = (mouse.button === Qt.RightButton) ? "protect" : "add"
-                controller.start_darken_stroke(sx, sy, strokeType)
+                loupeView.controllerRef.start_darken_stroke(sx, sy, strokeType)
                 isDarkenPainting = true
                 return
             }
@@ -731,11 +751,11 @@ Item {
                 // source/geometry changes it triggers are properly deferred.
                 beginCropInteraction()
 
-                if (!uiState.isCropping && controller) {
-                    controller.toggle_crop_mode() // Ensure mode is ON
+                if (!loupeView.uiStateRef.isCropping && loupeView.controllerRef) {
+                    loupeView.controllerRef.toggle_crop_mode() // Ensure mode is ON
                 }
 
-                if (!uiState || !uiState.isCropping) {
+                if (!loupeView.uiStateRef || !loupeView.uiStateRef.isCropping) {
                     endCropInteraction()
                     return
                 }
@@ -752,9 +772,9 @@ Item {
                 return
             }
             
-            if (uiState && uiState.isCropping) {
+            if (loupeView.uiStateRef && loupeView.uiStateRef.isCropping) {
                 // Check if clicking on existing crop box - Using Image Space Hit Testing
-                var box = uiState.currentCropBox
+                var box = loupeView.uiStateRef.currentCropBox
                 if (box && box.length === 4) box = box.slice(0)
                 
                 var isFullImage = box && box.length === 4 && box[0] === 0 && box[1] === 0 && box[2] === 1000 && box[3] === 1000
@@ -858,15 +878,15 @@ Item {
         }
         onPositionChanged: function(mouse) {
             // Darken painting drag — clamp to image bounds
-            if (isDarkenPainting && controller) {
+            if (isDarkenPainting && loupeView.controllerRef) {
                 var imgCoords = mapToImageCoordinates(Qt.point(mouse.x, mouse.y))
                 var cx = Math.max(0, Math.min(1, imgCoords.x))
                 var cy = Math.max(0, Math.min(1, imgCoords.y))
-                controller.continue_darken_stroke(cx, cy)
+                loupeView.controllerRef.continue_darken_stroke(cx, cy)
                 return
             }
 
-            if (uiState && uiState.isCropping && isCropDragging) {
+            if (loupeView.uiStateRef && loupeView.uiStateRef.isCropping && isCropDragging) {
                 if (cropDragMode === "new") {
                     // Update crop rectangle while dragging
                     updateCropBox(cropStartX, cropStartY, mouse.x, mouse.y, true)
@@ -884,7 +904,7 @@ Item {
                     cropRotation = newRotation
                     
                     // Update rotation in backend live (throttled)
-                    if (controller) {
+                    if (loupeView.controllerRef) {
                         pendingRotation = cropRotation
                         pendingAspect = -1
                         
@@ -935,7 +955,7 @@ Item {
                         bottom = constrainedBox[3]
                     }
                     
-                    uiState.currentCropBox = [Math.round(left), Math.round(top), Math.round(right), Math.round(bottom)]
+                    loupeView.uiStateRef.currentCropBox = [Math.round(left), Math.round(top), Math.round(right), Math.round(bottom)]
                 }
                 return
             }
@@ -954,13 +974,13 @@ Item {
                         globalPos.x > loupeView.width || globalPos.y > loupeView.height) {
                         // Mouse is outside window - initiate drag-and-drop
                         isDraggingOutside = true
-                        if (controller) controller.start_drag_current_image()
+                        if (loupeView.controllerRef) loupeView.controllerRef.start_drag_current_image()
                         return
                     }
                 }
                 
                 // Normal pan behavior (only when not cropping)
-                if (!uiState || !uiState.isCropping) {
+                if (!loupeView.uiStateRef || !loupeView.uiStateRef.isCropping) {
                     panTransform.x += (mouse.x - lastX)
                     panTransform.y += (mouse.y - lastY)
                     lastX = mouse.x
@@ -973,12 +993,12 @@ Item {
             // Darken painting release
             if (isDarkenPainting) {
                 isDarkenPainting = false
-                if (controller) controller.finish_darken_stroke()
+                if (loupeView.controllerRef) loupeView.controllerRef.finish_darken_stroke()
                 return
             }
 
             isDraggingOutside = false
-            if (uiState && uiState.isCropping && isCropDragging) {
+            if (loupeView.uiStateRef && loupeView.uiStateRef.isCropping && isCropDragging) {
                 endCropInteraction()
             }
         }
@@ -1046,7 +1066,7 @@ Item {
         }
         
         function updateCropBox(x1, y1, x2, y2, applyAspectRatio = false) {
-            if (!uiState || !mainImage.source) return
+            if (!loupeView.uiStateRef || !mainImage.source) return
 
             var imgCoord1 = mapToImageCoordinates(Qt.point(x1, y1))
             var imgCoord2 = mapToImageCoordinates(Qt.point(x2, y2))
@@ -1098,7 +1118,7 @@ Item {
                 }
             }
             
-            uiState.currentCropBox = [Math.round(left), Math.round(top), Math.round(right), Math.round(bottom)]
+            loupeView.uiStateRef.currentCropBox = [Math.round(left), Math.round(top), Math.round(right), Math.round(bottom)]
         }
         
         function getAspectRatio(name) {
@@ -1112,7 +1132,7 @@ Item {
         }
         
         function applyAspectRatioConstraint(left, top, right, bottom, dragMode) {
-            if (uiState.currentAspectRatioIndex <= 0 || !uiState.aspectRatioNames || uiState.aspectRatioNames.length <= uiState.currentAspectRatioIndex) {
+            if (loupeView.uiStateRef.currentAspectRatioIndex <= 0 || !loupeView.uiStateRef.aspectRatioNames || loupeView.uiStateRef.aspectRatioNames.length <= loupeView.uiStateRef.currentAspectRatioIndex) {
                 // No aspect ratio, just clamp to bounds
                 return [
                     Math.max(0, Math.min(1000, left)),
@@ -1122,7 +1142,7 @@ Item {
                 ];
             }
 
-            var ratioName = uiState.aspectRatioNames[uiState.currentAspectRatioIndex];
+            var ratioName = loupeView.uiStateRef.aspectRatioNames[loupeView.uiStateRef.currentAspectRatioIndex];
             var ratioPair = getAspectRatio(ratioName);
             if (!ratioPair || !mainImage || !imageRotator.width || !imageRotator.height) {
                 return [left, top, right, bottom];
@@ -1297,8 +1317,8 @@ Item {
         }
         
         function updateCropBoxFromAspectRatio() {
-            if (!uiState || !uiState.currentCropBox || uiState.currentCropBox.length !== 4) return
-            var box = uiState.currentCropBox
+            if (!loupeView.uiStateRef || !loupeView.uiStateRef.currentCropBox || loupeView.uiStateRef.currentCropBox.length !== 4) return
+            var box = loupeView.uiStateRef.currentCropBox
             
             // Start with center of current box
             var cx = (box[0] + box[2]) / 2
@@ -1310,11 +1330,11 @@ Item {
                 cy = 500
             }
             
-            var ratioName = uiState.aspectRatioNames[uiState.currentAspectRatioIndex];
+            var ratioName = loupeView.uiStateRef.aspectRatioNames[loupeView.uiStateRef.currentAspectRatioIndex];
             var ratioPair = getAspectRatio(ratioName);
 
             if (!ratioPair) { // Freeform selected
-                uiState.currentCropBox = [0, 0, 1000, 1000] // Reset to full image
+                loupeView.uiStateRef.currentCropBox = [0, 0, 1000, 1000] // Reset to full image
                 mainMouseArea.cropRotation = 0 // Also reset visual rotation
                 mainMouseArea.isRotating = false
                 mainMouseArea.cropDragMode = "none"
@@ -1355,7 +1375,7 @@ Item {
             var top = cy - height / 2
             var bottom = cy + height / 2
             
-            uiState.currentCropBox = [Math.round(left), Math.round(top), Math.round(right), Math.round(bottom)]
+            loupeView.uiStateRef.currentCropBox = [Math.round(left), Math.round(top), Math.round(right), Math.round(bottom)]
         }
     }
     
@@ -1364,7 +1384,7 @@ Item {
     // Aspect ratio selector window (upper left corner)
     Rectangle {
         id: aspectRatioWindow
-        visible: uiState && uiState.isCropping
+        visible: loupeView.uiStateRef && loupeView.uiStateRef.isCropping
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.margins: 10
@@ -1376,8 +1396,7 @@ Item {
         radius: 4
         z: 1000
         
-        // Try to get root from parent hierarchy
-        property bool isDark: typeof root !== "undefined" && root ? root.isDarkTheme : true
+        property bool isDark: loupeView.isDarkTheme
         
         Component.onCompleted: {
             // Update colors based on theme
@@ -1397,19 +1416,21 @@ Item {
             }
             
             Repeater {
-                model: uiState && uiState.aspectRatioNames ? uiState.aspectRatioNames.length : 0
+                model: loupeView.uiStateRef && loupeView.uiStateRef.aspectRatioNames ? loupeView.uiStateRef.aspectRatioNames.length : 0
                 
                 Rectangle {
+                    id: aspectRatioOption
+                    required property int index
                     width: parent.width
                     height: 30
-                    color: uiState && uiState.currentAspectRatioIndex === index ? "#555555" : "transparent"
+                    color: loupeView.uiStateRef && loupeView.uiStateRef.currentAspectRatioIndex === aspectRatioOption.index ? "#555555" : "transparent"
                     radius: 3
                     
                     Text {
                         anchors.left: parent.left
                         anchors.leftMargin: 10
                         anchors.verticalCenter: parent.verticalCenter
-                        text: uiState && uiState.aspectRatioNames ? uiState.aspectRatioNames[index] : ""
+                        text: loupeView.uiStateRef && loupeView.uiStateRef.aspectRatioNames ? loupeView.uiStateRef.aspectRatioNames[aspectRatioOption.index] : ""
                         color: aspectRatioWindow.isDark ? "white" : "black"
                         font.pixelSize: 11
                     }
@@ -1417,10 +1438,10 @@ Item {
                     MouseArea {
                         anchors.fill: parent
                         onClicked: {
-                            if (uiState) {
-                                uiState.currentAspectRatioIndex = index
+                            if (loupeView.uiStateRef) {
+                                loupeView.uiStateRef.currentAspectRatioIndex = aspectRatioOption.index
                                 // Re-apply aspect ratio to current crop box
-                                if (uiState.currentCropBox && uiState.currentCropBox.length === 4) {
+                                if (loupeView.uiStateRef.currentCropBox && loupeView.uiStateRef.currentCropBox.length === 4) {
                                     mainMouseArea.updateCropBoxFromAspectRatio()
                                 }
                             }
