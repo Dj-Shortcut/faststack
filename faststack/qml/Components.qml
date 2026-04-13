@@ -20,10 +20,10 @@ Item {
     // Expose zoom state to parent (Main.qml title bar)
     readonly property real currentZoomScale: imageRotator.zoomScale
     readonly property real currentFitScale: imageRotator.fitScale
-    // Freeze source swaps for the entire crop session once crop mode starts.
-    // This is broader than just the active drag: async preview/high-res swaps
-    // can also rescale the image after a drag, which would invalidate the
-    // crop box's visual alignment while crop mode is still active.
+    // Freeze the displayed source for the full crop session once crop mode
+    // starts. Zoom-triggered high-res swaps stay blocked until crop mode exits,
+    // because any async source swap during cropping can rescale the image and
+    // invalidate the crop box's visual alignment.
     readonly property string requestedImageSource: loupeView.uiStateRef && loupeView.uiStateRef.imageCount > 0 ? loupeView.uiStateRef.currentImageSource : ""
     property string cropDragImageSource: ""
     readonly property bool isCropSourceFrozen: cropDragImageSource !== "" && ((mainMouseArea && mainMouseArea.isCropDragging) || (loupeView.uiStateRef && loupeView.uiStateRef.isCropping))
@@ -32,6 +32,11 @@ Item {
     Component.onCompleted: {
         loupeView.uiStateRef = uiState
         loupeView.controllerRef = controller
+        // mainImage may complete before uiStateRef is wired, so retry the
+        // initial size report once from the parent if the child call no-op'd.
+        if (mainImage && !mainImage.initialDisplaySizeReported) {
+            mainImage.reportDisplaySize()
+        }
     }
 
     function freezeCropImageSource() {
@@ -509,15 +514,17 @@ Item {
                 
                 property bool _sourceSizeStale: false
                 property bool isZooming: false
+                property bool initialDisplaySizeReported: false
         
                 // IMPORTANT: tell Python the *viewport* size, not the sourceSize size
                 function reportDisplaySize() {
-                    if (imageViewport.width > 0 && imageViewport.height > 0) {
+                    if (loupeView.uiStateRef && imageViewport.width > 0 && imageViewport.height > 0) {
                         var dpr = Screen.devicePixelRatio
                         loupeView.uiStateRef.onDisplaySizeChanged(
                             Math.round(imageViewport.width * dpr),
                             Math.round(imageViewport.height * dpr)
                         )
+                        initialDisplaySizeReported = true
                     }
                 }
 

@@ -117,7 +117,10 @@ Window {
         settingsDialog.setLoaderProperty(rawtherapeeField, "text", settingsDialog.rawtherapeePath)
         settingsDialog.setLoaderProperty(defaultDirField, "text", settingsDialog.defaultDirectory)
         settingsDialog.setLoaderProperty(cacheSizeField, "text", settingsDialog.cacheSize.toFixed(1))
+        settingsDialog.setLoaderProperty(prefetchRadiusLoader, "value", settingsDialog.prefetchRadius)
     }
+
+    onPrefetchRadiusChanged: settingsDialog.setLoaderProperty(prefetchRadiusLoader, "value", settingsDialog.prefetchRadius)
 
     // Helper to open the dialog
     function open() {

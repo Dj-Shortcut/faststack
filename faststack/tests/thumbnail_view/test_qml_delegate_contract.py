@@ -25,9 +25,126 @@ def qapp():
 def _thumbnail_tile_required_properties() -> set[str]:
     qml_path = Path(__file__).resolve().parents[2] / "qml" / "ThumbnailTile.qml"
     qml_text = qml_path.read_text(encoding="utf-8")
-    return set(
-        re.findall(r"^ {4}required property \w+ (\w+)", qml_text, flags=re.MULTILINE)
-    )
+    sanitized_text = _sanitize_qml(qml_text)
+    root_body = _extract_tile_root_body(qml_text, sanitized_text)
+    sanitized_root_body = _extract_tile_root_body(sanitized_text, sanitized_text)
+
+    required_props: set[str] = set()
+    depth = 0
+    for raw_line, sanitized_line in zip(
+        root_body.splitlines(), sanitized_root_body.splitlines()
+    ):
+        if depth == 0:
+            match = re.fullmatch(r"\s*required property \w+ (\w+)\s*", raw_line)
+            if match:
+                required_props.add(match.group(1))
+        depth += sanitized_line.count("{") - sanitized_line.count("}")
+
+    return required_props
+
+
+def _sanitize_qml(qml_text: str) -> str:
+    """Strip strings and comments while preserving braces and newlines."""
+    out: list[str] = []
+    i = 0
+    in_line_comment = False
+    in_block_comment = False
+    in_string: str | None = None
+
+    while i < len(qml_text):
+        ch = qml_text[i]
+        nxt = qml_text[i + 1] if i + 1 < len(qml_text) else ""
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+                out.append(ch)
+            else:
+                out.append(" ")
+            i += 1
+            continue
+
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                # Replace the two closing-comment characters one-for-one so
+                # brace positions still line up with the original source.
+                out.extend("  ")
+                in_block_comment = False
+                i += 2
+            else:
+                out.append("\n" if ch == "\n" else " ")
+                i += 1
+            continue
+
+        if in_string is not None:
+            if ch == "\\" and nxt:
+                # Preserve character count for escaped pairs as well.
+                out.extend("  ")
+                i += 2
+            elif ch == in_string:
+                out.append(" ")
+                in_string = None
+                i += 1
+            else:
+                out.append("\n" if ch == "\n" else " ")
+                i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            # Replace both comment opener chars to keep indices aligned.
+            out.extend("  ")
+            in_line_comment = True
+            i += 2
+            continue
+
+        if ch == "/" and nxt == "*":
+            # Replace both comment opener chars to keep indices aligned.
+            out.extend("  ")
+            in_block_comment = True
+            i += 2
+            continue
+
+        if ch in {"'", '"'}:
+            out.append(" ")
+            in_string = ch
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+def _extract_tile_root_body(qml_text: str, sanitized_text: str) -> str:
+    """Extract the body of the root `Item { ... }` with `id: tile`.
+
+    This relies on the current ThumbnailTile.qml structure and normal QML
+    convention that `id: tile` is declared directly in the root Item body
+    before any nested child blocks.
+    """
+    tile_id_pos = sanitized_text.find("id: tile")
+    assert tile_id_pos != -1, "Could not find `id: tile` in ThumbnailTile.qml"
+
+    # Find the Item body that owns `id: tile`. For the current file, the
+    # nearest preceding '{' is the root Item opening brace.
+    open_brace_pos = sanitized_text.rfind("{", 0, tile_id_pos)
+    assert open_brace_pos != -1, "Could not find root Item opening brace"
+
+    item_pos = sanitized_text.rfind("Item", 0, open_brace_pos)
+    assert item_pos != -1, "Could not find root Item declaration"
+
+    depth = 1
+    close_brace_pos = open_brace_pos + 1
+    while close_brace_pos < len(sanitized_text) and depth > 0:
+        if sanitized_text[close_brace_pos] == "{":
+            depth += 1
+        elif sanitized_text[close_brace_pos] == "}":
+            depth -= 1
+        close_brace_pos += 1
+
+    assert depth == 0, "Could not find matching root Item closing brace"
+    return qml_text[open_brace_pos + 1 : close_brace_pos - 1]
 
 
 def _role_ids_by_name(model: ThumbnailModel) -> dict[str, int]:
