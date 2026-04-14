@@ -123,6 +123,63 @@ ApplicationWindow {
         }
     }
 
+    function toArray(value) {
+        if (value === null || value === undefined) {
+            return []
+        }
+
+        if (Array.isArray(value)) {
+            return value
+        }
+
+        var valueType = typeof value
+        if (valueType === "string" || valueType === "number"
+                || valueType === "boolean" || valueType === "function") {
+            return []
+        }
+
+        if (typeof value.length === "number") {
+            var result = []
+            for (var i = 0; i < value.length; ++i) {
+                result.push(value[i])
+            }
+            return result
+        }
+
+        return []
+    }
+
+    function stringOrEmpty(value) {
+        if (typeof value === "string") {
+            return value
+        }
+
+        if (value === null || value === undefined) {
+            return ""
+        }
+
+        if (typeof value === "number" || typeof value === "boolean") {
+            return String(value)
+        }
+
+        // Avoid rendering unexpected objects as "[object Object]".
+        return ""
+    }
+
+    function itemsWithStatus(items, status) {
+        var source = root.toArray(items)
+        var result = []
+
+        for (var i = 0; i < source.length; ++i) {
+            var item = source[i]
+            if (item && item.status === status) {
+                result.push(item)
+            }
+        }
+
+        return result
+    }
+
 
     // -------- CUSTOM TITLE BAR --------
     property int titleBarHeight: 36
@@ -1209,8 +1266,10 @@ ApplicationWindow {
                 color: root.currentTextColor
             }
             Label {
-                visible: (root.uiStateRef && root.uiStateRef.imageCount > 0 && root.uiStateRef.exifBrief && root.uiStateRef.exifBrief.length > 0)
-                text: root.uiStateRef ? (root.uiStateRef.exifBrief || "") : ""
+                visible: root.uiStateRef
+                         && root.uiStateRef.imageCount > 0
+                         && root.stringOrEmpty(root.uiStateRef.exifBrief).length > 0
+                text: root.uiStateRef ? root.stringOrEmpty(root.uiStateRef.exifBrief) : ""
                 color: root.currentTextColor
             }
             Label {
@@ -1318,11 +1377,16 @@ ApplicationWindow {
             }
             // Variant badges (loupe view only, when multiple variants exist)
             Row {
+                id: variantBadgeRow
+                property var badgeItems: root.toArray(root.uiStateRef ? root.uiStateRef.variantBadges : null)
+
                 spacing: 4
-                visible: root.uiStateRef && !root.uiStateRef.isGridViewActive && root.uiStateRef.variantBadges.length > 1
+                visible: root.uiStateRef
+                         && !root.uiStateRef.isGridViewActive
+                         && variantBadgeRow.badgeItems.length > 1
 
                 Repeater {
-                    model: root.uiStateRef ? root.uiStateRef.variantBadges : []
+                    model: variantBadgeRow.badgeItems
 
                     delegate: Rectangle {
                         id: variantBadge
@@ -1767,6 +1831,9 @@ ApplicationWindow {
         // Single source of truth for per-bin restore info.
         // Populated on open and after each restore action.
         property var binInfo: []
+        property var binInfoItems: root.toArray(binInfo)
+        property var restorableBins: root.itemsWithStatus(binInfoItems, "restorable")
+        property var unavailableBins: root.itemsWithStatus(binInfoItems, "unavailable")
 
         function refreshBinInfo() {
             if (root.uiStateRef) {
@@ -1826,7 +1893,7 @@ ApplicationWindow {
             // ---- Per-bin restore rows (restorable bins only) ----
             Repeater {
                 id: restorableRepeater
-                model: recycleBinCleanupDialog.binInfo.filter(function(b) { return b.status === "restorable" })
+                model: recycleBinCleanupDialog.restorableBins
 
                 delegate: Rectangle {
                     id: restorableBin
@@ -1907,7 +1974,7 @@ ApplicationWindow {
                                         root.uiStateRef.restoreSingleBin(restorableBin.modelData.bin_path)
                                         recycleBinCleanupDialog.refreshBinInfo()
                                         // Auto-close if nothing left
-                                        if (recycleBinCleanupDialog.binInfo.length === 0) {
+                                        if (recycleBinCleanupDialog.binInfoItems.length === 0) {
                                             recycleBinCleanupDialog.close()
                                         }
                                     }
@@ -1924,10 +1991,7 @@ ApplicationWindow {
             Column {
                 width: dialogContent.width - 40
                 spacing: 6
-                visible: {
-                    var items = recycleBinCleanupDialog.binInfo.filter(function(b) { return b.status === "unavailable" })
-                    return items.length > 0
-                }
+                visible: recycleBinCleanupDialog.unavailableBins.length > 0
 
                 Label {
                     text: "Not auto-restorable (legacy format)"
@@ -1944,7 +2008,7 @@ ApplicationWindow {
                 }
 
                 Repeater {
-                    model: recycleBinCleanupDialog.binInfo.filter(function(b) { return b.status === "unavailable" })
+                    model: recycleBinCleanupDialog.unavailableBins
 
                     delegate: Label {
                         id: unavailableBin

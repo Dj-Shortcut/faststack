@@ -151,3 +151,23 @@ def test_get_recycle_bin_stats_untracked_existing_bin(app_controller):
     assert stats[0]["count"] == 1
     # Check that it was auto-added to active_recycle_bins for future cleanup
     assert recycle_bin in app_controller.active_recycle_bins
+
+
+def test_get_per_bin_restore_info_returns_fresh_values(app_controller):
+    """Each refresh should produce fresh containers so QML bindings can update."""
+    recycle_bin = app_controller.image_dir / "image recycle bin"
+    recycle_bin.mkdir(parents=True)
+    (recycle_bin / "photo._fs_deadbeef.jpg").touch()
+    app_controller.active_recycle_bins.add(recycle_bin)
+
+    first = app_controller.get_per_bin_restore_info()
+    second = app_controller.get_per_bin_restore_info()
+
+    assert first == second
+    assert first is not second
+    assert first[0] is not second[0]
+    assert second[0]["status"] == "restorable"
+
+    first[0]["status"] = "mutated"
+
+    assert second[0]["status"] == "restorable"
