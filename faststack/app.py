@@ -410,7 +410,21 @@ class AppController(QObject):
 
         # -- Batch Selection State (for drag-and-drop) --
         self.batch_start_index: Optional[int] = None
-        self.batches: List[List[int]] = []  # List of [start, end] ranges
+        # A single non-contiguous selection of images, stored as a sorted list
+        # of [start, end] index ranges. Multiple ranges exist only because some
+        # input paths can produce a non-contiguous selection (e.g. pressing B
+        # on images 3, 10, 22 yields [[3,3], [10,10], [22,22]]); semantically
+        # this is still ONE selection. All batch-aware operations
+        # (delete_batch_images, drag-and-drop, batch_auto_levels, toggle_* flag
+        # helpers, get_batch_count_for_current_image) treat self.batches as the
+        # union of all ranges. Do not add per-range semantics without also
+        # updating every consumer — see _get_user_flag_toggle_indices for the
+        # canonical pattern.
+        #
+        # Note: end_current_batch() currently appends without merging, so
+        # ranges can technically overlap. This is harmless because consumers
+        # union anyway, but is tracked as a cleanup item.
+        self.batches: List[List[int]] = []
 
         self._filter_string: str = ""  # Default filter
         self._filter_flags: list = (
@@ -2631,75 +2645,122 @@ class AppController(QObject):
         """Get current loupe view index (for thumbnail model)."""
         return self.current_index
 
-    def toggle_uploaded(self):
-        """Toggle uploaded flag for current image."""
-        if not self.image_files or self.current_index >= len(self.image_files):
+    def _get_user_flag_toggle_indices(self) -> List[int]:
+        """Return target indices for user-facing flag toggles.
+
+        ``self.batches`` is a single non-contiguous selection (see the
+        attribute comment on ``self.batches``). When the current image is part
+        of that selection, apply the toggle to the entire selection —
+        matching the behavior of ``delete_batch_images``, drag-and-drop, and
+        ``batch_auto_levels``. Otherwise, only toggle the current image.
+        """
+        if not self.image_files or not (
+            0 <= self.current_index < len(self.image_files)
+        ):
+            return []
+
+        in_any_batch = any(
+            start <= self.current_index <= end for start, end in self.batches
+        )
+        if in_any_batch:
+            max_index = len(self.image_files)
+            return sorted(
+                idx for idx in self._get_batch_indices() if 0 <= idx < max_index
+            )
+
+        return [self.current_index]
+
+    def _toggle_user_flag(
+        self,
+        *,
+        flag_attr: str,
+        date_attr: Optional[str] = None,
+        single_on_status: str,
+        single_off_status: str,
+        batch_on_status: str,
+        batch_off_status: str,
+    ) -> None:
+        """Toggle a user-facing flag for the current image or active batch.
+
+        The current image determines the new state. When batch mode is active,
+        that state is applied uniformly across all batched images.
+        """
+        indices = self._get_user_flag_toggle_indices()
+        if not indices:
             return
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        image_path = self.image_files[self.current_index].path
-        meta = self.sidecar.get_metadata(image_path)
+        current_path = self.image_files[self.current_index].path
+        current_meta = self.sidecar.get_metadata(current_path)
+        new_value = not bool(getattr(current_meta, flag_attr, False))
+        today = datetime.now().strftime("%Y-%m-%d") if date_attr else None
 
-        meta.uploaded = not meta.uploaded
-        if meta.uploaded:
-            meta.uploaded_date = today
-        else:
-            meta.uploaded_date = None
+        for idx in indices:
+            image_path = self.image_files[idx].path
+            meta = self.sidecar.get_metadata(image_path)
+            setattr(meta, flag_attr, new_value)
+            if date_attr is not None:
+                setattr(meta, date_attr, today if new_value else None)
 
         self.sidecar.save()
         self._metadata_cache_index = (-1, -1)
         self.dataChanged.emit()
         self.sync_ui_state()
-        status = "uploaded" if meta.uploaded else "not uploaded"
-        self.update_status_message(f"Marked as {status}")
-        log.info("Toggled uploaded flag to %s for %s", meta.uploaded, image_path)
+
+        if len(indices) == 1:
+            self.update_status_message(
+                single_on_status if new_value else single_off_status
+            )
+        else:
+            self.update_status_message(
+                (batch_on_status if new_value else batch_off_status).format(
+                    count=len(indices)
+                )
+            )
+
+        log.info(
+            "Set %s=%s for %d %s (current=%s)",
+            flag_attr,
+            new_value,
+            len(indices),
+            "image" if len(indices) == 1 else "images",
+            current_path,
+        )
+
+    def toggle_uploaded(self):
+        """Toggle uploaded flag for current image or active batch."""
+        self._toggle_user_flag(
+            flag_attr="uploaded",
+            date_attr="uploaded_date",
+            single_on_status="Marked as uploaded",
+            single_off_status="Marked as not uploaded",
+            batch_on_status="Marked {count} images as uploaded",
+            batch_off_status="Marked {count} images as not uploaded",
+        )
 
     def toggle_todo(self):
-        """Toggle todo flag for current image."""
-        if not self.image_files or self.current_index >= len(self.image_files):
-            return
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        image_path = self.image_files[self.current_index].path
-        meta = self.sidecar.get_metadata(image_path)
-
-        meta.todo = not getattr(meta, "todo", False)
-        if meta.todo:
-            meta.todo_date = today
-        else:
-            meta.todo_date = None
-
-        self.sidecar.save()
-        self._metadata_cache_index = (-1, -1)
-        self.dataChanged.emit()
-        self.sync_ui_state()
-        status = "todo" if meta.todo else "not todo"
-        self.update_status_message(f"Marked as {status}")
-        log.info("Toggled todo flag to %s for %s", meta.todo, image_path)
+        """Toggle todo flag for current image or active batch."""
+        self._toggle_user_flag(
+            flag_attr="todo",
+            date_attr="todo_date",
+            single_on_status="Marked as todo",
+            single_off_status="Marked as not todo",
+            batch_on_status="Marked {count} images as todo",
+            batch_off_status="Marked {count} images as not todo",
+        )
 
     def toggle_edited(self):
-        """Toggle edited flag for current image."""
-        if not self.image_files or self.current_index >= len(self.image_files):
-            return
+        """Toggle edited flag for current image or active batch."""
+        self._toggle_user_flag(
+            flag_attr="edited",
+            date_attr="edited_date",
+            single_on_status="Marked as edited",
+            single_off_status="Marked as not edited",
+            batch_on_status="Marked {count} images as edited",
+            batch_off_status="Marked {count} images as not edited",
+        )
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        image_path = self.image_files[self.current_index].path
-        meta = self.sidecar.get_metadata(image_path)
-
-        meta.edited = not meta.edited
-        if meta.edited:
-            meta.edited_date = today
-        else:
-            meta.edited_date = None
-
-        self.sidecar.save()
-        self._metadata_cache_index = (-1, -1)
-        self.dataChanged.emit()
-        self.sync_ui_state()
-        status = "edited" if meta.edited else "not edited"
-        self.update_status_message(f"Marked as {status}")
-        log.info("Toggled edited flag to %s for %s", meta.edited, image_path)
-
+    # Restacked is pipeline-managed (set after Helicon success), so keep it
+    # single-image and non-batch-aware.
     def toggle_restacked(self):
         """Toggle restacked flag for current image."""
         if not self.image_files or self.current_index >= len(self.image_files):
@@ -2724,45 +2785,25 @@ class AppController(QObject):
         log.info("Toggled restacked flag to %s for %s", meta.restacked, image_path)
 
     def toggle_favorite(self):
-        """Toggle favorite flag for current image."""
-        if not self.image_files or self.current_index >= len(self.image_files):
-            return
-
-        image_path = self.image_files[self.current_index].path
-        meta = self.sidecar.get_metadata(image_path)
-
-        meta.favorite = not meta.favorite
-
-        self.sidecar.save()
-        self._metadata_cache_index = (-1, -1)
-        self.dataChanged.emit()
-        self.sync_ui_state()
-        status = "Favorited" if meta.favorite else "Unfavorited"
-        self.update_status_message(status)
-        log.info("Toggled favorite flag to %s for %s", meta.favorite, image_path)
+        """Toggle favorite flag for current image or active batch."""
+        self._toggle_user_flag(
+            flag_attr="favorite",
+            single_on_status="Favorited",
+            single_off_status="Unfavorited",
+            batch_on_status="Favorited {count} images",
+            batch_off_status="Unfavorited {count} images",
+        )
 
     def toggle_stacked(self):
-        """Toggle stacked flag for current image."""
-        if not self.image_files or self.current_index >= len(self.image_files):
-            return
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        image_path = self.image_files[self.current_index].path
-        meta = self.sidecar.get_metadata(image_path)
-
-        meta.stacked = not meta.stacked
-        if meta.stacked:
-            meta.stacked_date = today
-        else:
-            meta.stacked_date = None
-
-        self.sidecar.save()
-        self._metadata_cache_index = (-1, -1)
-        self.dataChanged.emit()
-        self.sync_ui_state()
-        status = "stacked" if meta.stacked else "not stacked"
-        self.update_status_message(f"Marked as {status}")
-        log.info("Toggled stacked flag to %s for %s", meta.stacked, image_path)
+        """Toggle stacked flag for current image or active batch."""
+        self._toggle_user_flag(
+            flag_attr="stacked",
+            date_attr="stacked_date",
+            single_on_status="Marked as stacked",
+            single_off_status="Marked as not stacked",
+            batch_on_status="Marked {count} images as stacked",
+            batch_off_status="Marked {count} images as not stacked",
+        )
 
     def get_current_metadata(self) -> Dict:
         if not self.image_files or self.current_index >= len(self.image_files):
