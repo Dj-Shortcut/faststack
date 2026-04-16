@@ -3016,8 +3016,10 @@ class AppController(QObject):
             self._metadata_cache_index = (-1, -1)  # Invalidate cache
             self.dataChanged.emit()
             self.sync_ui_state()
-            count = end - start + 1
-            self.update_status_message(f"Batch defined: {count} images")
+            count = self.get_batch_count_for_current_image()
+            self.update_status_message(
+                f"Batch defined: {count} image{'' if count == 1 else 's'}"
+            )
         else:
             log.warning("No batch start marked. Press '{' first.")
             self.update_status_message("No batch start marked")
