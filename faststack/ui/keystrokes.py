@@ -46,7 +46,6 @@ class Keybinder:
             Qt.Key_P: "edit_in_photoshop",
             Qt.Key_C: "clear_all_stacks",
             Qt.Key_A: "quick_auto_white_balance",
-            Qt.Key_L: "quick_auto_levels",
             Qt.Key_O: "toggle_crop_mode",
             Qt.Key_H: "toggle_histogram",
             Qt.Key_Delete: "delete_current_image",
@@ -103,7 +102,35 @@ class Keybinder:
                 self._call(method_name)
                 return True
 
+        blocked_auto_adjust_modifiers = modifiers & (
+            Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier
+        )
+
         # Check for single key presses
+        if key == Qt.Key_L:
+            if not blocked_auto_adjust_modifiers:
+                self._call(
+                    "quick_auto_adjust"
+                    if modifiers & Qt.ShiftModifier
+                    else "quick_auto_levels"
+                )
+                return True
+            return False
+
+        if not blocked_auto_adjust_modifiers:
+            if text == "-":
+                self._call("reduce_auto_adjust_highlights")
+                return True
+            if text == "=":
+                self._call("deepen_auto_adjust_blacks")
+                return True
+            if key == Qt.Key_Minus and modifiers == Qt.NoModifier:
+                self._call("reduce_auto_adjust_highlights")
+                return True
+            if key == Qt.Key_Equal and modifiers == Qt.NoModifier:
+                self._call("deepen_auto_adjust_blacks")
+                return True
+
         method_name = self.key_map.get(key)
         if method_name:
             self._call(method_name)

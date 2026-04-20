@@ -2,6 +2,14 @@
 
 Todo: More testing Linux / Mac. Create Windows .exe. Write better documentation / help. Add splash screen / icon. Fix raw image support.
 
+## 1.6.3 (2026-04-16)
+
+- Reworked quick auto-adjust and crop into one shared live edit session for the current image instead of saving on every keypress.
+- `l` now runs quick auto-levels, `L` runs auto white balance plus auto-levels, `A` runs quick auto white balance, and `-` / `=` keep pushing highlights or shadows in 7-point steps inside that live session.
+- Crop and editor edits now keep accumulating in memory on the current image instead of forcing an immediate save or backup churn.
+- The live session is persisted once when you navigate away, start a drag, explicitly save, or quit, so preview stays responsive while drag-out and navigation still get the latest pixels.
+- Updated README/help text and kept the version at 1.6.3.
+
 ## 1.6.2 (2026-03-28)
 
 - Added a reusable soft-mask subsystem for local adjustments (mask model, mask engine, masked operations).

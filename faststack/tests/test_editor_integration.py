@@ -47,6 +47,7 @@ class TestEditorIntegration(unittest.TestCase):
 
         # Mock returns for methods that unpack results
         self.controller.image_editor.auto_levels.return_value = (0, 255, 0, 255)
+        self.controller.image_editor.analyze_auto_levels.return_value = (0, 255, 0, 255)
         self.controller.image_editor.save_image.return_value = (Path("test.jpg"), None)
 
         # Mock _save_executor to be synchronous to avoid race conditions
@@ -128,7 +129,7 @@ class TestEditorIntegration(unittest.TestCase):
         # 6. auto_levels
         try:
             self.controller.auto_levels()
-            self.controller.image_editor.auto_levels.assert_called_once()
+            self.controller.image_editor.analyze_auto_levels.assert_called_once()
         except AttributeError:
             self.fail("AppController is missing method 'auto_levels'")
 
