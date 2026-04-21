@@ -39,6 +39,23 @@ from faststack.imaging.optional_deps import cv2
 
 log = logging.getLogger(__name__)
 
+_REPLACE_RETRY_DELAY = 0.3
+_REPLACE_MAX_RETRIES = 3
+
+
+def _safe_replace(tmp_path: Path, target_path: Path) -> None:
+    """Atomically replace target with tmp, retrying on Windows file-lock errors."""
+    for attempt in range(_REPLACE_MAX_RETRIES):
+        try:
+            os.replace(str(tmp_path), str(target_path))
+            return
+        except OSError:
+            if attempt < _REPLACE_MAX_RETRIES - 1:
+                time.sleep(_REPLACE_RETRY_DELAY)
+            else:
+                raise
+
+
 # Aspect Ratios for cropping
 INSTAGRAM_RATIOS = {
     "Freeform": None,
@@ -1394,14 +1411,38 @@ class ImageEditor:
         Returns (blacks, whites, p_low, p_high).
         p_low/p_high are computed conservatively from RGB to avoid introducing new channel clipping.
         """
+        blacks, whites, p_low, p_high = self.analyze_auto_levels(
+            threshold_percent,
+            reset_levels=True,
+        )
+
+        with self._lock:
+            self.current_edits["blacks"] = blacks
+            self.current_edits["whites"] = whites
+            self._edits_rev += 1
+        return blacks, whites, float(p_low), float(p_high)
+
+    def analyze_auto_levels(
+        self,
+        threshold_percent: float = 0.1,
+        *,
+        edits: Optional[Dict[str, Any]] = None,
+        reset_levels: bool = True,
+    ) -> Tuple[float, float, float, float]:
+        """Analyze auto-levels on the current edited baseline without mutating edits."""
         _debug = log.isEnabledFor(logging.DEBUG)
         if _debug:
             t0 = time.perf_counter()
+
         threshold_percent = max(0.0, min(10.0, threshold_percent))
-        # Use preview for speed
-        img_arr = (
-            self.float_preview if self.float_preview is not None else self.float_image
-        )
+
+        with self._lock:
+            img_arr = (
+                self.float_preview.copy()
+                if self.float_preview is not None
+                else (self.float_image.copy() if self.float_image is not None else None)
+            )
+            edits_snapshot = dict(self.current_edits) if edits is None else dict(edits)
 
         if img_arr is None:
             # Fallback for tests or cases where float data isn't initialized yet
@@ -1413,12 +1454,19 @@ class ImageEditor:
             else:
                 return 0.0, 0.0, 0.0, 255.0
 
-        # Convert to uint8 (0-255) for histogram analysis
-        # This preserves the logic of the original algorithm which was tuned for 0-255 bins
+        if reset_levels:
+            edits_snapshot["blacks"] = 0.0
+            edits_snapshot["whites"] = 0.0
+
+        # Render the current edited baseline first so auto-levels sees any
+        # already-active adjustments such as WB, crop, rotation, or tone edits.
         if _debug:
             t_arr = time.perf_counter()
-        rgb = (np.clip(img_arr, 0.0, 1.0) * 255).astype(np.uint8)
-        # rgb shape: (H, W, 3)
+        edited_arr = self._apply_edits(img_arr, edits=edits_snapshot, for_export=False)
+
+        # Convert to uint8 (0-255) for histogram analysis
+        # This preserves the logic of the original algorithm which was tuned for 0-255 bins
+        rgb = (np.clip(edited_arr, 0.0, 1.0) * 255).astype(np.uint8)
         if _debug:
             t_u8 = time.perf_counter()
 
@@ -1450,10 +1498,6 @@ class ImageEditor:
         p_low = min(p_lows)
         p_high = max(p_highs)
 
-        # NOTE: applying this stretch uniformly to RGB can clip individual channels
-        # more than luminance predicts. That's usually acceptable, but if we
-        # ever see weird color clipping, that might be why.
-
         # Pin ends if pre-clipping exists (prevents making it worse)
         if max(clipped_high_pct) > eps_pct:
             p_high = 255.0
@@ -1472,16 +1516,11 @@ class ImageEditor:
             blacks = -p_low / 40.0
             whites = (255.0 - p_high) / 40.0
 
-        with self._lock:
-            self.current_edits["blacks"] = blacks
-            self.current_edits["whites"] = whites
-            self._edits_rev += 1
-
         if _debug:
             t_end = time.perf_counter()
             h, w = rgb.shape[:2]
             log.debug(
-                "[AUTO_LEVEL] get_array=%dms to_uint8=%dms hist+clip=%dms total=%dms  (%dx%d, %s)",
+                "[AUTO_LEVEL] get_array=%dms render=%dms hist+clip=%dms total=%dms  (%dx%d, %s)",
                 int((t_arr - t0) * 1000),
                 int((t_u8 - t_arr) * 1000),
                 int((t_end - t_u8) * 1000),
@@ -1490,6 +1529,7 @@ class ImageEditor:
                 h,
                 "preview" if self.float_preview is not None else "full",
             )
+
         return blacks, whites, float(p_low), float(p_high)
 
     @staticmethod
@@ -2307,7 +2347,15 @@ class ImageEditor:
             is_tiff = original_path.suffix.lower() in [".tif", ".tiff"]
 
             if is_tiff:
-                self._write_tiff_16bit(original_path, final_float)
+                tmp_path = original_path.with_name(
+                    f".{original_path.stem}_{uuid.uuid4().hex[:8]}{original_path.suffix}"
+                )
+                try:
+                    self._write_tiff_16bit(tmp_path, final_float)
+                    _safe_replace(tmp_path, original_path)
+                except BaseException:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
             else:
                 arr_u8 = (np.clip(final_float, 0.0, 1.0) * 255).astype(np.uint8)
                 img_u8 = Image.fromarray(arr_u8, mode="RGB")
@@ -2316,10 +2364,18 @@ class ImageEditor:
                 if main_exif:
                     save_kwargs["exif"] = main_exif
 
+                tmp_path = original_path.with_name(
+                    f".{original_path.stem}_{uuid.uuid4().hex[:8]}{original_path.suffix}"
+                )
                 try:
-                    img_u8.save(original_path, **save_kwargs)
-                except Exception:
-                    img_u8.save(original_path)
+                    try:
+                        img_u8.save(tmp_path, **save_kwargs)
+                    except Exception:
+                        img_u8.save(tmp_path)
+                    _safe_replace(tmp_path, original_path)
+                except BaseException:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
 
             if original_stat is not None:
                 self._restore_file_times(original_path, original_stat)
@@ -2349,10 +2405,18 @@ class ImageEditor:
                 if exif_bytes:
                     dev_kwargs["exif"] = exif_bytes
 
+                tmp_dev = developed_path.with_name(
+                    f".{developed_path.stem}_{uuid.uuid4().hex[:8]}{developed_path.suffix}"
+                )
                 try:
-                    img_u8.save(developed_path, **dev_kwargs)
-                except Exception:
-                    img_u8.save(developed_path)
+                    try:
+                        img_u8.save(tmp_dev, **dev_kwargs)
+                    except Exception:
+                        img_u8.save(tmp_dev)
+                    _safe_replace(tmp_dev, developed_path)
+                except BaseException:
+                    tmp_dev.unlink(missing_ok=True)
+                    raise
 
             if _debug:
                 t_write = time.perf_counter()

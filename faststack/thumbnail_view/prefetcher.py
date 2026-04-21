@@ -16,6 +16,7 @@ from PIL import Image
 
 import faststack.util.thumb_debug as thumb_debug
 from faststack.imaging.orientation import apply_orientation_to_np, get_exif_orientation
+from faststack.imaging.jpeg import _decode_with_retry
 from faststack.imaging.turbo import TJPF_RGB, create_turbojpeg
 from faststack.io.utils import compute_path_hash
 from faststack.util.executors import create_priority_executor
@@ -382,8 +383,12 @@ class ThumbnailPrefetcher:
 
                     # Decode with scaling
                     scaling_factor = (1, scale_factor)
-                    rgb = _tj.decode(
-                        jpeg_data, pixel_format=TJPF_RGB, scaling_factor=scaling_factor
+                    rgb = _decode_with_retry(
+                        jpeg_data,
+                        source_path=str(path),
+                        decoder=_tj,
+                        pixel_format=TJPF_RGB,
+                        scaling_factor=scaling_factor,
                     )
 
                 # Further resize with PIL if needed

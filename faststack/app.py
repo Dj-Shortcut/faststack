@@ -16,6 +16,7 @@ import shutil
 import uuid
 import functools
 from collections import deque
+from dataclasses import dataclass
 from itertools import pairwise
 
 # Must set before importing PySide6
@@ -109,6 +110,8 @@ from faststack.deletion_types import (
 # LABEL: below this the direction word becomes "neutral" in the status message.
 _AWB_NOOP_EPS = 0.005
 _AWB_LABEL_EPS = 0.002
+_AUTO_ADJUST_HIGHLIGHT_STEP = 0.07
+_AUTO_ADJUST_BLACK_STEP = 0.07
 
 
 def _awb_direction(value: float, pos_label: str, neg_label: str) -> str:
@@ -116,6 +119,26 @@ def _awb_direction(value: float, pos_label: str, neg_label: str) -> str:
     if abs(value) < _AWB_LABEL_EPS:
         return "neutral"
     return pos_label if value > 0 else neg_label
+
+
+@dataclass
+class ActiveAutoAdjustState:
+    active_path_key: str
+    session_id: Optional[str]
+    base_blacks: float
+    base_whites: float
+    p_low: float
+    p_high: float
+    extra_highlight_steps: int = 0
+    extra_black_steps: int = 0
+
+
+@dataclass
+class LiveEditSessionState:
+    active_path_key: str
+    session_id: Optional[str]
+    persisted_revision: int
+    submitted_revision: int
 
 
 def make_hdrop(paths):
@@ -248,12 +271,21 @@ class AppController(QObject):
         self._last_auto_levels_msg: str = (
             ""  # Detail message from last auto_levels() call
         )
+        self._active_auto_adjust_state: Optional[ActiveAutoAdjustState] = None
+        self._auto_adjust_save_pending_action: Optional[str] = None
+        self._auto_adjust_save_in_progress: bool = False
+        self._live_edit_session_state: Optional[LiveEditSessionState] = None
+        # target_path -> save request awaiting retry. Set when a background save
+        # for a session the user has navigated away from fails permanently;
+        # flushed synchronously on shutdown so unsaved edits are not lost.
+        self._pending_save_recovery: Dict[str, dict] = {}
+        self._latest_save_tokens: Dict[str, Any] = {}
+        self._last_save_prepare_error: Optional[str] = None
+        self._shutdown_flush_prepared = False
 
         # Deferred-init state: set to safe defaults, populated later by their methods
-        self._saves_in_flight: set = (
-            set()
-        )  # canonical target paths currently being saved
-        self._saving_keys: set = set()  # keys of images with active saves
+        self._saves_in_flight: Dict[str, int] = {}
+        self._saving_keys: Dict[str, int] = {}
         self._batch_indices_cache: set = set()
         self._batch_indices_cache_key: Optional[tuple] = None
         self.recycle_bin_dir: Optional[Path] = None
@@ -497,6 +529,16 @@ class AppController(QObject):
             self._emit_debounced_metadata_signals
         )
 
+        # Debounce timer for auto-adjust saves triggered by rapid '-' / '=' keys.
+        # Preview updates immediately; the save coalesces into one disk write
+        # per burst so repeated keypresses don't stall the UI.
+        self._auto_adjust_save_timer = QTimer(self)
+        self._auto_adjust_save_timer.setSingleShot(True)
+        self._auto_adjust_save_timer.setInterval(200)
+        self._auto_adjust_save_timer.timeout.connect(
+            self._fire_auto_adjust_save_debounce
+        )
+
         # Debounce timer for EXIF reads — only fires after user stops scrolling
         self._exif_debounce_timer = QTimer(self)
         self._exif_debounce_timer.setSingleShot(True)
@@ -535,27 +577,47 @@ class AppController(QObject):
                         timeout=8000,
                     )
         else:
+            keep_preview = False
             # Cleanup large memory buffers when editor closes
             if self.image_editor:
+                session_info = self._get_current_live_edit_session_info()
                 # If a save is active for this session, preserve the memory
                 # so the user can re-open/retry if the background task fails.
-                current_key = (
-                    self._key(self.image_editor.current_filepath)
-                    if self.image_editor.current_filepath
-                    else None
+                current_key = None
+                if 0 <= self.current_index < len(self.image_files):
+                    try:
+                        current_key = self._key(
+                            self.image_files[self.current_index].path
+                        )
+                    except (OSError, TypeError, ValueError):
+                        current_key = None
+                if current_key is None and session_info is not None:
+                    current_key = session_info[0]
+                elif current_key is None and self.image_editor.current_filepath:
+                    try:
+                        current_key = self._key(self.image_editor.current_filepath)
+                    except (OSError, TypeError, ValueError):
+                        current_key = None
+
+                save_in_progress = bool(
+                    current_key and current_key in self._saving_keys
                 )
-                if current_key and current_key in self._saving_keys:
+                keep_preview = (
+                    save_in_progress or self._is_current_live_edit_session_dirty()
+                )
+                if save_in_progress:
                     log.debug(
                         "Editor closed but save in progress for %s; keeping session memory",
                         current_key,
                     )
+                elif keep_preview:
+                    log.debug("Editor closed with unsaved live edits; keeping preview")
                 else:
-                    log.debug("Editor closed, clearing editor memory buffers")
-                    self.image_editor.clear()
+                    log.debug("Editor closed, preserving live editor session")
 
-            # Also clear the cached preview rendering
-            with self._preview_lock:
-                self._last_rendered_preview = None
+            if not keep_preview:
+                with self._preview_lock:
+                    self._last_rendered_preview = None
 
     def is_valid_working_tif(self, path: Path) -> bool:
         """Checks if a working TIFF path is valid for editing."""
@@ -1727,6 +1789,16 @@ class AppController(QObject):
         self.ui_refresh_generation += 1
         self._metadata_cache_index = (-1, -1)  # Invalidate cache
 
+        # Keep the editor preview reachable at the new generation so callers
+        # that bump ui_refresh_generation for non-image reasons (batch toggle,
+        # metadata refresh, etc.) don't cause the provider to drop a valid
+        # edited preview in favour of the stale decode cache.
+        if (
+            self._last_rendered_preview is not None
+            and self._last_rendered_preview_index == self.current_index
+        ):
+            self._last_rendered_preview_gen = self.ui_refresh_generation
+
         # Essential signals - emit immediately for responsive image display
         self.ui_state.currentIndexChanged.emit()
         self.ui_state.currentImageSourceChanged.emit()
@@ -1783,6 +1855,630 @@ class AppController(QObject):
             return "Saving will restore to main image (backup will be created)."
         return ""
 
+    def _get_current_auto_adjust_path(self) -> Optional[Path]:
+        """Return the currently viewed file path used as the auto-adjust source."""
+        if not self.image_files or not (
+            0 <= self.current_index < len(self.image_files)
+        ):
+            return None
+        try:
+            if self.view_override_path:
+                return Path(self.view_override_path)
+            return self.get_active_edit_path(self.current_index)
+        except (IndexError, OSError, TypeError, ValueError):
+            return None
+
+    def _schedule_auto_adjust_save(self, action_type: str) -> None:
+        """Legacy no-op: quick auto-adjust saves are now session-based."""
+        self._auto_adjust_save_pending_action = None
+
+    def _cancel_pending_auto_adjust_save(self) -> None:
+        """Legacy no-op: quick auto-adjust saves are now session-based."""
+        self._auto_adjust_save_pending_action = None
+
+    def _flush_pending_auto_adjust_save(self) -> None:
+        """Legacy no-op: quick auto-adjust saves are now session-based."""
+        self._auto_adjust_save_pending_action = None
+
+    @Slot()
+    def _fire_auto_adjust_save_debounce(self) -> None:
+        self._auto_adjust_save_pending_action = None
+
+    def _get_current_live_edit_session_info(
+        self,
+    ) -> Optional[tuple[str, Optional[str], int]]:
+        """Return the active path key, session id, and edit revision for the live editor session."""
+        if self.image_editor is None or self.image_editor.current_filepath is None:
+            return None
+        if self.image_editor.original_image is None:
+            return None
+
+        editor_path = Path(self.image_editor.current_filepath)
+        active_path = self._get_current_auto_adjust_path()
+        if active_path is None:
+            return None
+
+        try:
+            active_key = self._key(active_path)
+            editor_key = self._key(editor_path)
+        except (OSError, TypeError, ValueError):
+            return None
+
+        if active_key != editor_key:
+            return None
+
+        return (
+            active_key,
+            getattr(self.image_editor, "session_id", None),
+            int(getattr(self.image_editor, "_edits_rev", 0)),
+        )
+
+    def _ensure_live_edit_session_state(self, *, force_reset: bool = False) -> None:
+        """Bind dirty-session tracking to the currently loaded editor session."""
+        info = self._get_current_live_edit_session_info()
+        if info is None:
+            if force_reset:
+                self._live_edit_session_state = None
+            return
+
+        active_path_key, session_id, revision = info
+        state = self._live_edit_session_state
+        if (
+            force_reset
+            or state is None
+            or state.active_path_key != active_path_key
+            or state.session_id != session_id
+        ):
+            self._live_edit_session_state = LiveEditSessionState(
+                active_path_key=active_path_key,
+                session_id=session_id,
+                persisted_revision=revision,
+                submitted_revision=revision,
+            )
+
+    def _clear_live_edit_session_state(self) -> None:
+        """Drop dirty-session tracking for the current image."""
+        self._live_edit_session_state = None
+
+    def _current_live_session_has_meaningful_edits(self) -> bool:
+        """Return True when the current editor session would change persisted pixels."""
+        if self.image_editor is None:
+            return False
+        if (
+            self.image_editor.current_filepath is None
+            or self.image_editor.original_image is None
+        ):
+            return False
+
+        edits = getattr(self.image_editor, "current_edits", None) or {}
+        numeric_keys = (
+            "brightness",
+            "contrast",
+            "saturation",
+            "white_balance_by",
+            "white_balance_mg",
+            "sharpness",
+            "exposure",
+            "highlights",
+            "shadows",
+            "vibrance",
+            "vignette",
+            "blacks",
+            "whites",
+            "clarity",
+            "texture",
+            "straighten_angle",
+        )
+        for key in numeric_keys:
+            try:
+                if abs(float(edits.get(key, 0.0))) > 0.001:
+                    return True
+            except (TypeError, ValueError):
+                return True
+
+        try:
+            if int(edits.get("rotation", 0)) % 360 != 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+
+        crop_box = edits.get("crop_box")
+        if crop_box is not None:
+            try:
+                normalized_crop_box = tuple(int(v) for v in crop_box)
+            except (TypeError, ValueError):
+                return True
+            if normalized_crop_box != (0, 0, 1000, 1000):
+                return True
+
+        darken_settings = edits.get("darken_settings")
+        if darken_settings is not None and getattr(darken_settings, "enabled", False):
+            mask_id = getattr(darken_settings, "mask_id", "")
+            mask_data = self.image_editor._mask_assets.get(mask_id)
+            if mask_data is None or mask_data.has_strokes():
+                return True
+
+        return False
+
+    def _is_current_live_edit_session_dirty(self) -> bool:
+        """Return True when the current session has unsaved edits beyond the latest submitted save."""
+        state = self._live_edit_session_state
+        info = self._get_current_live_edit_session_info()
+        if state is None or info is None:
+            return False
+
+        active_path_key, session_id, revision = info
+        if state.active_path_key != active_path_key or state.session_id != session_id:
+            return False
+        if revision <= max(state.persisted_revision, state.submitted_revision):
+            return False
+        return self._current_live_session_has_meaningful_edits()
+
+    def _mark_current_live_edit_session_submitted(self, revision: int) -> None:
+        """Record that a save request has been queued for the current session revision."""
+        state = self._live_edit_session_state
+        info = self._get_current_live_edit_session_info()
+        if state is None or info is None:
+            return
+
+        active_path_key, session_id, _ = info
+        if state.active_path_key == active_path_key and state.session_id == session_id:
+            state.submitted_revision = max(state.submitted_revision, revision)
+
+    def _mark_current_live_edit_session_persisted(self, revision: int) -> None:
+        """Record that the current session revision has been written to disk."""
+        state = self._live_edit_session_state
+        info = self._get_current_live_edit_session_info()
+        if state is None or info is None:
+            return
+
+        active_path_key, session_id, _ = info
+        if state.active_path_key == active_path_key and state.session_id == session_id:
+            state.persisted_revision = max(state.persisted_revision, revision)
+            state.submitted_revision = max(
+                state.submitted_revision,
+                state.persisted_revision,
+            )
+
+    def _mark_current_live_edit_session_clean(self) -> None:
+        """Treat the current revision as clean without writing a file."""
+        info = self._get_current_live_edit_session_info()
+        if info is None:
+            self._live_edit_session_state = None
+            return
+
+        _, _, revision = info
+        self._ensure_live_edit_session_state()
+        state = self._live_edit_session_state
+        if state is not None:
+            state.persisted_revision = revision
+            state.submitted_revision = revision
+
+    def _mark_current_live_edit_session_save_failed(self, revision: int) -> None:
+        """Rollback the submitted revision watermark when the latest save fails."""
+        state = self._live_edit_session_state
+        info = self._get_current_live_edit_session_info()
+        if state is None or info is None:
+            return
+
+        active_path_key, session_id, _ = info
+        if (
+            state.active_path_key == active_path_key
+            and state.session_id == session_id
+            and revision >= state.submitted_revision
+        ):
+            state.submitted_revision = state.persisted_revision
+
+    def _note_latest_save_token(
+        self,
+        *,
+        target: Optional[str],
+        session_token: Any,
+    ) -> None:
+        """Record the newest captured save token for a target path."""
+        if target and session_token is not None:
+            self._latest_save_tokens[target] = session_token
+
+    def _save_target_is_in_flight(self, target: Optional[str]) -> bool:
+        """Return True when a save is already active for the resolved target path."""
+        return bool(target and self._saves_in_flight.get(target, 0) > 0)
+
+    def _reject_save_while_target_busy(
+        self,
+        *,
+        target: Optional[str],
+        session_token: Any,
+        status_message: Optional[str],
+    ) -> bool:
+        """Decline a save when another request for the same target is already active."""
+        if not self._save_target_is_in_flight(target):
+            return False
+
+        self._note_latest_save_token(target=target, session_token=session_token)
+        log.info(
+            "Skipping save request for %s; another save is already in flight", target
+        )
+        if status_message:
+            self.update_status_message(status_message, timeout=3000)
+        return True
+
+    def _increment_save_tracking(
+        self,
+        *,
+        target: Optional[str],
+        save_image_key: Optional[str],
+    ) -> None:
+        """Increment in-flight save counters for the target path and image key."""
+        if target:
+            self._saves_in_flight[target] = self._saves_in_flight.get(target, 0) + 1
+        if save_image_key:
+            self._saving_keys[save_image_key] = (
+                self._saving_keys.get(save_image_key, 0) + 1
+            )
+
+    def _decrement_save_tracking(
+        self,
+        *,
+        target: Optional[str],
+        save_image_key: Optional[str],
+    ) -> None:
+        """Decrement in-flight save counters for the target path and image key."""
+        if target:
+            remaining = self._saves_in_flight.get(target, 0) - 1
+            if remaining > 0:
+                self._saves_in_flight[target] = remaining
+            else:
+                self._saves_in_flight.pop(target, None)
+        if save_image_key:
+            remaining = self._saving_keys.get(save_image_key, 0) - 1
+            if remaining > 0:
+                self._saving_keys[save_image_key] = remaining
+            else:
+                self._saving_keys.pop(save_image_key, None)
+
+    def _clear_active_auto_adjust_state(
+        self,
+        reason: str = "",
+        *,
+        clear_editor: bool = False,
+    ) -> None:
+        """Drop transient auto-adjust state and optionally discard the hidden session."""
+        self._cancel_pending_auto_adjust_save()
+        had_state = self._active_auto_adjust_state is not None
+        self._active_auto_adjust_state = None
+
+        if had_state and reason:
+            log.debug("Cleared active auto-adjust state: %s", reason)
+
+        if clear_editor and self.image_editor:
+            self.image_editor.clear()
+
+    def _has_valid_active_auto_adjust_state(self) -> bool:
+        """Return True when the transient state still matches the current session."""
+        state = self._active_auto_adjust_state
+        if state is None or self.image_editor is None:
+            return False
+
+        active_path = self._get_current_auto_adjust_path()
+        editor_path = getattr(self.image_editor, "current_filepath", None)
+        if active_path is None or editor_path is None:
+            return False
+
+        try:
+            active_path_key = self._key(active_path)
+            editor_path_key = self._key(editor_path)
+        except (OSError, TypeError, ValueError):
+            return False
+
+        return (
+            state.active_path_key == active_path_key
+            and editor_path_key == active_path_key
+            and state.session_id == getattr(self.image_editor, "session_id", None)
+        )
+
+    def _capture_source_exif_for_active_image(self) -> Optional[bytes]:
+        """Capture source EXIF when editing from RAW mode."""
+        if self.current_edit_source_mode != "raw":
+            return None
+        if not (0 <= self.current_index < len(self.image_files)):
+            return None
+
+        image_file = self.image_files[self.current_index]
+        jpeg_path = image_file.path
+        if jpeg_path.suffix.lower() in (".tif", ".tiff") or not jpeg_path.exists():
+            return None
+
+        try:
+            with Image.open(jpeg_path) as src_im:
+                return src_im.info.get("exif")
+        except Exception as e:
+            log.warning("Failed to capture source EXIF from %s: %s", jpeg_path, e)
+            return None
+
+    def _ensure_active_image_loaded_for_auto_adjust(
+        self,
+        *,
+        force_reload: bool = False,
+    ) -> Optional[Path]:
+        """Ensure the currently viewed image is loaded for auto-adjust operations."""
+        active_path = self._get_current_auto_adjust_path()
+        if active_path is None:
+            self.update_status_message("No image to adjust")
+            return None
+
+        if force_reload:
+            self.image_editor.clear()
+
+        editor_path = getattr(self.image_editor, "current_filepath", None)
+        paths_match = False
+        if editor_path:
+            try:
+                paths_match = Path(editor_path).resolve() == active_path.resolve()
+            except (OSError, ValueError):
+                paths_match = str(editor_path) == str(active_path)
+
+        has_buffers = (
+            self.image_editor.original_image is not None
+            and self.image_editor.float_image is not None
+        )
+        if paths_match and has_buffers:
+            if self._has_valid_active_auto_adjust_state():
+                self._ensure_live_edit_session_state()
+                return active_path
+
+            try:
+                current_mtime = active_path.stat().st_mtime
+            except OSError:
+                current_mtime = 0.0
+
+            if math.isclose(
+                current_mtime,
+                getattr(self.image_editor, "current_mtime", 0.0),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                self._ensure_live_edit_session_state()
+                return active_path
+
+        cached_preview = self.get_decoded_image(self.current_index)
+        if self.image_editor.load_image(
+            str(active_path),
+            cached_preview=cached_preview,
+            source_exif=self._capture_source_exif_for_active_image(),
+        ):
+            self._ensure_live_edit_session_state(force_reset=True)
+            return active_path
+
+        self.update_status_message("Failed to load image")
+        return None
+
+    def _compute_auto_levels_recommendation(self) -> dict[str, Any]:
+        """Compute the current baseline auto-level recommendation."""
+        blacks, whites, p_low, p_high = self.image_editor.analyze_auto_levels(
+            self.auto_level_threshold,
+            reset_levels=True,
+        )
+
+        dynamic_range = p_high - p_low
+        if self.auto_level_strength_auto:
+            if dynamic_range < 1.0:
+                strength = 0.0
+            else:
+                stretch_full = 255.0 / dynamic_range
+                stretch_cap = 4.0
+                if stretch_full <= stretch_cap:
+                    strength = 1.0
+                else:
+                    strength = (stretch_cap - 1.0) / (stretch_full - 1.0)
+                    strength = max(0.0, min(1.0, strength))
+
+                log.debug(
+                    "Auto levels: p_low=%0.1f, p_high=%0.1f, range=%0.1f, stretch_full=%0.2f, strength=%0.3f",
+                    p_low,
+                    p_high,
+                    dynamic_range,
+                    stretch_full,
+                    strength,
+                )
+        else:
+            strength = self.auto_level_strength
+
+        base_blacks = blacks * strength
+        base_whites = whites * strength
+        noop_reason = None
+        if dynamic_range < 1.0:
+            noop_reason = "flat image"
+        elif p_low <= 0.0 and p_high >= 255.0:
+            noop_reason = "already full range"
+
+        return {
+            "base_blacks": base_blacks,
+            "base_whites": base_whites,
+            "p_low": p_low,
+            "p_high": p_high,
+            "dynamic_range": dynamic_range,
+            "strength": strength,
+            "noop_reason": noop_reason,
+        }
+
+    @staticmethod
+    def _derive_auto_adjust_levels(
+        state: ActiveAutoAdjustState,
+    ) -> tuple[float, float]:
+        """Translate transient auto-adjust state into final blacks/whites values."""
+        blacks = state.base_blacks - (_AUTO_ADJUST_BLACK_STEP * state.extra_black_steps)
+        whites = state.base_whites - (
+            _AUTO_ADJUST_HIGHLIGHT_STEP * state.extra_highlight_steps
+        )
+        return blacks, whites
+
+    def _format_auto_levels_detail(
+        self,
+        *,
+        p_low: float,
+        p_high: float,
+        blacks: float,
+        whites: float,
+        extra_highlight_steps: int = 0,
+        extra_black_steps: int = 0,
+    ) -> str:
+        """Build a human-readable status line for the current levels state."""
+        if abs(blacks) <= 0.001 and abs(whites) <= 0.001:
+            msg = "Auto levels: no change"
+        elif p_high >= 255.0 and abs(whites) <= 0.001:
+            msg = (
+                f"Auto levels: highlights clipped; shadows only (blacks {blacks:+.1f})"
+            )
+        elif p_low <= 0.0 and abs(blacks) <= 0.001:
+            msg = (
+                f"Auto levels: shadows clipped; highlights only (whites {whites:+.1f})"
+            )
+        else:
+            dynamic_range = max(1.0, p_high - p_low)
+            gain = 255.0 / dynamic_range
+            msg = (
+                f"Auto levels: blacks {blacks:+.1f}, whites {whites:+.1f} "
+                f"(range {p_low:.0f}-{p_high:.0f}, gain {gain:.2f})"
+            )
+
+        suffixes = []
+        if extra_highlight_steps > 0:
+            suffixes.append(f"highlights -{extra_highlight_steps * 7}pt")
+        if extra_black_steps > 0:
+            suffixes.append(f"blacks -{extra_black_steps * 7}pt")
+        if suffixes:
+            msg = f"{msg}; {', '.join(suffixes)}"
+        return msg
+
+    def _apply_levels_to_editor(
+        self,
+        *,
+        blacks: float,
+        whites: float,
+        kick_preview: bool,
+    ) -> bool:
+        """Apply derived levels to the editor and synchronize the UI state."""
+        changed_blacks = self.image_editor.set_edit_param("blacks", blacks)
+        changed_whites = self.image_editor.set_edit_param("whites", whites)
+
+        self.ui_state.blacks = blacks
+        self.ui_state.whites = whites
+
+        changed = changed_blacks or changed_whites
+        if changed and kick_preview:
+            self._kick_preview_worker()
+            if self.ui_state.isHistogramVisible:
+                self.update_histogram()
+        return changed
+
+    def _build_active_auto_adjust_state(
+        self,
+        recommendation: dict[str, Any],
+    ) -> ActiveAutoAdjustState:
+        """Create transient auto-adjust state for the current loaded session."""
+        active_path = self._get_current_auto_adjust_path()
+        active_path_key = (
+            self._key(active_path)
+            if active_path is not None
+            else self._key(self.image_editor.current_filepath)
+        )
+        return ActiveAutoAdjustState(
+            active_path_key=active_path_key,
+            session_id=getattr(self.image_editor, "session_id", None),
+            base_blacks=float(recommendation["base_blacks"]),
+            base_whites=float(recommendation["base_whites"]),
+            p_low=float(recommendation["p_low"]),
+            p_high=float(recommendation["p_high"]),
+        )
+
+    def _save_current_auto_adjust(
+        self,
+        *,
+        action_type: str,
+        detail_msg: str,
+    ) -> bool:
+        """Save the current auto-adjusted image once and keep the session alive."""
+        t_start = time.perf_counter()
+        save_target_path = self._get_save_target_path_for_current_view()
+
+        try:
+            # Safe optimization only for true levels-only sessions. If AWB, crop,
+            # rotate, or any other edit is active, the helper declines by
+            # returning None and we fall back to the general save path.
+            save_result = self.image_editor.save_image_uint8_levels(
+                save_target_path=save_target_path
+            )
+            if save_result is None:
+                save_result = self.image_editor.save_image(
+                    save_target_path=save_target_path
+                )
+        except RuntimeError as e:
+            log.warning("save_current_auto_adjust: Save failed: %s", e)
+            self.update_status_message(f"Failed to save image: {e}")
+            return False
+        except Exception as e:
+            log.exception(
+                "save_current_auto_adjust: Unexpected error during save: %s", e
+            )
+            self.update_status_message("Failed to save image")
+            return False
+
+        if not save_result:
+            self.update_status_message("Failed to save image")
+            return False
+
+        saved_path, backup_path = save_result
+        metadata_path = (
+            self.image_files[self.current_index].path
+            if 0 <= self.current_index < len(self.image_files)
+            else saved_path
+        )
+        metadata_before = self._mark_image_edited_in_sidecar(
+            self.sidecar,
+            metadata_path,
+        )
+        self.undo_history.append(
+            (
+                action_type,
+                self._build_edit_undo_data(
+                    saved_path,
+                    backup_path,
+                    metadata_path=metadata_path,
+                    metadata_before=metadata_before,
+                    sidecar=self.sidecar,
+                ),
+                time.time(),
+            )
+        )
+
+        editor_path = getattr(self.image_editor, "current_filepath", None)
+        if editor_path is not None:
+            try:
+                if Path(editor_path).resolve() == saved_path.resolve():
+                    self.image_editor.current_mtime = saved_path.stat().st_mtime
+            except (OSError, ValueError):
+                pass
+
+        self.refresh_image_list()
+        self._reindex_after_save(saved_path)
+        self._bump_display_generation()
+        self.image_cache.pop_path(saved_path)
+        self.prefetcher.cancel_all()
+        self.prefetcher.update_prefetch(self.current_index)
+        self.sync_ui_state()
+
+        if self.ui_state.isHistogramVisible:
+            self.update_histogram()
+
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        saved_msg = (
+            f"{detail_msg} — saved ({total_ms} ms)"
+            if detail_msg
+            else f"Auto-adjust saved ({total_ms} ms)"
+        )
+        self.update_status_message(saved_msg, timeout=9000)
+        return True
+
     # --- Image Editor Integration ---
 
     def _get_save_target_path_for_current_view(self) -> Optional[Path]:
@@ -1808,52 +2504,39 @@ class AppController(QObject):
             return self.image_files[self.current_index].path
         return None
 
-    @Slot()
-    def save_edited_image(self):
-        """Saves the edited image in a background thread to keep UI responsive.
-
-        All export-critical state is captured as an immutable snapshot on the
-        main thread BEFORE the editor is closed or the background worker starts.
-        The background worker operates only on the snapshot — it never reads
-        live editor state for export data.
-        """
+    def _prepare_current_session_save_request(
+        self,
+        *,
+        editor_was_open: bool,
+        success_message: Optional[str],
+    ) -> Optional[dict[str, Any]]:
+        """Capture an immutable save request for the current live editor session."""
+        self._last_save_prepare_error = None
         if not self.image_editor.original_image:
-            return
+            return None
 
-        # Determine the actual target path for duplicate-save protection.
-        # Normalize to a canonical string so Path vs str never causes a miss.
+        self._ensure_live_edit_session_state()
+        session_info = self._get_current_live_edit_session_info()
+        if session_info is None:
+            return None
+
+        _, _, save_revision = session_info
+        live_state = self._live_edit_session_state
+        if not self._current_live_session_has_meaningful_edits():
+            self._mark_current_live_edit_session_clean()
+            return None
+        if live_state is not None and save_revision <= live_state.submitted_revision:
+            return None
+
         save_target_path = self._get_save_target_path_for_current_view()
         raw_target = save_target_path or self.image_editor.current_filepath
         effective_target = str(Path(raw_target).resolve()) if raw_target else None
-        if effective_target and effective_target in self._saves_in_flight:
-            self.update_status_message(
-                "This image is still saving. Please wait a moment.", timeout=3000
-            )
-            return
 
-        # Capture state needed for save before we start
         write_sidecar = self.current_edit_source_mode == "raw"
         dev_path = None
         if write_sidecar and 0 <= self.current_index < len(self.image_files):
             dev_path = self.image_files[self.current_index].developed_jpg_path
 
-        # --- CRITICAL: Snapshot export state BEFORE closing editor or submitting ---
-        # This runs on the main thread and captures an immutable copy of everything
-        # needed for the export: source image, edits, darken settings, mask data, EXIF.
-        try:
-            export_snapshot = self.image_editor.snapshot_for_export(
-                write_developed_jpg=write_sidecar,
-                developed_path=dev_path,
-                save_target_path=save_target_path,
-            )
-        except RuntimeError as e:
-            self.update_status_message(str(e))
-            return
-
-        # Capture save context NOW — these are frozen into the result dict so
-        # _on_save_finished can make cleanup decisions without reading mutable
-        # controller/editor fields that may change during the background save.
-        editor_was_open = self.ui_state.isEditorOpen
         save_image_key = (
             self._key(self.image_files[self.current_index].path)
             if 0 <= self.current_index < len(self.image_files)
@@ -1863,103 +2546,136 @@ class AppController(QObject):
             save_image_key,
             getattr(self, "view_override_kind", None),
             self.image_editor.session_id if self.image_editor else None,
-            # Include edit revision so _on_save_finished does not clear state
-            # if the user continued editing after save was submitted.
-            getattr(self.image_editor, "_edits_rev", None),
+            save_revision,
+        )
+        try:
+            export_snapshot = self.image_editor.snapshot_for_export(
+                write_developed_jpg=write_sidecar,
+                developed_path=dev_path,
+                save_target_path=save_target_path,
+            )
+        except RuntimeError as e:
+            self._last_save_prepare_error = f"Failed to prepare save: {e}"
+            log.warning(
+                "Failed to capture save snapshot for %s: %s", effective_target, e
+            )
+            self.update_status_message(self._last_save_prepare_error, timeout=5000)
+            return None
+        except Exception as e:
+            self._last_save_prepare_error = "Failed to prepare save"
+            log.exception(
+                "Unexpected error capturing save snapshot for %s: %s",
+                effective_target,
+                e,
+            )
+            self.update_status_message(self._last_save_prepare_error, timeout=5000)
+            return None
+
+        self._note_latest_save_token(
+            target=effective_target, session_token=session_token
         )
         save_metadata_path = (
             self.image_files[self.current_index].path
             if 0 <= self.current_index < len(self.image_files)
             else save_target_path or self.image_editor.current_filepath
         )
-
-        if save_image_key and save_image_key in self._saving_keys:
-            self.update_status_message(
-                "This image is still saving. Please wait a moment.", timeout=3000
-            )
-            return
-
-        # Track in-flight save by target path
-        if effective_target:
-            self._saves_in_flight.add(effective_target)
-        if save_image_key:
-            self._saving_keys.add(save_image_key)
-
-        # Show saving indicator (stays until save finishes — no auto-clear timeout)
-        self.ui_state.isSaving = True
-        self.ui_state.statusMessage = "Saving..."
-
-        # Compute restore-override flag
-        # We are restoring if we have an override path AND kind is NOT developed (i.e. it's a backup)
         started_from_restore_override = (
             bool(self.view_override_path)
             and getattr(self, "view_override_kind", None) != "developed"
         )
 
-        # Build the base context that every result dict carries
-        _ctx = {
-            "target": effective_target,
-            "editor_was_open": editor_was_open,
-            "save_image_key": save_image_key,
-            "session_token": session_token,
-            "save_directory_key": self._key(self.image_dir),
-            "save_metadata_path": (
-                str(save_metadata_path) if save_metadata_path else None
-            ),
-            "started_from_restore_override": started_from_restore_override,
-            # Keep metadata writes bound to the sidecar that owned the save
-            # request. The user can navigate to another folder before the
-            # background save completes, and self.sidecar may change.
-            "save_sidecar": self.sidecar,
+        return {
+            "snapshot": export_snapshot,
+            "context": {
+                "target": effective_target,
+                "editor_was_open": editor_was_open,
+                "save_action_type": "save_edit",
+                "save_image_key": save_image_key,
+                "save_revision": save_revision,
+                "session_token": session_token,
+                "save_directory_key": self._key(self.image_dir),
+                "save_metadata_path": (
+                    str(save_metadata_path) if save_metadata_path else None
+                ),
+                "started_from_restore_override": started_from_restore_override,
+                "save_sidecar": self.sidecar,
+                "success_message": success_message,
+            },
         }
 
-        # Submit save work to background thread — operates only on the snapshot
+    def _submit_save_request_async(
+        self,
+        request: dict[str, Any],
+        *,
+        saving_status: Optional[str] = None,
+    ) -> bool:
+        """Submit a captured save request to the background save executor."""
+        context = request["context"]
+        export_snapshot = request["snapshot"]
+        target = context.get("target")
+        save_image_key = context.get("save_image_key")
+        session_token = context.get("session_token")
+
+        if self._reject_save_while_target_busy(
+            target=target,
+            session_token=session_token,
+            status_message="Save already in progress for this image.",
+        ):
+            return False
+
+        self._increment_save_tracking(target=target, save_image_key=save_image_key)
+        self._mark_current_live_edit_session_submitted(context["save_revision"])
+        self.ui_state.isSaving = True
+        if saving_status:
+            self.ui_state.statusMessage = saving_status
+
         def do_save():
-            """Worker function that runs in background thread."""
             try:
                 result = self.image_editor.save_from_snapshot(export_snapshot)
-                return {"success": True, "result": result, **_ctx}
+                return {
+                    "success": True,
+                    "result": result,
+                    "request": request,
+                    **context,
+                }
             except RuntimeError as e:
-                return {"success": False, "error": str(e), **_ctx}
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "request": request,
+                    **context,
+                }
             except Exception as e:
                 log.exception("Unexpected error during save: %s", e)
                 return {
                     "success": False,
                     "error": "Failed to save image",
-                    **_ctx,
+                    "request": request,
+                    **context,
                 }
 
         def on_done(future):
-            """Callback when background save completes - emits signal to hop to main thread."""
             if self._shutting_down:
                 return
             try:
                 result = future.result()
             except Exception as e:
-                result = {"success": False, "error": str(e), **_ctx}
+                result = {"success": False, "error": str(e), **context}
             self._saveFinished.emit(result)
 
         try:
             future = self._save_executor.submit(do_save)
         except Exception as e:
-            log.error("Failed to submit save to background executor: %s", e)
-            # Rollback save bookkeeping: submission failed, save never started.
-            if effective_target:
-                self._saves_in_flight.discard(effective_target)
-            if save_image_key:
-                self._saving_keys.discard(save_image_key)
-            self.ui_state.isSaving = False
+            self._decrement_save_tracking(target=target, save_image_key=save_image_key)
+            if not self._saves_in_flight:
+                self.ui_state.isSaving = False
+            self._mark_current_live_edit_session_save_failed(context["save_revision"])
             self.update_status_message(f"Failed to start background save: {e}")
-            # Do NOT close editor if submission failed, as the save never started.
-            # Return early to avoid the isEditorOpen = False block below.
-            return
+            return False
+
         try:
             future.add_done_callback(on_done)
         except Exception as e:
-            # Submission succeeded, so the save IS running — do not roll back
-            # _saves_in_flight / _saving_keys.  Instead, spin up a minimal
-            # daemon thread to await the future and deliver the result via
-            # on_done(), so _saveFinished is still emitted and cleanup runs.
             log.error(
                 "Failed to register save callback; using fallback watcher thread: %s", e
             )
@@ -1973,11 +2689,135 @@ class AppController(QObject):
             )
             t.start()
 
-        # Close editor UI immediately to allow the user to continue working.
-        # The background worker uses the frozen export_snapshot, so it doesn't
-        # need the live editor UI to remain open.
-        # If the save fails later, memory is preserved due to the guard in
-        # _on_editor_open_changed, allowing the same session to be re-opened.
+        return True
+
+    def _run_save_request_sync(
+        self,
+        request: dict[str, Any],
+        *,
+        saving_status: Optional[str] = None,
+    ) -> bool:
+        """Run a captured save request synchronously on the main thread."""
+        context = request["context"]
+        export_snapshot = request["snapshot"]
+        target = context.get("target")
+        save_image_key = context.get("save_image_key")
+        session_token = context.get("session_token")
+
+        if self._reject_save_while_target_busy(
+            target=target,
+            session_token=session_token,
+            status_message=(
+                "Save already in progress for this image."
+                if saving_status is not None
+                else None
+            ),
+        ):
+            if saving_status is None and target:
+                self._pending_save_recovery[target] = request
+                log.info(
+                    "Deferring latest save for %s until shutdown recovery; "
+                    "an older save is still in flight",
+                    target,
+                )
+            return False
+
+        self._increment_save_tracking(target=target, save_image_key=save_image_key)
+        self._mark_current_live_edit_session_submitted(context["save_revision"])
+        self.ui_state.isSaving = True
+        if saving_status:
+            self.update_status_message(saving_status)
+
+        try:
+            result = self.image_editor.save_from_snapshot(export_snapshot)
+            save_result = {
+                "success": True,
+                "result": result,
+                "request": request,
+                **context,
+            }
+        except RuntimeError as e:
+            save_result = {
+                "success": False,
+                "error": str(e),
+                "request": request,
+                **context,
+            }
+        except Exception as e:
+            log.exception("Unexpected error during save: %s", e)
+            save_result = {
+                "success": False,
+                "error": "Failed to save image",
+                "request": request,
+                **context,
+            }
+
+        self._on_save_finished(save_result)
+        return bool(save_result.get("success"))
+
+    def _flush_current_live_edit_session_for_navigation(self) -> bool:
+        """Queue a background save for the current dirty session before switching images."""
+        request = self._prepare_current_session_save_request(
+            editor_was_open=False,
+            success_message=None,
+        )
+        if request is None:
+            return self._last_save_prepare_error is None
+        return self._submit_save_request_async(request)
+
+    def _flush_current_live_edit_session_for_drag(
+        self,
+        *,
+        saving_status: Optional[str] = "Preparing drag...",
+    ) -> bool:
+        """Synchronously save the current dirty session before drag-out begins."""
+        request = self._prepare_current_session_save_request(
+            editor_was_open=False,
+            success_message=None,
+        )
+        if request is None:
+            return self._last_save_prepare_error is None
+        return self._run_save_request_sync(request, saving_status=saving_status)
+
+    @Slot(result=bool)
+    def prepare_for_app_close(self) -> bool:
+        """Flush the live session before allowing the main window to close."""
+        if self._shutting_down:
+            return True
+
+        self._shutdown_flush_prepared = False
+        request = self._prepare_current_session_save_request(
+            editor_was_open=False,
+            success_message=None,
+        )
+        if request is None:
+            return self._last_save_prepare_error is None
+
+        target = request.get("context", {}).get("target")
+        if self._run_save_request_sync(request, saving_status=None):
+            self._shutdown_flush_prepared = True
+            return True
+        if target and self._pending_save_recovery.get(target) is request:
+            self._shutdown_flush_prepared = True
+            return True
+        return False
+
+    @Slot()
+    def save_edited_image(self):
+        """Save the current live editor session in the background."""
+        request = self._prepare_current_session_save_request(
+            editor_was_open=self.ui_state.isEditorOpen,
+            success_message="Image saved",
+        )
+        if request is None:
+            if self._last_save_prepare_error is not None:
+                return
+            self.update_status_message("No unsaved edits to save", timeout=3000)
+            return
+
+        if not self._submit_save_request_async(request, saving_status="Saving..."):
+            return
+
         if self.ui_state.isEditorOpen:
             self.ui_state.isEditorOpen = False
 
@@ -1991,19 +2831,95 @@ class AppController(QObject):
         # Remove completed target from in-flight set, then clear the saving
         # indicator only when no exports remain in progress.
         target = save_result.get("target")
-        if target:
-            self._saves_in_flight.discard(target)
-
         save_key = save_result.get("save_image_key")
-        if save_key:
-            self._saving_keys.discard(save_key)
+        self._decrement_save_tracking(target=target, save_image_key=save_key)
         if not self._saves_in_flight:
             self.ui_state.isSaving = False
 
+        save_session_token = save_result.get("session_token")
+        current_image_key = (
+            self._key(self.image_files[self.current_index].path)
+            if 0 <= self.current_index < len(self.image_files)
+            else None
+        )
+        current_session_token = (
+            current_image_key,
+            getattr(self, "view_override_kind", None),
+            self.image_editor.session_id if self.image_editor else None,
+            getattr(self.image_editor, "_edits_rev", None),
+        )
+        still_on_same_session = (
+            save_session_token is not None
+            and current_session_token is not None
+            and len(save_session_token) >= 3
+            and current_session_token[:3] == save_session_token[:3]
+        )
+        still_on_identical_revision = (
+            still_on_same_session
+            and len(save_session_token) >= 4
+            and current_session_token[3] == save_session_token[3]
+        )
+        save_revision = save_result.get("save_revision")
+
         if not save_result.get("success"):
+            if still_on_same_session and save_revision is not None:
+                self._mark_current_live_edit_session_save_failed(int(save_revision))
             error_msg = save_result.get("error", "Save failed")
-            self.update_status_message(f"Save failed: {error_msg}", timeout=5000)
+            request = save_result.get("request")
+            target = save_result.get("target")
+            attempts = (
+                int(request.get("attempts", 1)) if isinstance(request, dict) else 1
+            )
+            latest_save_token = (
+                self._latest_save_tokens.get(target)
+                if target and save_session_token is not None
+                else None
+            )
+            if (
+                latest_save_token is not None
+                and latest_save_token != save_session_token
+            ):
+                log.info(
+                    "Skipping retry for stale save request %s (rev=%s); newer save token exists",
+                    target,
+                    save_revision,
+                )
+                return
+            # The captured snapshot is fully self-contained — auto-retry once
+            # before declaring permanent failure. If the user has navigated away
+            # we still need to preserve the snapshot so edits aren't lost.
+            if isinstance(request, dict) and attempts < 2:
+                request["attempts"] = attempts + 1
+                log.warning(
+                    "Background save failed for %s (attempt %d): %s — retrying",
+                    target,
+                    attempts,
+                    error_msg,
+                )
+                self._submit_save_request_async(request)
+                return
+            if isinstance(request, dict) and target and not still_on_same_session:
+                self._pending_save_recovery[target] = request
+                log.error(
+                    "Background save for %s failed permanently after %d attempts: %s — "
+                    "queued for shutdown flush",
+                    target,
+                    attempts,
+                    error_msg,
+                )
+                self.update_status_message(
+                    f"Background save failed for {Path(target).name}: {error_msg}. "
+                    "Will retry on quit.",
+                    timeout=10000,
+                )
+            else:
+                self.update_status_message(f"Save failed: {error_msg}", timeout=5000)
             return
+
+        # Success — drop any prior recovery snapshot for this target.
+        target = save_result.get("target")
+        if target and target in self._pending_save_recovery:
+            self._pending_save_recovery.pop(target, None)
 
         result = save_result.get("result")
         if isinstance(result, tuple) and len(result) == 2:
@@ -2014,37 +2930,8 @@ class AppController(QObject):
             # Read frozen save context — these were captured at save-initiation
             # time and are immune to editor/navigation changes during the save.
             editor_was_open = save_result.get("editor_was_open", False)
-            save_session_token = save_result.get("session_token")
-
-            # Check whether the user is still viewing the identical session
-            # they saved (same image, same variant, same editor underlying data)
-            current_image_key = (
-                self._key(self.image_files[self.current_index].path)
-                if 0 <= self.current_index < len(self.image_files)
-                else None
-            )
-            current_session_token = (
-                current_image_key,
-                getattr(self, "view_override_kind", None),
-                self.image_editor.session_id if self.image_editor else None,
-                getattr(self.image_editor, "_edits_rev", None),
-            )
-
-            # Check whether the user is still viewing the same image/session
-            # (image key, variant kind, and session_id matching)
-            still_on_same_session = (
-                save_session_token is not None
-                and current_session_token is not None
-                and len(save_session_token) >= 3
-                and current_session_token[:3] == save_session_token[:3]
-            )
-
-            # Check if it is the EXACT identical revision (no user edits since save started)
-            still_on_identical_revision = (
-                still_on_same_session
-                and len(save_session_token) >= 4
-                and current_session_token[3] == save_session_token[3]
-            )
+            if still_on_same_session and save_revision is not None:
+                self._mark_current_live_edit_session_persisted(int(save_revision))
 
             if still_on_same_session:
                 # 1. Editor Cleanup (only if revision is unchanged)
@@ -2054,6 +2941,10 @@ class AppController(QObject):
                             self.ui_state.isEditorOpen = False
                         # Closing triggers _on_editor_open_changed -> image_editor.clear()
                         # but we call it explicitly here just in case they closed it manually.
+                        self._clear_active_auto_adjust_state(
+                            "background save replaced the live editor session",
+                            clear_editor=False,
+                        )
                         self.image_editor.clear()
 
                     # Also clear variant override if we started from one
@@ -2083,9 +2974,10 @@ class AppController(QObject):
                     or save_directory_key == current_directory_key
                 )
                 if should_record_undo:
+                    action_type = save_result.get("save_action_type", "save_edit")
                     self.undo_history.append(
                         (
-                            "save_edit",
+                            action_type,
                             self._build_edit_undo_data(
                                 saved_path,
                                 backup_path,
@@ -2124,7 +3016,9 @@ class AppController(QObject):
             if self.ui_state:
                 self.ui_state.variantBadgesChanged.emit()
 
-            self.update_status_message("Image saved")
+            success_message = save_result.get("success_message")
+            if success_message:
+                self.update_status_message(success_message)
         else:
             # Success reported but result shape unexpected
             log.warning("Save finished with unexpected result shape: %r", result)
@@ -2147,6 +3041,20 @@ class AppController(QObject):
         if index < 0 or index >= len(self.image_files):
             return
 
+        if not self._flush_current_live_edit_session_for_navigation():
+            return
+
+        self._clear_active_auto_adjust_state(
+            "navigated to a different image",
+            clear_editor=True,
+        )
+        self._clear_live_edit_session_state()
+        self._clear_variant_override()
+        self._reset_crop_settings()
+        self._reset_darken_on_navigation()
+
+        self.current_index = index  # Set index first so signals pick up correct image
+
         # Reset source mode to JPEG unless new image is strictly RAW-only
         # (This implements the "Default state on navigation" requirement)
         img = self.image_files[index]
@@ -2160,14 +3068,6 @@ class AppController(QObject):
         if self.current_edit_source_mode != new_mode:
             self.current_edit_source_mode = new_mode
             self.editSourceModeChanged.emit(new_mode)
-
-        self.current_index = index  # Set index first so signals pick up correct image
-
-        # Clear variant override on navigation
-        self._clear_variant_override()
-
-        self._reset_crop_settings()
-        self._reset_darken_on_navigation()
 
         if self.debug_cache:
             _t_prefetch = time.perf_counter()
@@ -3201,6 +4101,48 @@ class AppController(QObject):
                 f"All {len(indices_to_add)} uploaded image(s) already in batch."
             )
 
+    def add_edited_to_batch(self):
+        """Add all edited-flagged images in the current directory to the batch."""
+        if not self.image_files:
+            self.update_status_message("No images loaded.")
+            return
+
+        indices_to_add = []
+        for i, img in enumerate(self.image_files):
+            meta = self.sidecar.get_metadata(img.path, create=False)
+            if meta and meta.edited:
+                indices_to_add.append(i)
+
+        if not indices_to_add:
+            self.update_status_message("No edited images found.")
+            return
+
+        added_count = 0
+        for idx in indices_to_add:
+            in_batch = any(start <= idx <= end for start, end in self.batches)
+            if not in_batch:
+                self.batches.append([idx, idx])
+                added_count += 1
+
+        if added_count > 0:
+            self._normalize_batches()
+            self._invalidate_batch_cache()
+            self._metadata_cache_index = (-1, -1)
+            self.dataChanged.emit()
+            self.sync_ui_state()
+
+            if hasattr(self, "_thumbnail_model") and self._thumbnail_model:
+                self._thumbnail_model.refresh()
+
+            self.update_status_message(
+                f"Added {added_count} edited image(s) to batch ({len(indices_to_add)} total edited)"
+            )
+            log.info("Added %d edited image(s) to batch", added_count)
+        else:
+            self.update_status_message(
+                f"All {len(indices_to_add)} edited image(s) already in batch."
+            )
+
     def remove_from_batch_or_stack(self):
         """Remove current image from any batch or stack it's in."""
         if not self.image_files or self.current_index >= len(self.image_files):
@@ -4039,6 +4981,10 @@ class AppController(QObject):
             self._batch_indices_cache_key = None
 
         # Clear editor state if open
+        self._clear_active_auto_adjust_state(
+            "folder-level state reset",
+            clear_editor=False,
+        )
         self.image_editor.clear()
 
         # Clear thumbnail cache BEFORE refresh to avoid stale thumbs
@@ -5336,17 +6282,30 @@ class AppController(QObject):
         self, target: Path, *, update_hist: bool = False
     ) -> None:
         """Centralized logic for refreshing state after an undo action."""
+        # Clear stale editor/preview state so the provider doesn't serve a
+        # pre-undo preview frame.  image_editor.clear() leaves current_edits
+        # populated; reset_edits() zeroes them out.
+        if self.image_editor:
+            self.image_editor.reset_edits()
+        self._clear_live_edit_session_state()
+        with self._preview_lock:
+            self._last_rendered_preview = None
+
         self.refresh_image_list()
 
-        # Find index of restored image
-        target_resolve = target.resolve()
-        for i, img_file in enumerate(self.image_files):
-            try:
-                if img_file.path.resolve() == target_resolve:
+        # Use _key-based lookup (consistent with _reindex_after_save) for
+        # robust cross-platform path matching on WSL/Windows.
+        target_key = self._key(target)
+        new_idx = self._path_to_index.get(target_key)
+        if new_idx is not None:
+            self.current_index = new_idx
+        else:
+            # Fallback: name-based match
+            target_name = target.name
+            for i, img_file in enumerate(self.image_files):
+                if img_file.path.name == target_name:
                     self.current_index = i
                     break
-            except OSError:
-                continue
 
         self._bump_display_generation()
         self.image_cache.clear()
@@ -5360,6 +6319,35 @@ class AppController(QObject):
     @Slot()
     def undo_delete(self):
         """Unified undo that handles delete, pending_delete, and edit operations."""
+        if self._auto_adjust_save_pending_action is not None:
+            try:
+                self._flush_pending_auto_adjust_save()
+            except Exception:
+                log.exception("Failed to flush pending auto-adjust save before undo")
+
+        # If the live session has unsaved edits (e.g. crop or auto-levels
+        # applied as preview-only), revert them before touching undo_history.
+        if self._is_current_live_edit_session_dirty():
+            self._clear_active_auto_adjust_state(
+                "undo reverted unsaved live edits",
+                clear_editor=False,
+            )
+            if self.image_editor:
+                self.image_editor.reset_edits()
+            self._clear_live_edit_session_state()
+            with self._preview_lock:
+                self._last_rendered_preview = None
+            self._bump_display_generation()
+            if self.image_cache and 0 <= self.current_index < len(self.image_files):
+                self.image_cache.pop_path(self.image_files[self.current_index].path)
+            self.prefetcher.cancel_all()
+            self.prefetcher.update_prefetch(self.current_index)
+            self.sync_ui_state()
+            if self.ui_state.isHistogramVisible:
+                self.update_histogram()
+            self.update_status_message("Undid unsaved edits")
+            return
+
         if not self.undo_history:
             self.update_status_message("Nothing to undo.")
             return
@@ -5523,6 +6511,7 @@ class AppController(QObject):
             "save_edit",
             "auto_white_balance",
             "auto_levels",
+            "auto_adjust",
             "crop",
         }:
             try:
@@ -5543,6 +6532,10 @@ class AppController(QObject):
                     restore_metadata_path = (
                         Path(metadata_path) if metadata_path else Path(saved_path)
                     )
+                    self._clear_active_auto_adjust_state(
+                        "undo restored a prior image state",
+                        clear_editor=True,
+                    )
                     self._restore_metadata_snapshot(
                         restore_sidecar, restore_metadata_path, metadata_before
                     )
@@ -5556,6 +6549,8 @@ class AppController(QObject):
                         self.update_status_message("Undid auto white balance")
                     elif action_type == "auto_levels":
                         self.update_status_message("Undid auto levels")
+                    elif action_type == "auto_adjust":
+                        self.update_status_message("Undid auto adjust")
                     else:
                         self.update_status_message("Undid crop")
             except (FileNotFoundError, OSError, shutil.Error) as e:
@@ -5565,6 +6560,22 @@ class AppController(QObject):
 
     def shutdown_qt(self):
         """Shutdown Qt objects only - MUST run on main/Qt thread."""
+        # Persist the current live edit session before tearing down Qt so
+        # preview-only quick actions and editor changes are not lost on exit.
+        if not self._shutdown_flush_prepared:
+            try:
+                flushed = self._flush_current_live_edit_session_for_drag(
+                    saving_status=None
+                )
+                if not flushed and self._last_save_prepare_error is not None:
+                    log.error(
+                        "Shutdown proceeding without a live-session flush: %s",
+                        self._last_save_prepare_error,
+                    )
+            except Exception:
+                log.exception("Failed to flush live edit session on shutdown")
+        self._shutdown_flush_prepared = False
+
         self._shutting_down = True  # set EARLY to make all slots no-op
         self._exif_pending_path = None
         log.info("Application shutting down (Qt cleanup).")
@@ -5574,6 +6585,7 @@ class AppController(QObject):
             self._metadata_debounce_timer.stop()
             self._exif_debounce_timer.stop()
             self._watcher_debounce_timer.stop()
+            self._auto_adjust_save_timer.stop()
             self.histogram_timer.stop()
             self.resize_timer.stop()
             if hasattr(self, "_thumb_summary_timer"):
@@ -5668,6 +6680,31 @@ class AppController(QObject):
         self._safe_shutdown_executor(
             self._delete_executor, "delete", wait=True, cancel_futures=False
         )
+
+        # Final attempt to persist snapshots whose background save previously
+        # failed, or whose latest revision was deferred at shutdown because an
+        # older save for the same target was still in flight. Run this only
+        # after the save executor drains so we do not race the same file twice.
+        for tgt, req in list(self._pending_save_recovery.items()):
+            try:
+                self.image_editor.save_from_snapshot(req["snapshot"])
+            except Exception:
+                log.exception("Final shutdown retry failed for %s", tgt)
+                continue
+            try:
+                ctx = req.get("context", {})
+                meta_path_str = ctx.get("save_metadata_path") or tgt
+                meta_sidecar = ctx.get("save_sidecar") or self.sidecar
+                if meta_path_str and meta_sidecar is not None:
+                    self._mark_image_edited_in_sidecar(
+                        meta_sidecar, Path(meta_path_str)
+                    )
+                log.info("Recovered pending save for %s on shutdown", tgt)
+            except Exception:
+                log.exception(
+                    "Recovered save for %s but sidecar bookkeeping failed", tgt
+                )
+        self._pending_save_recovery.clear()
 
         # Shutdown prefetcher
         try:
@@ -6053,7 +7090,7 @@ class AppController(QObject):
     def _is_image_saving(self, file_path_str: str) -> bool:
         if not file_path_str or not hasattr(self, "_saving_keys"):
             return False
-        return self._key(Path(file_path_str)) in self._saving_keys
+        return self._saving_keys.get(self._key(Path(file_path_str)), 0) > 0
 
     def _block_if_saving(self, *paths) -> bool:
         """Helper to block actions if any of the given paths are currently saving."""
@@ -6068,12 +7105,6 @@ class AppController(QObject):
     @Slot()
     def start_drag_current_image(self):
         if not self.image_files or self.current_index >= len(self.image_files):
-            return
-
-        # (Check moved below after batch resolution)
-        path_to_check = self.image_files[self.current_index].path
-        # We still check the current image early as a fast-fail
-        if self._block_if_saving(path_to_check):
             return
 
         # Collect files to drag: batch files if any batches exist, otherwise current image
@@ -6094,6 +7125,14 @@ class AppController(QObject):
         existing_indices = [
             idx for idx in file_indices if self.image_files[idx].path.exists()
         ]
+
+        current_path = self.image_files[self.current_index].path
+        current_in_drag = self.current_index in existing_indices
+        if current_in_drag and self._is_current_live_edit_session_dirty():
+            if self._block_if_saving(current_path):
+                return
+            if not self._flush_current_live_edit_session_for_drag():
+                return
 
         # Check if ANY of the resolved files are currently saving
         for idx in existing_indices:
@@ -6379,6 +7418,7 @@ class AppController(QObject):
                 log.debug(
                     "load_image_for_editing: Reusing existing session for %s", filepath
                 )
+                self._ensure_live_edit_session_state()
                 # Ensure the background renderer is current and notify UI to refresh
                 # Also synchronize sliders/crop state to the backend session.
                 self._sync_editor_state_from_session()
@@ -6410,6 +7450,11 @@ class AppController(QObject):
             if self.image_editor.load_image(
                 filepath, cached_preview=cached_preview, source_exif=source_exif
             ):
+                self._clear_active_auto_adjust_state(
+                    "editor session reloaded",
+                    clear_editor=False,
+                )
+                self._ensure_live_edit_session_state(force_reset=True)
                 # Notify UIState to update bindings
                 # We do this via signals or by calling the update function on UIState if available
                 # But UIState listens to editor signals?
@@ -6507,6 +7552,10 @@ class AppController(QObject):
             # Trigger a refresh of the image to show the edit, ONLY if something changed
             # Uses gate pattern: runs immediately if not inflight, else queues for next
             if changed:
+                self._clear_active_auto_adjust_state(
+                    f"manual edit changed '{key}'",
+                    clear_editor=False,
+                )
                 self._kick_preview_worker()
         except Exception as e:
             log.error("Error setting edit parameter %s=%s: %s", key, value, e)
@@ -6522,6 +7571,10 @@ class AppController(QObject):
     def reset_edit_parameters(self):
         """Resets all editing parameters in the editor."""
         self.image_editor.reset_edits()
+        self._clear_active_auto_adjust_state(
+            "editor parameters reset",
+            clear_editor=False,
+        )
         if hasattr(self.ui_state, "reset_editor_state"):
             self.ui_state.reset_editor_state()
 
@@ -6649,11 +7702,19 @@ class AppController(QObject):
             ds = DarkenSettings(enabled=True)
             self.image_editor.current_edits["darken_settings"] = ds
             self.image_editor._edits_rev += 1
+            self._clear_active_auto_adjust_state(
+                "darken tool state created",
+                clear_editor=False,
+            )
         else:
             ds = self.image_editor.current_edits["darken_settings"]
             if not ds.enabled:
                 ds.enabled = True
                 self.image_editor._edits_rev += 1
+                self._clear_active_auto_adjust_state(
+                    "darken tool enabled",
+                    clear_editor=False,
+                )
 
     @Slot(float, float, str)
     def start_darken_stroke(self, x_norm: float, y_norm: float, stroke_type: str):
@@ -6704,6 +7765,10 @@ class AppController(QObject):
 
         # Bump editor revision and refresh preview
         self.image_editor._edits_rev += 1
+        self._clear_active_auto_adjust_state(
+            "darken stroke committed",
+            clear_editor=False,
+        )
         self._kick_preview_worker()
         self._update_darken_overlay()
 
@@ -6715,6 +7780,10 @@ class AppController(QObject):
             return
         mask_data.undo_last_stroke()
         self.image_editor._edits_rev += 1
+        self._clear_active_auto_adjust_state(
+            "darken stroke undone",
+            clear_editor=False,
+        )
         self._kick_preview_worker()
         self._update_darken_overlay()
 
@@ -6726,6 +7795,10 @@ class AppController(QObject):
             return
         mask_data.clear_strokes()
         self.image_editor._edits_rev += 1
+        self._clear_active_auto_adjust_state(
+            "darken strokes cleared",
+            clear_editor=False,
+        )
         self._kick_preview_worker()
         self._update_darken_overlay()
 
@@ -6756,6 +7829,10 @@ class AppController(QObject):
             setattr(self.ui_state, ui_prop, value)
 
         self.image_editor._edits_rev += 1
+        self._clear_active_auto_adjust_state(
+            f"darken param changed '{key}'",
+            clear_editor=False,
+        )
         self._kick_preview_worker()
         self._update_darken_overlay()
 
@@ -6768,6 +7845,10 @@ class AppController(QObject):
         ds.mode = mode
         self.ui_state.darkenMode = mode
         self.image_editor._edits_rev += 1
+        self._clear_active_auto_adjust_state(
+            "darken mode changed",
+            clear_editor=False,
+        )
         self._kick_preview_worker()
         self._update_darken_overlay()
 
@@ -7446,19 +8527,13 @@ class AppController(QObject):
 
     @Slot()
     def execute_crop(self):
-        """Execute the crop operation: crop image, save, backup, and refresh."""
+        """Commit the crop into the live editor session without saving yet."""
         if not self.image_files or self.current_index >= len(self.image_files):
             self.update_status_message("No image to crop")
             return
 
         if not self.ui_state.isCropping:
             return
-
-        # Capture current rotation (straighten_angle) from editor state BEFORE any reload
-        # This is the single source of truth since set_straighten_angle updates it live.
-        current_rotation = float(
-            self.image_editor.current_edits.get("straighten_angle", 0.0)
-        )
 
         crop_box_raw = self.ui_state.currentCropBox
 
@@ -7497,19 +8572,11 @@ class AppController(QObject):
             self.update_status_message("No crop area selected")
             return
 
-        # Restoration means viewing a backup; crop should target the main image.
-        # We must resolve this BEFORE potentially reloading or saving.
-        save_target_path = self._get_save_target_path_for_current_view()
-        is_restoring = save_target_path is not None
-
-        # Ensure image is loaded in editor.
-        # For crop, we use the CURRENTLY VIEWED file (which might be a variant).
         if self.view_override_path:
             filepath = Path(self.view_override_path)
         else:
             filepath = self.get_active_edit_path(self.current_index)
 
-        # Robust path comparison
         editor_path = self.image_editor.current_filepath
         paths_match = False
         if editor_path:
@@ -7518,99 +8585,65 @@ class AppController(QObject):
             except (OSError, ValueError):
                 paths_match = str(editor_path) == str(filepath)
 
-        if not paths_match:
+        has_buffers = (
+            self.image_editor.original_image is not None
+            and self.image_editor.float_image is not None
+        )
+        if not paths_match or not has_buffers:
             log.debug(
                 f"execute_crop reloading image due to path mismatch. Editor: {editor_path}, File: {filepath}"
             )
-            # get_decoded_image() honors variants/overrides.
             cached_preview = self.get_decoded_image(self.current_index)
             if not self.image_editor.load_image(
-                str(filepath), cached_preview=cached_preview
+                str(filepath),
+                cached_preview=cached_preview,
+                source_exif=self._capture_source_exif_for_active_image(),
             ):
                 self.update_status_message("Failed to load image for cropping")
                 return
+            self._ensure_live_edit_session_state(force_reset=True)
+        else:
+            self._ensure_live_edit_session_state()
+
+        current_rotation = float(
+            self.image_editor.current_edits.get("straighten_angle", 0.0)
+        )
 
         self.image_editor.set_crop_box(crop_box_raw)
-
-        # Re-apply the captured rotation.
-        # This handles cases where we reloaded the image (resetting edits) or where UI state sync was flaky.
         self.image_editor.set_edit_param("straighten_angle", current_rotation)
 
-        # Save via ImageEditor (passing the resolved target for variant-save policy)
+        # Render the cropped preview synchronously and publish it as the
+        # current loupe image before clearing crop mode. This guarantees the
+        # QML side re-requests the image URL and the ImageProvider serves the
+        # cropped preview instead of a stale cached full-size frame.
         try:
-            save_result = self.image_editor.save_image(
-                save_target_path=save_target_path
-            )
-        except RuntimeError as e:
-            log.warning("execute_crop: Save failed: %s", e)
-            self.update_status_message(f"Failed to save cropped image: {e}")
-            return
-        except Exception as e:
-            log.exception("execute_crop: Unexpected error during save: %s", e)
-            self.update_status_message("Failed to save cropped image")
-            return
+            decoded = self.image_editor.get_preview_data_cached(allow_compute=True)
+        except Exception:
+            log.exception("execute_crop: synchronous preview render failed")
+            decoded = None
 
-        if save_result:
-            saved_path, backup_path = save_result
-            metadata_path = self.image_files[self.current_index].path
-            metadata_before = self._mark_image_edited_in_sidecar(
-                self.sidecar, metadata_path
-            )
+        if decoded is not None:
+            with self._preview_lock:
+                self._last_rendered_preview = decoded
+                self.ui_refresh_generation += 1
+                self._last_rendered_preview_index = self.current_index
+                self._last_rendered_preview_gen = self.ui_refresh_generation
 
-            # IF we were restoring from a variant, clear the override now that it's "the truth"
-            if is_restoring:
-                self._clear_variant_override()
-
-            timestamp = time.time()
-            self.undo_history.append(
-                (
-                    "crop",
-                    self._build_edit_undo_data(
-                        saved_path,
-                        backup_path,
-                        metadata_path=metadata_path,
-                        metadata_before=metadata_before,
-                        sidecar=self.sidecar,
-                    ),
-                    timestamp,
-                )
-            )
-
-            # Exit crop mode
-            self.ui_state.isCropping = False
-            self.ui_state.currentCropBox = (0, 0, 1000, 1000)
-
-            # Refresh the view
-            self.refresh_image_list()
-
-            # Find the edited image
-            for i, img_file in enumerate(self.image_files):
-                if img_file.path == saved_path:
-                    self.current_index = i
-                    break
-
-            # Invalidate cache and refresh display
-            self._bump_display_generation()
-            self.image_cache.pop_path(saved_path)
-            self.prefetcher.cancel_all()
-            self.prefetcher.update_prefetch(self.current_index)
-            self.sync_ui_state()
-
-            # Reset zoom/pan
-            self.ui_state.resetZoomPan()
-
-            if self.ui_state.isHistogramVisible:
-                self.update_histogram()
-
-            self.update_status_message("Image cropped and saved")
-            log.info("Crop operation completed for %s", saved_path)
-
-            # Force reload of editor to ensure subsequent edits operate on the cropped image
-            self.image_editor.clear()
-            self.reset_edit_parameters()
-
+        self.ui_state.isCropping = False
+        # Do NOT assign ui_state.currentCropBox here — its setter syncs back
+        # into image_editor.set_crop_box(), which would overwrite the crop we
+        # just committed. The crop overlay is already hidden by
+        # `visible: isCropping` in QML, and re-entering crop mode resets the
+        # box via toggle_crop_mode -> _reset_crop_only.
+        self.ui_state.resetZoomPan()
+        if decoded is not None:
+            self.ui_state.currentImageSourceChanged.emit()
         else:
-            self.update_status_message("Failed to save cropped image")
+            self._kick_preview_worker()
+        if self.ui_state.isHistogramVisible:
+            self.update_histogram()
+        self.update_status_message("Crop applied", timeout=5000)
+        log.info("Crop applied to live session for %s", filepath)
 
     @Slot()
     def auto_levels(self):
@@ -7620,129 +8653,36 @@ class AppController(QObject):
             return False
 
         t_al_start = time.perf_counter()
-
-        image_file = self.image_files[self.current_index]
-        filepath = str(image_file.path)
-
-        # Ensure image is loaded in editor
-        if (
-            not self.image_editor.current_filepath
-            or str(self.image_editor.current_filepath) != filepath
-        ):
-            cached_preview = self.get_decoded_image(self.current_index)
-            if not self.image_editor.load_image(
-                filepath, cached_preview=cached_preview
-            ):
-                self.update_status_message("Failed to load image")
-                return False
+        active_path = self._ensure_active_image_loaded_for_auto_adjust()
+        if active_path is None:
+            return False
         t_al_load = time.perf_counter()
-
-        # Calculate auto levels - now returns (blacks, whites, p_low, p_high)
-        blacks, whites, p_low, p_high = self.image_editor.auto_levels(
-            self.auto_level_threshold
-        )
+        recommendation = self._compute_auto_levels_recommendation()
         t_al_calc = time.perf_counter()
 
-        # Auto-strength computation using stretch-factor capping
-        #
-        # Philosophy: threshold_percent defines acceptable clipping (e.g., 0.1% at each end).
-        # Auto-strength should NOT prevent that clipping - it's intentional.
-        # Instead, auto-strength prevents INSANE levels on low-dynamic-range images.
-        #
-        # Approach: Cap the stretch factor to a reasonable maximum (e.g., 3-4x).
-        # - Full strength: stretch = 255 / (p_high - p_low)
-        # - If stretch is reasonable (<= cap), use full strength
-        # - If stretch is extreme (> cap), blend to limit effective stretch to cap
-        #
-        if self.auto_level_strength_auto:
-            # Calculate full-strength stretch factor
-            dynamic_range = p_high - p_low
-            if dynamic_range < 1.0:
-                # Degenerate case: nearly flat image
-                strength = 0.0
-                log.debug(
-                    f"Auto levels: degenerate dynamic range ({dynamic_range:.2f}), strength=0"
-                )
-            else:
-                stretch_full = 255.0 / dynamic_range
+        blacks = recommendation["base_blacks"]
+        whites = recommendation["base_whites"]
+        msg = self._format_auto_levels_detail(
+            p_low=recommendation["p_low"],
+            p_high=recommendation["p_high"],
+            blacks=blacks,
+            whites=whites,
+        )
+        changed = self._apply_levels_to_editor(
+            blacks=blacks,
+            whites=whites,
+            kick_preview=True,
+        )
 
-                # Cap stretch to prevent insane levels
-                # E.g., if image spans only 50-200 (range=150), full stretch would be 255/150 = 1.7x (fine)
-                # But if image spans 100-110 (range=10), full stretch would be 255/10 = 25.5x (insane!)
-                STRETCH_CAP = 4.0  # Maximum allowed stretch factor
-
-                if stretch_full <= STRETCH_CAP:
-                    # Reasonable stretch, use full strength
-                    strength = 1.0
-                else:
-                    # Excessive stretch - blend to cap it
-                    # effective_stretch = 1 + strength * (stretch_full - 1) = STRETCH_CAP
-                    # solving for strength: strength = (STRETCH_CAP - 1) / (stretch_full - 1)
-                    strength = (STRETCH_CAP - 1.0) / (stretch_full - 1.0)
-                    strength = max(0.0, min(1.0, strength))
-
-                log.debug(
-                    f"Auto levels: p_low={p_low:.1f}, p_high={p_high:.1f}, "
-                    f"range={dynamic_range:.1f}, stretch_full={stretch_full:.2f}, strength={strength:.3f}"
-                )
-        else:
-            strength = self.auto_level_strength
-
-        # Apply strength scaling to blacks and whites parameters
-        blacks *= strength
-        whites *= strength
-
-        # Detect no-op before applying: flat image or already full range
-        dynamic_range = p_high - p_low
-        if dynamic_range < 1.0:
-            msg = "Auto levels: no change (flat image)"
-            self.update_status_message(f"{msg} (preview only)", timeout=9000)
-            self._last_auto_levels_msg = msg
-            return False
-        if p_low <= 0 and p_high >= 255:
-            msg = "Auto levels: no change (already full range)"
-            self.update_status_message(f"{msg} (preview only)", timeout=9000)
-            self._last_auto_levels_msg = msg
-            return False
-
-        # Apply scaled values
-        self.image_editor.set_edit_param("blacks", blacks)
-        self.image_editor.set_edit_param("whites", whites)
-
-        # Update UI state
-        self.ui_state.blacks = blacks
-        self.ui_state.whites = whites
-
-        # Trigger preview update
-        self.ui_state.currentImageSourceChanged.emit()
-
-        if self.ui_state.isHistogramVisible:
-            self.update_histogram()
-
-        # Build detail message
-        if p_high >= 255.0:
-            msg = (
-                f"Auto levels: highlights clipped; shadows only (blacks {blacks:+.1f})"
-            )
-        elif p_low <= 0.0:
-            msg = (
-                f"Auto levels: shadows clipped; highlights only (whites {whites:+.1f})"
-            )
-        else:
-            gain = 255.0 / dynamic_range
-            msg = (
-                f"Auto levels: blacks {blacks:+.1f}, whites {whites:+.1f} "
-                f"(range {p_low:.0f}\u2013{p_high:.0f}, gain {gain:.2f})"
-            )
-
-        self._kick_preview_worker()
+        if not changed and recommendation["noop_reason"]:
+            msg = f"Auto levels: no change ({recommendation['noop_reason']})"
 
         self.update_status_message(f"{msg} (preview only)", timeout=9000)
         log.info(
             "Auto levels preview applied to %s (clip %.2f%%, str %.2f). Msg: %s",
-            filepath,
+            active_path,
             self.auto_level_threshold,
-            strength,
+            recommendation["strength"],
             msg,
         )
         t_al_end = time.perf_counter()
@@ -7752,128 +8692,168 @@ class AppController(QObject):
             int((t_al_calc - t_al_load) * 1000),
             int((t_al_end - t_al_calc) * 1000),
             int((t_al_end - t_al_start) * 1000),
-            filepath,
+            active_path,
         )
         # Store detail message for quick_auto_levels to pick up
         self._last_auto_levels_msg = msg
+        return changed
+
+    def _seed_active_auto_adjust_state(self) -> Optional[ActiveAutoAdjustState]:
+        """Create transient auto-adjust state from the current loaded image."""
+        recommendation = self._compute_auto_levels_recommendation()
+        state = self._build_active_auto_adjust_state(recommendation)
+        self._active_auto_adjust_state = state
+        return state
+
+    def _apply_and_save_active_auto_adjust(
+        self,
+        *,
+        action_type: str,
+        force_save: bool = False,
+    ) -> bool:
+        """Apply the transient auto-adjust state to edits and save once.
+
+        When ``force_save`` is True, always save even if the editor already
+        reflects the target levels. This is the path used by the debounced
+        '-' / '=' flow, where the preview step has already applied the edits
+        to the editor before the save fires.
+        """
+        state = self._active_auto_adjust_state
+        if state is None:
+            return False
+
+        blacks, whites = self._derive_auto_adjust_levels(state)
+        changed = self._apply_levels_to_editor(
+            blacks=blacks,
+            whites=whites,
+            kick_preview=False,
+        )
+        detail = self._format_auto_levels_detail(
+            p_low=state.p_low,
+            p_high=state.p_high,
+            blacks=blacks,
+            whites=whites,
+            extra_highlight_steps=state.extra_highlight_steps,
+            extra_black_steps=state.extra_black_steps,
+        )
+        self._last_auto_levels_msg = detail
+
+        if not changed and not force_save:
+            self.update_status_message(detail, timeout=9000)
+            return False
+
+        if not self._save_current_auto_adjust(
+            action_type=action_type, detail_msg=detail
+        ):
+            self._clear_active_auto_adjust_state(
+                "auto-adjust save failed",
+                clear_editor=True,
+            )
+            return False
         return True
 
     @Slot()
     def quick_auto_levels(self):
-        """Applies auto levels and immediately saves (with undo)."""
+        """Apply auto levels to the live session without saving yet."""
         if not self.image_files:
             self.update_status_message("No image to adjust")
             return
 
-        t_start = time.perf_counter()
-
-        # Pre-load with preview_only for uint8 fast path (skips float32 conversion)
-        image_file = self.image_files[self.current_index]
-        filepath = str(image_file.path)
-        if (
-            not self.image_editor.current_filepath
-            or str(self.image_editor.current_filepath) != filepath
-        ):
-            cached_preview = self.get_decoded_image(self.current_index)
-            self.image_editor.load_image(
-                filepath, cached_preview=cached_preview, preview_only=True
-            )
-
-        # Apply the preview first (loads image + sets params)
-        self._last_auto_levels_msg = ""
-        applied = self.auto_levels()
-        t_compute = time.perf_counter()
-
-        # If in auto mode and no changes were made (skipped), don't save
-        if self.auto_level_strength_auto and not applied:
-            # Status message already set by auto_levels ("No changes made...")
+        self._clear_active_auto_adjust_state(
+            "quick auto levels starts a fresh active auto-adjust state",
+            clear_editor=False,
+        )
+        if self._ensure_active_image_loaded_for_auto_adjust() is None:
             return
 
-        try:
-            # Determine save_target_path for variant saves (Policy A)
-            save_target_path = self._get_save_target_path_for_current_view()
-
-            # Try uint8 fast path first, fall back to regular save
-            save_result = self.image_editor.save_image_uint8_levels(
-                save_target_path=save_target_path
-            )
-            if save_result is None:
-                save_result = self.image_editor.save_image(
-                    save_target_path=save_target_path
-                )
-        except RuntimeError as e:
-            log.warning("quick_auto_levels: Save failed: %s", e)
-            self.update_status_message(f"Failed to save image: {e}")
+        state = self._seed_active_auto_adjust_state()
+        if state is None:
+            self.update_status_message("Auto levels failed")
             return
-        except Exception as e:
-            log.exception("quick_auto_levels: Unexpected error during save: %s", e)
-            self.update_status_message("Failed to save image")
+
+        self._apply_auto_adjust_preview(state)
+
+    @Slot()
+    def quick_auto_adjust(self):
+        """Apply AWB and auto-levels to the live session without saving yet."""
+        if not self.image_files:
+            self.update_status_message("No image to adjust")
             return
-        t_save = time.perf_counter()
 
-        if save_result:
-            saved_path, backup_path = save_result
-            metadata_path = self.image_files[self.current_index].path
-            metadata_before = self._mark_image_edited_in_sidecar(
-                self.sidecar, metadata_path
+        self._clear_active_auto_adjust_state(
+            "combined auto-adjust starts a fresh active auto-adjust state",
+            clear_editor=False,
+        )
+        if self._ensure_active_image_loaded_for_auto_adjust() is None:
+            return
+
+        # auto_white_balance() is preview-only here: it mutates the in-memory
+        # editor session and status text, but does not save or append undo.
+        awb_msg = self.auto_white_balance()
+        state = self._seed_active_auto_adjust_state()
+        if state is None:
+            self.update_status_message("Auto adjust failed")
+            return
+
+        self._apply_auto_adjust_preview(state)
+        levels_msg = self._last_auto_levels_msg
+        self._last_auto_levels_msg = levels_msg
+
+        detail_parts = [msg for msg in (awb_msg, levels_msg) if msg]
+        if detail_parts:
+            self.update_status_message(
+                "; ".join(detail_parts),
+                timeout=9000,
             )
-            timestamp = time.time()
-            self.undo_history.append(
-                (
-                    "auto_levels",
-                    self._build_edit_undo_data(
-                        saved_path,
-                        backup_path,
-                        metadata_path=metadata_path,
-                        metadata_before=metadata_before,
-                        sidecar=self.sidecar,
-                    ),
-                    timestamp,
-                )
-            )
 
-            # 2. Update list and model to pick up changes
-            self.refresh_image_list()
+    def _ensure_or_seed_active_auto_adjust_state(
+        self,
+    ) -> Optional[ActiveAutoAdjustState]:
+        """Reuse the live transient state or create a fresh one from current pixels."""
+        if self._has_valid_active_auto_adjust_state():
+            return self._active_auto_adjust_state
+        if self._ensure_active_image_loaded_for_auto_adjust() is None:
+            return None
+        return self._seed_active_auto_adjust_state()
 
-            # Force reload to ensure disk consistency
-            self.image_editor.clear()
+    @Slot()
+    def reduce_auto_adjust_highlights(self):
+        """Darken the highlight side by one fixed step in the live session."""
+        state = self._ensure_or_seed_active_auto_adjust_state()
+        if state is None:
+            return
 
-            # Re-derive current_index (backup is excluded from visible list)
-            self._reindex_after_save(saved_path)
-            t_list = time.perf_counter()
+        state.extra_highlight_steps += 1
+        self._apply_auto_adjust_preview(state)
 
-            self._bump_display_generation()
-            self.image_cache.pop_path(saved_path)
-            self.prefetcher.cancel_all()
-            self.prefetcher.update_prefetch(self.current_index)
-            self.sync_ui_state()
+    @Slot()
+    def deepen_auto_adjust_blacks(self):
+        """Deepen the shadow side by one fixed step in the live session."""
+        state = self._ensure_or_seed_active_auto_adjust_state()
+        if state is None:
+            return
 
-            if self.ui_state.isHistogramVisible:
-                self.update_histogram()
+        state.extra_black_steps += 1
+        self._apply_auto_adjust_preview(state)
 
-            t_total = time.perf_counter()
-            total_ms = int((t_total - t_start) * 1000)
-            log.debug(
-                "[AUTO_LEVEL] quick: compute=%dms save=%dms list=%dms total=%dms",
-                int((t_compute - t_start) * 1000),
-                int((t_save - t_compute) * 1000),
-                int((t_list - t_save) * 1000),
-                total_ms,
-            )
-            detail = self._last_auto_levels_msg
-            saved_msg = (
-                f"{detail} \u2014 saved ({total_ms} ms)"
-                if detail
-                else f"Auto levels applied and saved ({total_ms} ms)"
-            )
-            self.update_status_message(saved_msg, timeout=9000)
-            log.info(
-                "Quick auto levels saved for %s. New index: %d",
-                saved_path,
-                self.current_index,
-            )
-        else:
-            self.update_status_message("Failed to save image")
+    def _apply_auto_adjust_preview(self, state: ActiveAutoAdjustState) -> None:
+        """Render the current auto-adjust state into the editor/UI immediately."""
+        blacks, whites = self._derive_auto_adjust_levels(state)
+        self._apply_levels_to_editor(
+            blacks=blacks,
+            whites=whites,
+            kick_preview=True,
+        )
+        detail = self._format_auto_levels_detail(
+            p_low=state.p_low,
+            p_high=state.p_high,
+            blacks=blacks,
+            whites=whites,
+            extra_highlight_steps=state.extra_highlight_steps,
+            extra_black_steps=state.extra_black_steps,
+        )
+        self._last_auto_levels_msg = detail
+        self.update_status_message(detail, timeout=9000)
 
     def _apply_auto_levels_at_index(self, index: int) -> bool:
         """Apply auto levels and save for image at the given index.
@@ -7905,7 +8885,7 @@ class AppController(QObject):
             self._last_auto_levels_msg = ""
             applied = self.auto_levels()
 
-            if self.auto_level_strength_auto and not applied:
+            if not applied:
                 return False
 
             try:
@@ -7942,6 +8922,10 @@ class AppController(QObject):
                         timestamp,
                     )
                 )
+                self._clear_active_auto_adjust_state(
+                    "batch auto levels saved a different image",
+                    clear_editor=False,
+                )
                 self.image_editor.clear()
                 self.image_cache.pop_path(saved_path)
                 return True
@@ -7961,6 +8945,11 @@ class AppController(QObject):
         if not batch_indices:
             self.update_status_message("No images in batch.")
             return
+
+        self._clear_active_auto_adjust_state(
+            "batch auto levels replaces the current transient auto-adjust session",
+            clear_editor=True,
+        )
 
         self._batch_al_indices = batch_indices
         self._batch_al_pos = 0
@@ -8034,127 +9023,18 @@ class AppController(QObject):
 
     @Slot()
     def quick_auto_white_balance(self):
-        """Quickly apply auto white balance, save the image, and track for undo."""
+        """Quickly apply auto white balance to the live session without saving yet."""
         if not self.image_files:
             self.update_status_message("No image to adjust")
             return
 
-        t_start = time.perf_counter()
-
-        if self.view_override_path:
-            active_path = Path(self.view_override_path)
-        else:
-            active_path = self.get_active_edit_path(self.current_index)
-        filepath = str(active_path)
-
-        # Ensure image is loaded in editor (skip if already loaded)
-        editor_path = self.image_editor.current_filepath
-        paths_match = False
-        if editor_path:
-            try:
-                paths_match = Path(editor_path).resolve() == active_path.resolve()
-            except (OSError, ValueError):
-                paths_match = str(editor_path) == filepath
-
-        if not paths_match:
-            cached_preview = self.get_decoded_image(self.current_index)
-            if not self.image_editor.load_image(
-                filepath, cached_preview=cached_preview, preview_only=True
-            ):
-                self.update_status_message("Failed to load image")
-                return
-        t_load = time.perf_counter()
-
-        # Calculate and apply auto white balance
-        # Returns detail string if applied, None if no change
-        detail_msg = self.auto_white_balance()
-        t_compute = time.perf_counter()
-
-        # If no correction was needed, skip saving
-        if not detail_msg:
-            # Status message already set by auto_white_balance()
+        self._clear_active_auto_adjust_state(
+            "quick auto white balance starts a fresh live baseline",
+            clear_editor=False,
+        )
+        if self._ensure_active_image_loaded_for_auto_adjust() is None:
             return
-
-        # Save the edited image (this creates a backup automatically)
-        try:
-            save_target_path = self._get_save_target_path_for_current_view()
-            save_result = self.image_editor.save_image_uint8_white_balance(
-                save_target_path=save_target_path
-            )
-            if save_result is None:
-                save_result = self.image_editor.save_image(
-                    save_target_path=save_target_path
-                )
-        except RuntimeError as e:
-            log.warning("quick_auto_white_balance: Save failed: %s", e)
-            self.update_status_message(f"Failed to save image: {e}")
-            return
-        except Exception as e:
-            log.exception(
-                "quick_auto_white_balance: Unexpected error during save: %s", e
-            )
-            self.update_status_message("Failed to save image")
-            return
-        t_save = time.perf_counter()
-
-        if save_result:
-            saved_path, backup_path = save_result
-            timestamp = time.time()
-            metadata_path = self.image_files[self.current_index].path
-            metadata_before = self._mark_image_edited_in_sidecar(
-                self.sidecar, metadata_path
-            )
-
-            # 2. Update list and model to pick up changes
-            self.refresh_image_list()
-
-            # Re-derive current_index
-            self._reindex_after_save(saved_path)
-
-            self.undo_history.append(
-                (
-                    "auto_white_balance",
-                    self._build_edit_undo_data(
-                        saved_path,
-                        backup_path,
-                        metadata_path=metadata_path,
-                        metadata_before=metadata_before,
-                        sidecar=self.sidecar,
-                    ),
-                    timestamp,
-                )
-            )
-
-            # Force the image editor to clear its current state so it reloads fresh
-            self.image_editor.clear()
-
-            t_list = time.perf_counter()
-
-            # Invalidate cache for the edited image so it's reloaded from disk
-            self._bump_display_generation()
-            self.image_cache.pop_path(saved_path)
-            self.prefetcher.cancel_all()
-            self.prefetcher.update_prefetch(self.current_index)
-            self.sync_ui_state()
-
-            # Update histogram if visible
-            if self.ui_state.isHistogramVisible:
-                self.update_histogram()
-
-            t_total = time.perf_counter()
-            total_ms = int((t_total - t_start) * 1000)
-            log.debug(
-                "[AUTO_COLOR] quick: load=%dms compute=%dms save=%dms list=%dms total=%dms",
-                int((t_load - t_start) * 1000),
-                int((t_compute - t_load) * 1000),
-                int((t_save - t_compute) * 1000),
-                int((t_list - t_save) * 1000),
-                total_ms,
-            )
-            self.update_status_message(f"{detail_msg} \u2014 saved ({total_ms} ms)")
-            log.info("Quick auto white balance applied to %s", filepath)
-        else:
-            self.update_status_message("Failed to save image")
+        self.auto_white_balance()
 
     @Slot()
     def auto_white_balance(self) -> Optional[str]:

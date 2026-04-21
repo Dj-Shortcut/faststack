@@ -72,8 +72,31 @@ class ImageProvider(QQuickImageProvider):
             # AND the generation matches (to avoid stale frames during rotation/param changes)
             # FIX: If zoomed in, force full-res image instead of low-res preview
 
+            # Also accept the editor-rendered preview when an auto-adjust
+            # session is live (rapid '-' / '=' before the debounced save),
+            # so the main loupe visibly tracks each keypress.
+            has_active_auto_adjust = (
+                getattr(self.app_controller, "_active_auto_adjust_state", None)
+                is not None
+            )
+            # Also accept the editor-rendered preview when the live edit
+            # session holds meaningful edits (e.g. a crop applied outside the
+            # editor), so the main loupe reflects those edits immediately.
+            has_live_edits = False
+            live_check = getattr(
+                self.app_controller, "_current_live_session_has_meaningful_edits", None
+            )
+            if callable(live_check):
+                try:
+                    has_live_edits = bool(live_check())
+                except Exception:
+                    has_live_edits = False
             use_editor_preview = (
-                self.app_controller.ui_state.isEditorOpen
+                (
+                    self.app_controller.ui_state.isEditorOpen
+                    or has_active_auto_adjust
+                    or has_live_edits
+                )
                 and index == self.app_controller.current_index
                 and not self.app_controller.ui_state.isZoomed
                 and self.app_controller._last_rendered_preview is not None
@@ -121,8 +144,9 @@ class ImageProvider(QQuickImageProvider):
                 # For standard browsing/prefetch, the buffer is stable enough.
                 if (
                     self.app_controller.ui_state.isEditorOpen
-                    and index == self.app_controller.current_index
-                ):
+                    or has_active_auto_adjust
+                    or has_live_edits
+                ) and index == self.app_controller.current_index:
                     qimg = qimg.copy()
                 else:
                     # SAFETY: Keep a reference to the underlying buffer to prevent garbage collection
@@ -768,6 +792,10 @@ class UIState(QObject):
     @Slot()
     def addUploadedToBatch(self):
         self.app_controller.add_uploaded_to_batch()
+
+    @Slot()
+    def addEditedToBatch(self):
+        self.app_controller.add_edited_to_batch()
 
     @Slot()
     def jumpToLastUploaded(self):

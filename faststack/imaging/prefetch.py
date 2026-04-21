@@ -555,10 +555,13 @@ class Prefetcher:
                                             display_width,
                                             display_height,
                                             fast_dct=fast_dct,
+                                            source_path=str(target_path),
                                         )
                                     else:
                                         buffer = decode_jpeg_rgb(
-                                            mmapped, fast_dct=fast_dct
+                                            mmapped,
+                                            fast_dct=fast_dct,
+                                            source_path=str(target_path),
                                         )
                                         if buffer is not None and should_resize:
                                             img = PILImage.fromarray(buffer)
@@ -673,9 +676,14 @@ class Prefetcher:
                                         display_width,
                                         display_height,
                                         fast_dct=fast_dct,
+                                        source_path=str(target_path),
                                     )
                                 else:
-                                    buffer = decode_jpeg_rgb(mmapped, fast_dct=fast_dct)
+                                    buffer = decode_jpeg_rgb(
+                                        mmapped,
+                                        fast_dct=fast_dct,
+                                        source_path=str(target_path),
+                                    )
                                     if buffer is not None and should_resize:
                                         img = PILImage.fromarray(buffer)
                                         img.thumbnail(

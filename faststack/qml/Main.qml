@@ -65,17 +65,21 @@ ApplicationWindow {
     }
 
     onClosing: function(close) {
-        if (root.allowCloseWithRecycleBins) {
-            close.accepted = true
-            return
-        }
-        if (root.uiStateRef && root.uiStateRef.hasRecycleBinItems) {
+        if (!root.allowCloseWithRecycleBins
+                && root.uiStateRef
+                && root.uiStateRef.hasRecycleBinItems) {
             close.accepted = false
             root.uiStateRef.refreshRecycleBinStats()
             recycleBinCleanupDialog.open()
-        } else {
-            close.accepted = true
+            return
         }
+
+        if (root.controllerRef && !root.controllerRef.prepare_for_app_close()) {
+            close.accepted = false
+            return
+        }
+
+        close.accepted = true
     }
 
     Component.onCompleted: {
@@ -922,6 +926,16 @@ ApplicationWindow {
             }
             MenuActionItem {
                 width: 220
+                text: "Add Edited to Batch"
+                hoverFillColor: root.menuHoverColor
+                defaultTextColor: root.currentTextColor
+                onClicked: {
+                    if (root.uiStateRef) root.uiStateRef.addEditedToBatch()
+                    actionsMenu.close()
+                }
+            }
+            MenuActionItem {
+                width: 220
                 text: "Jump to Last Uploaded"
                 hoverFillColor: root.menuHoverColor
                 defaultTextColor: root.currentTextColor
@@ -1684,16 +1698,19 @@ ApplicationWindow {
                           "&nbsp;&nbsp;Ctrl+S: Toggle stacked flag<br><br>" +
                           "<b>File Management:</b><br>" +
                           "&nbsp;&nbsp;Delete/Backspace: Move current image to recycle bin<br>" +
-                          "&nbsp;&nbsp;Ctrl+Z: Undo last action<br><br>" +
+                          "&nbsp;&nbsp;Ctrl+Z: Undo last saved action<br><br>" +
                           "<b>Image Editing:</b><br>" +
                           "&nbsp;&nbsp;E: Toggle Image Editor<br>" +
-                          "&nbsp;&nbsp;Ctrl+S (in editor): Save edited image<br>" +
-                          "&nbsp;&nbsp;A: Quick auto white balance<br>" +
-                          "&nbsp;&nbsp;L: Quick auto levels<br>" +
+                          "&nbsp;&nbsp;Ctrl+S (in editor): Save current live edits<br>" +
+                          "&nbsp;&nbsp;A: Quick auto white balance (live)<br>" +
+                          "&nbsp;&nbsp;l: Quick auto levels (live)<br>" +
+                          "&nbsp;&nbsp;L: Quick auto white balance + auto levels (live)<br>" +
+                          "&nbsp;&nbsp;-: Darken current auto-adjust highlights/whites (live)<br>" +
+                          "&nbsp;&nbsp;=: Deepen current auto-adjust shadows/background (live)<br>" +
                           "&nbsp;&nbsp;K: Background Darkening Tool<br>" +
                           "&nbsp;&nbsp;O (or right-click): Toggle crop mode<br>" +
                           "&nbsp;&nbsp;&nbsp;&nbsp;1/2/3/4: Set aspect ratio (1:1, 4:3, 3:2, 16:9)<br>" +
-                          "&nbsp;&nbsp;&nbsp;&nbsp;Enter: Execute crop<br>" +
+                          "&nbsp;&nbsp;&nbsp;&nbsp;Enter: Apply crop to live session<br>" +
                           "&nbsp;&nbsp;&nbsp;&nbsp;Esc: Cancel crop<br><br>" +
                           "<b>Other Actions:</b><br>" +
                           "&nbsp;&nbsp;Enter: Launch Helicon Focus<br>" +
