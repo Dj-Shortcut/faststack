@@ -289,14 +289,10 @@ def _find_raw_pair(
     if not potential_raws:
         return None
 
-    # Find the RAW file with the closest modification time within a 2-second window
-    best_match: Path | None = None
-    min_dt = 2.0  # seconds
+    if len(potential_raws) == 1:
+        return potential_raws[0][0]
 
-    for raw_path, raw_stat in potential_raws:
-        dt = abs(jpg_stat.st_mtime - raw_stat.st_mtime)
-        if dt <= min_dt:
-            min_dt = dt
-            best_match = raw_path
-
-    return best_match
+    return min(
+        potential_raws,
+        key=lambda candidate: abs(jpg_stat.st_mtime - candidate[1].st_mtime),
+    )[0]

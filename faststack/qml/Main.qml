@@ -65,17 +65,21 @@ ApplicationWindow {
     }
 
     onClosing: function(close) {
-        if (root.allowCloseWithRecycleBins) {
-            close.accepted = true
-            return
-        }
-        if (root.uiStateRef && root.uiStateRef.hasRecycleBinItems) {
+        if (!root.allowCloseWithRecycleBins
+                && root.uiStateRef
+                && root.uiStateRef.hasRecycleBinItems) {
             close.accepted = false
             root.uiStateRef.refreshRecycleBinStats()
             recycleBinCleanupDialog.open()
-        } else {
-            close.accepted = true
+            return
         }
+
+        if (root.controllerRef && !root.controllerRef.prepare_for_app_close()) {
+            close.accepted = false
+            return
+        }
+
+        close.accepted = true
     }
 
     Component.onCompleted: {

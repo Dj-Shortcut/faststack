@@ -279,6 +279,9 @@ class AppController(QObject):
         # for a session the user has navigated away from fails permanently;
         # flushed synchronously on shutdown so unsaved edits are not lost.
         self._pending_save_recovery: Dict[str, dict] = {}
+        self._latest_save_tokens: Dict[str, Any] = {}
+        self._last_save_prepare_error: Optional[str] = None
+        self._shutdown_flush_prepared = False
 
         # Deferred-init state: set to safe defaults, populated later by their methods
         self._saves_in_flight: Dict[str, int] = {}
@@ -574,26 +577,41 @@ class AppController(QObject):
                         timeout=8000,
                     )
         else:
+            keep_preview = False
             # Cleanup large memory buffers when editor closes
             if self.image_editor:
+                session_info = self._get_current_live_edit_session_info()
                 # If a save is active for this session, preserve the memory
                 # so the user can re-open/retry if the background task fails.
-                current_key = (
-                    self._key(self.image_editor.current_filepath)
-                    if self.image_editor.current_filepath
-                    else None
-                )
-                if current_key and current_key in self._saving_keys:
+                current_key = None
+                if 0 <= self.current_index < len(self.image_files):
+                    try:
+                        current_key = self._key(self.image_files[self.current_index].path)
+                    except (OSError, TypeError, ValueError):
+                        current_key = None
+                if current_key is None and session_info is not None:
+                    current_key = session_info[0]
+                elif current_key is None and self.image_editor.current_filepath:
+                    try:
+                        current_key = self._key(self.image_editor.current_filepath)
+                    except (OSError, TypeError, ValueError):
+                        current_key = None
+
+                save_in_progress = bool(current_key and current_key in self._saving_keys)
+                keep_preview = save_in_progress or self._is_current_live_edit_session_dirty()
+                if save_in_progress:
                     log.debug(
                         "Editor closed but save in progress for %s; keeping session memory",
                         current_key,
                     )
+                elif keep_preview:
+                    log.debug("Editor closed with unsaved live edits; keeping preview")
                 else:
                     log.debug("Editor closed, preserving live editor session")
 
-            # Also clear the cached preview rendering
-            with self._preview_lock:
-                self._last_rendered_preview = None
+            if not keep_preview:
+                with self._preview_lock:
+                    self._last_rendered_preview = None
 
     def is_valid_working_tif(self, path: Path) -> bool:
         """Checks if a working TIFF path is valid for editing."""
@@ -1920,6 +1938,11 @@ class AppController(QObject):
         """Return True when the current editor session would change persisted pixels."""
         if self.image_editor is None:
             return False
+        if (
+            self.image_editor.current_filepath is None
+            or self.image_editor.original_image is None
+        ):
+            return False
 
         edits = getattr(self.image_editor, "current_edits", None) or {}
         numeric_keys = (
@@ -2039,6 +2062,37 @@ class AppController(QObject):
             and revision >= state.submitted_revision
         ):
             state.submitted_revision = state.persisted_revision
+
+    def _note_latest_save_token(
+        self,
+        *,
+        target: Optional[str],
+        session_token: Any,
+    ) -> None:
+        """Record the newest captured save token for a target path."""
+        if target and session_token is not None:
+            self._latest_save_tokens[target] = session_token
+
+    def _save_target_is_in_flight(self, target: Optional[str]) -> bool:
+        """Return True when a save is already active for the resolved target path."""
+        return bool(target and self._saves_in_flight.get(target, 0) > 0)
+
+    def _reject_save_while_target_busy(
+        self,
+        *,
+        target: Optional[str],
+        session_token: Any,
+        status_message: Optional[str],
+    ) -> bool:
+        """Decline a save when another request for the same target is already active."""
+        if not self._save_target_is_in_flight(target):
+            return False
+
+        self._note_latest_save_token(target=target, session_token=session_token)
+        log.info("Skipping save request for %s; another save is already in flight", target)
+        if status_message:
+            self.update_status_message(status_message, timeout=3000)
+        return True
 
     def _increment_save_tracking(
         self,
@@ -2449,6 +2503,7 @@ class AppController(QObject):
         success_message: Optional[str],
     ) -> Optional[dict[str, Any]]:
         """Capture an immutable save request for the current live editor session."""
+        self._last_save_prepare_error = None
         if not self.image_editor.original_image:
             return None
 
@@ -2474,12 +2529,6 @@ class AppController(QObject):
         if write_sidecar and 0 <= self.current_index < len(self.image_files):
             dev_path = self.image_files[self.current_index].developed_jpg_path
 
-        export_snapshot = self.image_editor.snapshot_for_export(
-            write_developed_jpg=write_sidecar,
-            developed_path=dev_path,
-            save_target_path=save_target_path,
-        )
-
         save_image_key = (
             self._key(self.image_files[self.current_index].path)
             if 0 <= self.current_index < len(self.image_files)
@@ -2491,6 +2540,28 @@ class AppController(QObject):
             self.image_editor.session_id if self.image_editor else None,
             save_revision,
         )
+        try:
+            export_snapshot = self.image_editor.snapshot_for_export(
+                write_developed_jpg=write_sidecar,
+                developed_path=dev_path,
+                save_target_path=save_target_path,
+            )
+        except RuntimeError as e:
+            self._last_save_prepare_error = f"Failed to prepare save: {e}"
+            log.warning("Failed to capture save snapshot for %s: %s", effective_target, e)
+            self.update_status_message(self._last_save_prepare_error, timeout=5000)
+            return None
+        except Exception as e:
+            self._last_save_prepare_error = "Failed to prepare save"
+            log.exception(
+                "Unexpected error capturing save snapshot for %s: %s",
+                effective_target,
+                e,
+            )
+            self.update_status_message(self._last_save_prepare_error, timeout=5000)
+            return None
+
+        self._note_latest_save_token(target=effective_target, session_token=session_token)
         save_metadata_path = (
             self.image_files[self.current_index].path
             if 0 <= self.current_index < len(self.image_files)
@@ -2531,6 +2602,14 @@ class AppController(QObject):
         export_snapshot = request["snapshot"]
         target = context.get("target")
         save_image_key = context.get("save_image_key")
+        session_token = context.get("session_token")
+
+        if self._reject_save_while_target_busy(
+            target=target,
+            session_token=session_token,
+            status_message="Save already in progress for this image.",
+        ):
+            return False
 
         self._increment_save_tracking(target=target, save_image_key=save_image_key)
         self._mark_current_live_edit_session_submitted(context["save_revision"])
@@ -2611,6 +2690,25 @@ class AppController(QObject):
         export_snapshot = request["snapshot"]
         target = context.get("target")
         save_image_key = context.get("save_image_key")
+        session_token = context.get("session_token")
+
+        if self._reject_save_while_target_busy(
+            target=target,
+            session_token=session_token,
+            status_message=(
+                "Save already in progress for this image."
+                if saving_status is not None
+                else None
+            ),
+        ):
+            if saving_status is None and target:
+                self._pending_save_recovery[target] = request
+                log.info(
+                    "Deferring latest save for %s until shutdown recovery; "
+                    "an older save is still in flight",
+                    target,
+                )
+            return False
 
         self._increment_save_tracking(target=target, save_image_key=save_image_key)
         self._mark_current_live_edit_session_submitted(context["save_revision"])
@@ -2652,7 +2750,7 @@ class AppController(QObject):
             success_message=None,
         )
         if request is None:
-            return True
+            return self._last_save_prepare_error is None
         return self._submit_save_request_async(request)
 
     def _flush_current_live_edit_session_for_drag(
@@ -2666,8 +2764,31 @@ class AppController(QObject):
             success_message=None,
         )
         if request is None:
-            return True
+            return self._last_save_prepare_error is None
         return self._run_save_request_sync(request, saving_status=saving_status)
+
+    @Slot(result=bool)
+    def prepare_for_app_close(self) -> bool:
+        """Flush the live session before allowing the main window to close."""
+        if self._shutting_down:
+            return True
+
+        self._shutdown_flush_prepared = False
+        request = self._prepare_current_session_save_request(
+            editor_was_open=False,
+            success_message=None,
+        )
+        if request is None:
+            return self._last_save_prepare_error is None
+
+        target = request.get("context", {}).get("target")
+        if self._run_save_request_sync(request, saving_status=None):
+            self._shutdown_flush_prepared = True
+            return True
+        if target and self._pending_save_recovery.get(target) is request:
+            self._shutdown_flush_prepared = True
+            return True
+        return False
 
     @Slot()
     def save_edited_image(self):
@@ -2677,6 +2798,8 @@ class AppController(QObject):
             success_message="Image saved",
         )
         if request is None:
+            if self._last_save_prepare_error is not None:
+                return
             self.update_status_message("No unsaved edits to save", timeout=3000)
             return
 
@@ -2735,6 +2858,18 @@ class AppController(QObject):
             attempts = (
                 int(request.get("attempts", 1)) if isinstance(request, dict) else 1
             )
+            latest_save_token = (
+                self._latest_save_tokens.get(target)
+                if target and save_session_token is not None
+                else None
+            )
+            if latest_save_token is not None and latest_save_token != save_session_token:
+                log.info(
+                    "Skipping retry for stale save request %s (rev=%s); newer save token exists",
+                    target,
+                    save_revision,
+                )
+                return
             # The captured snapshot is fully self-contained — auto-retry once
             # before declaring permanent failure. If the user has navigated away
             # we still need to preserve the snapshot so edits aren't lost.
@@ -6412,36 +6547,19 @@ class AppController(QObject):
         """Shutdown Qt objects only - MUST run on main/Qt thread."""
         # Persist the current live edit session before tearing down Qt so
         # preview-only quick actions and editor changes are not lost on exit.
-        try:
-            self._flush_current_live_edit_session_for_drag(saving_status=None)
-        except Exception:
-            log.exception("Failed to flush live edit session on shutdown")
-
-        # Final attempt to persist snapshots whose background save previously
-        # failed for an image the user had already navigated away from.
-        # Mirrors the minimum sidecar bookkeeping from _on_save_finished so
-        # the next launch sees these files as edited; UI/undo refresh is
-        # deliberately skipped (we are tearing down).
-        for tgt, req in list(self._pending_save_recovery.items()):
+        if not self._shutdown_flush_prepared:
             try:
-                self.image_editor.save_from_snapshot(req["snapshot"])
-            except Exception:
-                log.exception("Final shutdown retry failed for %s", tgt)
-                continue
-            try:
-                ctx = req.get("context", {})
-                meta_path_str = ctx.get("save_metadata_path") or tgt
-                meta_sidecar = ctx.get("save_sidecar") or self.sidecar
-                if meta_path_str and meta_sidecar is not None:
-                    self._mark_image_edited_in_sidecar(
-                        meta_sidecar, Path(meta_path_str)
-                    )
-                log.info("Recovered pending save for %s on shutdown", tgt)
-            except Exception:
-                log.exception(
-                    "Recovered save for %s but sidecar bookkeeping failed", tgt
+                flushed = self._flush_current_live_edit_session_for_drag(
+                    saving_status=None
                 )
-        self._pending_save_recovery.clear()
+                if not flushed and self._last_save_prepare_error is not None:
+                    log.error(
+                        "Shutdown proceeding without a live-session flush: %s",
+                        self._last_save_prepare_error,
+                    )
+            except Exception:
+                log.exception("Failed to flush live edit session on shutdown")
+        self._shutdown_flush_prepared = False
 
         self._shutting_down = True  # set EARLY to make all slots no-op
         self._exif_pending_path = None
@@ -6547,6 +6665,31 @@ class AppController(QObject):
         self._safe_shutdown_executor(
             self._delete_executor, "delete", wait=True, cancel_futures=False
         )
+
+        # Final attempt to persist snapshots whose background save previously
+        # failed, or whose latest revision was deferred at shutdown because an
+        # older save for the same target was still in flight. Run this only
+        # after the save executor drains so we do not race the same file twice.
+        for tgt, req in list(self._pending_save_recovery.items()):
+            try:
+                self.image_editor.save_from_snapshot(req["snapshot"])
+            except Exception:
+                log.exception("Final shutdown retry failed for %s", tgt)
+                continue
+            try:
+                ctx = req.get("context", {})
+                meta_path_str = ctx.get("save_metadata_path") or tgt
+                meta_sidecar = ctx.get("save_sidecar") or self.sidecar
+                if meta_path_str and meta_sidecar is not None:
+                    self._mark_image_edited_in_sidecar(
+                        meta_sidecar, Path(meta_path_str)
+                    )
+                log.info("Recovered pending save for %s on shutdown", tgt)
+            except Exception:
+                log.exception(
+                    "Recovered save for %s but sidecar bookkeeping failed", tgt
+                )
+        self._pending_save_recovery.clear()
 
         # Shutdown prefetcher
         try:
