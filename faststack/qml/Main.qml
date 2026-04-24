@@ -19,6 +19,7 @@ ApplicationWindow {
     property var uiStateRef: null
     property var controllerRef: null
     property bool allowCloseWithRecycleBins: false
+    property bool allowCloseWithBatches: false
     property bool fullScreenLoupe: false
     property var savedWindowGeometry: ({})
 
@@ -72,6 +73,16 @@ ApplicationWindow {
             root.uiStateRef.refreshRecycleBinStats()
             recycleBinCleanupDialog.open()
             return
+        }
+
+        if (!root.allowCloseWithBatches && root.controllerRef) {
+            var definedBatchCount = root.controllerRef.get_defined_batch_count()
+            if (definedBatchCount > 0) {
+                close.accepted = false
+                quitBatchesDialog.batchCount = definedBatchCount
+                quitBatchesDialog.open()
+                return
+            }
         }
 
         if (root.controllerRef && !root.controllerRef.prepare_for_app_close()) {
@@ -1706,6 +1717,7 @@ ApplicationWindow {
                           "&nbsp;&nbsp;l: Quick auto levels (live)<br>" +
                           "&nbsp;&nbsp;L: Quick auto white balance + auto levels (live)<br>" +
                           "&nbsp;&nbsp;-: Darken current auto-adjust highlights/whites (live)<br>" +
+                          "&nbsp;&nbsp;_: Raise current auto-adjust whites (live)<br>" +
                           "&nbsp;&nbsp;=: Deepen current auto-adjust shadows/background (live)<br>" +
                           "&nbsp;&nbsp;K: Background Darkening Tool<br>" +
                           "&nbsp;&nbsp;O (or right-click): Toggle crop mode<br>" +
@@ -1772,6 +1784,17 @@ ApplicationWindow {
         id: deleteBatchDialog
         backgroundColor: root.currentBackgroundColor
         textColor: root.currentTextColor
+    }
+
+    QuitBatchesDialog {
+        id: quitBatchesDialog
+        backgroundColor: root.currentBackgroundColor
+        textColor: root.currentTextColor
+        controllerRef: root.controllerRef
+        onQuitConfirmed: {
+            root.allowCloseWithBatches = true
+            Qt.quit()
+        }
     }
     
     HistogramWindow {

@@ -110,7 +110,7 @@ from faststack.deletion_types import (
 # LABEL: below this the direction word becomes "neutral" in the status message.
 _AWB_NOOP_EPS = 0.005
 _AWB_LABEL_EPS = 0.002
-_AUTO_ADJUST_HIGHLIGHT_STEP = 0.07
+_AUTO_ADJUST_HIGHLIGHT_STEP = 0.14
 _AUTO_ADJUST_BLACK_STEP = 0.07
 
 
@@ -2337,10 +2337,18 @@ class AppController(QObject):
             )
 
         suffixes = []
+        highlight_step_points = round(_AUTO_ADJUST_HIGHLIGHT_STEP * 100)
         if extra_highlight_steps > 0:
-            suffixes.append(f"highlights -{extra_highlight_steps * 7}pt")
+            suffixes.append(
+                f"highlights -{extra_highlight_steps * highlight_step_points}pt"
+            )
+        elif extra_highlight_steps < 0:
+            suffixes.append(
+                f"whites +{-extra_highlight_steps * highlight_step_points}pt"
+            )
+        black_step_points = round(_AUTO_ADJUST_BLACK_STEP * 100)
         if extra_black_steps > 0:
-            suffixes.append(f"blacks -{extra_black_steps * 7}pt")
+            suffixes.append(f"blacks -{extra_black_steps * black_step_points}pt")
         if suffixes:
             msg = f"{msg}; {', '.join(suffixes)}"
         return msg
@@ -5135,6 +5143,21 @@ class AppController(QObject):
                 return total_count
 
         return 0
+
+    @Slot(result=int)
+    def get_defined_batch_count(self) -> int:
+        """Return the total number of valid image indices in defined batches."""
+        if not self.image_files:
+            return 0
+
+        max_index = len(self.image_files) - 1
+        total_count = 0
+        for start, end in self.batches:
+            clamped_start = max(0, min(start, max_index))
+            clamped_end = max(0, min(end, max_index))
+            if clamped_start <= clamped_end:
+                total_count += clamped_end - clamped_start + 1
+        return total_count
 
     @staticmethod
     def _move_to_recycle(
@@ -8810,6 +8833,16 @@ class AppController(QObject):
             return
 
         state.extra_highlight_steps += 1
+        self._apply_auto_adjust_preview(state)
+
+    @Slot()
+    def raise_auto_adjust_whites(self):
+        """Raise the white side by one fixed step in the live session."""
+        state = self._ensure_or_seed_active_auto_adjust_state()
+        if state is None:
+            return
+
+        state.extra_highlight_steps -= 1
         self._apply_auto_adjust_preview(state)
 
     @Slot()

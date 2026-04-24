@@ -142,7 +142,8 @@ If you do nothing, FastStack will still run, but JPEG decoding and thumbnail gen
 - `Ctrl+Shift+B`: Quick auto white balance (alternate)
 - `l`: Quick auto levels (live session; saved on navigation, drag, or Ctrl+S)
 - `L`: Quick auto white balance + auto levels (live session; saved on navigation, drag, or Ctrl+S)
-- `-`: Darken the current auto-adjust highlights/whites by 7 points in the live session
+- `-`: Darken the current auto-adjust highlights/whites by 14 points in the live session
+- `_`: Raise the current auto-adjust whites by 14 points in the live session
 - `=`: Deepen the current auto-adjust shadows/background by 7 points in the live session
 - `E`: Toggle Image Editor
 - `Esc`: Close active dialog, editor, cancel crop, or exit fullscreen

@@ -121,11 +121,17 @@ class Keybinder:
             if text == "-":
                 self._call("reduce_auto_adjust_highlights")
                 return True
+            if text == "_":
+                self._call("raise_auto_adjust_whites")
+                return True
             if text == "=":
                 self._call("deepen_auto_adjust_blacks")
                 return True
             if key == Qt.Key_Minus and modifiers == Qt.NoModifier:
                 self._call("reduce_auto_adjust_highlights")
+                return True
+            if key == Qt.Key_Underscore:
+                self._call("raise_auto_adjust_whites")
                 return True
             if key == Qt.Key_Equal and modifiers == Qt.NoModifier:
                 self._call("deepen_auto_adjust_blacks")
