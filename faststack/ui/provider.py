@@ -1725,9 +1725,16 @@ class UIState(QObject):
         ):
             self.app_controller._thumbnail_prefetcher.cancel_all()
 
-    @Slot(int, int, int)
-    def gridPrefetchRange(self, startIndex: int, endIndex: int, maxCount: int = 800):
-        """Prefetch thumbnails for the given index range with budget and duplicate suppression."""
+    @Slot(int, int, int, int, int)
+    def gridPrefetchRange(
+        self,
+        startIndex: int,
+        endIndex: int,
+        maxCount: int = 800,
+        visibleStartIndex: int = -1,
+        visibleEndIndex: int = -1,
+    ):
+        """Prefetch thumbnails, prioritizing the current visible subrange."""
         if (
             not hasattr(self.app_controller, "_thumbnail_model")
             or not self.app_controller._thumbnail_model
@@ -1754,9 +1761,23 @@ class UIState(QObject):
         if startIndex > endIndex:
             return
 
+        has_visible_range = visibleStartIndex >= 0 and visibleEndIndex >= 0
+        if has_visible_range:
+            visibleStartIndex = max(0, min(visibleStartIndex, rowCount - 1))
+            visibleEndIndex = max(0, min(visibleEndIndex, rowCount - 1))
+            visibleStartIndex = max(startIndex, visibleStartIndex)
+            visibleEndIndex = min(endIndex, visibleEndIndex)
+            has_visible_range = visibleStartIndex <= visibleEndIndex
+
         # 2. Duplicate Suppression
         now = self._clock()
-        current_req = (startIndex, endIndex, maxCount)
+        current_req = (
+            startIndex,
+            endIndex,
+            maxCount,
+            visibleStartIndex if has_visible_range else -1,
+            visibleEndIndex if has_visible_range else -1,
+        )
         if (
             current_req == self._last_prefetch_data
             and (now - self._last_prefetch_time) < 0.030
@@ -1770,21 +1791,42 @@ class UIState(QObject):
         HARD_LIMIT = 800
         budget = max(1, min(maxCount, HARD_LIMIT))
 
-        # Trim endIndex if the requested range exceeds the budget
-        if (endIndex - startIndex + 1) > budget:
-            endIndex = startIndex + budget - 1
-
-        # Submit prefetch jobs for visible range
         # Defensive fallback if thumbnail_size is refactored away
         size = getattr(model, "thumbnail_size", None) or getattr(
             prefetcher, "_target_size", None
         )
-        for i in range(startIndex, endIndex + 1):
-            entry = model.get_entry(i)
-            if entry and not entry.is_folder:
-                prefetcher.submit(
-                    entry.path, entry.mtime_ns, size=size, priority=prefetcher.PRIO_MED
-                )
+        high_priority = getattr(prefetcher, "PRIO_HIGH", 0)
+        medium_priority = getattr(prefetcher, "PRIO_MED", 1)
+
+        def submit_in_lifo_order(indices: list[int], priority: int) -> None:
+            # PriorityExecutor is LIFO within a priority. Submit in reverse of
+            # desired display order so the first visible cell is decoded first.
+            for i in reversed(indices):
+                entry = model.get_entry(i)
+                if entry and not entry.is_folder:
+                    prefetcher.submit(
+                        entry.path,
+                        entry.mtime_ns,
+                        size=size,
+                        priority=priority,
+                    )
+
+        if has_visible_range:
+            visible_indices = list(range(visibleStartIndex, visibleEndIndex + 1))
+            submit_in_lifo_order(visible_indices, high_priority)
+
+            remaining_budget = max(0, budget - len(visible_indices))
+            if remaining_budget <= 0:
+                return
+
+            below_indices = list(range(visibleEndIndex + 1, endIndex + 1))
+            above_indices = list(range(visibleStartIndex - 1, startIndex - 1, -1))
+            medium_indices = (below_indices + above_indices)[:remaining_budget]
+            submit_in_lifo_order(medium_indices, medium_priority)
+            return
+
+        indices = list(range(startIndex, min(endIndex, startIndex + budget - 1) + 1))
+        submit_in_lifo_order(indices, medium_priority)
 
     @Property(str, notify=recycleBinStatsTextChanged)
     def recycleBinStatsText(self):

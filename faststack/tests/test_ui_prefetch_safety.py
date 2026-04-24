@@ -16,6 +16,7 @@ class TestUIPrefetchSafety(unittest.TestCase):
         self.app_controller._thumbnail_prefetcher = self.prefetcher
 
         # Mock prefetcher constants
+        self.prefetcher.PRIO_HIGH = 0
         self.prefetcher.PRIO_MED = 1
 
         # Fake clock state
@@ -93,6 +94,26 @@ class TestUIPrefetchSafety(unittest.TestCase):
         # Should be clamped to [0, 4999], then budgeted to [0, 99]
         self.ui_state.gridPrefetchRange(-10, 10000, 100)
         self.assertEqual(self.prefetcher.submit.call_count, 100)
+
+    def test_visible_range_is_submitted_first_at_high_priority(self):
+        """Visible rows should not sit behind scroll-ahead thumbnail work."""
+        self.model.rowCount.return_value = 20
+
+        self.ui_state.gridPrefetchRange(0, 9, 10, 2, 4)
+
+        calls = self.prefetcher.submit.call_args_list
+        submitted_names = [call.args[0].name for call in calls[:3]]
+        submitted_priorities = [call.kwargs["priority"] for call in calls[:3]]
+
+        # Submitted in reverse because PriorityExecutor is LIFO within priority.
+        self.assertEqual(submitted_names, ["image_4.jpg", "image_3.jpg", "image_2.jpg"])
+        self.assertEqual(submitted_priorities, [self.prefetcher.PRIO_HIGH] * 3)
+        self.assertTrue(
+            all(
+                call.kwargs["priority"] == self.prefetcher.PRIO_MED
+                for call in calls[3:]
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -697,13 +697,7 @@ class AppController(QObject):
             self._thumbnail_model.set_filter_flags(flags, refresh=False)
 
         if self._is_grid_view_active and self._thumbnail_model:
-            self._grid_refreshes += 1
-            self._thumbnail_model.refresh_from_controller(
-                self.image_files,
-                metadata_map_fn=self._get_bulk_metadata_map,
-            )
-            self._path_resolver.update_from_model(self._thumbnail_model)
-            self._grid_model_dirty = False
+            self._refresh_thumbnail_model_from_controller()
         else:
             self._grid_model_dirty = True
 
@@ -748,13 +742,7 @@ class AppController(QObject):
             self._thumbnail_model.set_filter_flags([], refresh=False)
 
         if self._is_grid_view_active and self._thumbnail_model:
-            self._grid_refreshes += 1
-            self._thumbnail_model.refresh_from_controller(
-                self.image_files,
-                metadata_map_fn=self._get_bulk_metadata_map,
-            )
-            self._path_resolver.update_from_model(self._thumbnail_model)
-            self._grid_model_dirty = False
+            self._refresh_thumbnail_model_from_controller()
         else:
             self._grid_model_dirty = True
 
@@ -858,13 +846,7 @@ class AppController(QObject):
             self._thumbnail_prefetcher.cancel_all()
 
         if self._is_grid_view_active and self._thumbnail_model:
-            self._grid_refreshes += 1
-            self._thumbnail_model.refresh_from_controller(
-                self.image_files,
-                metadata_map_fn=self._get_bulk_metadata_map,
-            )
-            self._path_resolver.update_from_model(self._thumbnail_model)
-            self._grid_model_dirty = False
+            self._refresh_thumbnail_model_from_controller()
         else:
             self._grid_model_dirty = True
 
@@ -1180,6 +1162,31 @@ class AppController(QObject):
             index, is_navigation=is_navigation, direction=direction
         )
 
+    def _refresh_thumbnail_model_from_controller(self) -> None:
+        """Refresh the grid model from ``image_files`` with paths primed first."""
+        if not self._thumbnail_model:
+            return
+
+        self._grid_refreshes += 1
+        path_resolver = getattr(self, "_path_resolver", None)
+
+        if path_resolver:
+            # QML thumbnail Images use asynchronous loading. endResetModel() can publish
+            # new thumbnailSource URLs and queue provider requests on Qt's image-loading
+            # thread before this method returns. Prime the resolver first so
+            # startup/filter/reset requests can resolve paths immediately.
+            # refresh_from_controller() builds image entries directly from img.path,
+            # so this primed map already covers every final image row.
+            # Removing this will cause grey placeholders that only resolve on scroll.
+            path_resolver.update_from_paths(img.path for img in self.image_files)
+
+        self._thumbnail_model.refresh_from_controller(
+            self.image_files,
+            metadata_map_fn=self._get_bulk_metadata_map,
+        )
+
+        self._grid_model_dirty = False
+
     def load(self, skip_thumbnail_refresh: bool = False):
         """Loads images, sidecar data, and starts services."""
         # Reset instrumentation for this load operation
@@ -1210,13 +1217,7 @@ class AppController(QObject):
                 and self._grid_model_dirty
                 and self._thumbnail_model.rowCount() == 0
             ):
-                self._grid_refreshes += 1
-                self._thumbnail_model.refresh_from_controller(
-                    self.image_files,
-                    metadata_map_fn=self._get_bulk_metadata_map,
-                )
-                self._path_resolver.update_from_model(self._thumbnail_model)
-                self._grid_model_dirty = False
+                self._refresh_thumbnail_model_from_controller()
 
         self._set_folder_loaded(True)
 
@@ -1292,13 +1293,7 @@ class AppController(QObject):
 
         # Refresh thumbnail model if it exists (for external file changes or startup)
         if self._thumbnail_model and self._is_grid_view_active:
-            self._grid_refreshes += 1
-            self._thumbnail_model.refresh_from_controller(
-                self.image_files,
-                metadata_map_fn=self._get_bulk_metadata_map,
-            )
-            self._path_resolver.update_from_model(self._thumbnail_model)
-            self._grid_model_dirty = False
+            self._refresh_thumbnail_model_from_controller()
 
     @Slot()
     def _on_watcher_refresh(self):
@@ -3264,17 +3259,8 @@ class AppController(QObject):
                 self._grid_model_dirty or self._thumbnail_model.rowCount() == 0
             )
             if needs_refresh:
-                self._grid_refreshes += 1
-
                 # Always use controller's list, even if empty.
-                self._thumbnail_model.refresh_from_controller(
-                    self.image_files,
-                    metadata_map_fn=self._get_bulk_metadata_map,
-                )
-
-                # Update path resolver for the current directory
-                self._path_resolver.update_from_model(self._thumbnail_model)
-                self._grid_model_dirty = False
+                self._refresh_thumbnail_model_from_controller()
 
             # Find current loupe image in grid and scroll to it
             if self.image_files and 0 <= self.current_index < len(self.image_files):

@@ -200,10 +200,14 @@ Item {
             // Calculate item indices
             var topIndex = startRow * cols
             var bottomIndex = (endRow * cols) - 1
+            var visibleTopIndex = firstRow * cols
+            var visibleBottomIndex = ((firstRow + rowsVisible) * cols) - 1
 
             // Clamp to model boundaries
             topIndex = Math.max(0, Math.min(topIndex, thumbnailGrid.count - 1))
             bottomIndex = Math.max(0, Math.min(bottomIndex, thumbnailGrid.count - 1))
+            visibleTopIndex = Math.max(0, Math.min(visibleTopIndex, thumbnailGrid.count - 1))
+            visibleBottomIndex = Math.max(0, Math.min(visibleBottomIndex, thumbnailGrid.count - 1))
 
             // Determine budget (intended items to prefetch)
             var maxCount = (rowsVisible + 2 * padRows) * cols
@@ -216,7 +220,7 @@ Item {
 
             // Actually trigger prefetch
             if (gridViewRoot.uiStateRef) {
-                gridViewRoot.uiStateRef.gridPrefetchRange(topIndex, bottomIndex, maxCount)
+                gridViewRoot.uiStateRef.gridPrefetchRange(topIndex, bottomIndex, maxCount, visibleTopIndex, visibleBottomIndex)
             }
         }
 

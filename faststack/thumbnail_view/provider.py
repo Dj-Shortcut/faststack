@@ -3,7 +3,8 @@
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from threading import Lock
+from typing import TYPE_CHECKING, Iterable, NamedTuple, Optional
 from urllib.parse import unquote
 
 from PySide6.QtCore import QSize
@@ -327,32 +328,46 @@ class PathResolver:
 
     def __init__(self):
         self._hash_to_path: dict = {}
+        self._lock = Lock()
 
     def register(self, path: Path, path_hash: str):
         """Register a path with its hash."""
-        self._hash_to_path[path_hash] = path
+        with self._lock:
+            self._hash_to_path[path_hash] = path
 
     def resolve(self, path_hash: str) -> Optional[Path]:
         """Resolve a hash to its path."""
-        return self._hash_to_path.get(path_hash)
+        with self._lock:
+            return self._hash_to_path.get(path_hash)
 
     def clear(self):
         """Clear all registered paths."""
-        self._hash_to_path.clear()
+        with self._lock:
+            self._hash_to_path = {}
+
+    def update_from_paths(self, paths: Iterable[Path]):
+        """Atomically replace registrations from concrete image paths."""
+        new_map = {compute_path_hash(path): path for path in paths}
+        with self._lock:
+            self._hash_to_path = new_map
 
     def update_from_model(self, model: "ThumbnailModel"):
         """Update registrations from a ThumbnailModel."""
-        self.clear()
-
         t0 = time.perf_counter()
 
         # Optimized update using fast string hashing (no filesystem calls)
+        new_map = {}
         for i in range(model.rowCount()):
             entry = model.get_entry(i)
             if entry and not entry.is_folder:
                 # Use centralized hash helper to ensure match with ThumbnailModel
                 path_hash = compute_path_hash(entry.path)
-                self._hash_to_path[path_hash] = entry.path
+                new_map[path_hash] = entry.path
+
+        # Swap the complete map in one lock hold. requestImage() can run while
+        # the model is resetting, so avoid exposing a transient empty map.
+        with self._lock:
+            self._hash_to_path = new_map
 
         dt = time.perf_counter() - t0
         log.debug(
