@@ -5147,14 +5147,14 @@ class AppController(QObject):
     @Slot(result=int)
     def get_defined_batch_count(self) -> int:
         """Return the total number of valid image indices in defined batches."""
-        if not self.image_files:
+        if not self.batches:
             return 0
 
         max_index = len(self.image_files) - 1
         total_count = 0
         for start, end in self.batches:
-            clamped_start = max(0, min(start, max_index))
-            clamped_end = max(0, min(end, max_index))
+            clamped_start = max(start, 0)
+            clamped_end = min(end, max_index)
             if clamped_start <= clamped_end:
                 total_count += clamped_end - clamped_start + 1
         return total_count

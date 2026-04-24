@@ -1790,6 +1790,14 @@ ApplicationWindow {
         id: quitBatchesDialog
         backgroundColor: root.currentBackgroundColor
         textColor: root.currentTextColor
+        darkTheme: root.isDarkTheme
+        frameBorderColor: root.isDarkTheme ? "#404040" : "#d0d0d0"
+        cancelBgColor: root.isDarkTheme ? "#444444" : "#f0f0f0"
+        cancelHoverColor: root.isDarkTheme ? "#666666" : "#e0e0e0"
+        cancelPressedColor: root.isDarkTheme ? "#555555" : "#d0d0d0"
+        quitBgColor: root.isDarkTheme ? "#aa0000" : "#c62828"
+        quitHoverColor: root.isDarkTheme ? "#ff0000" : "#d32f2f"
+        quitPressedColor: root.isDarkTheme ? "#cc0000" : "#b71c1c"
         controllerRef: root.controllerRef
         onQuitConfirmed: {
             root.allowCloseWithBatches = true

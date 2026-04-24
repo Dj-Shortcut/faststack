@@ -17,7 +17,7 @@ This tool is optimized for speed, using `libjpeg-turbo` for decoding, aggressive
 - **Instant Navigation:** Sub-10ms next/previous image switching, high performance decoding via `PyTurboJPEG`.
 - **Image Editor:** Built-in editor with exposure, contrast, white balance, sharpness, and more (E key)
 - **Background Darkening:** Mask-based background darkening tool (K key) with smart edge detection, subject protection, and multiple modes. Paint rough background hints and the tool refines them into natural-looking dark backgrounds.
-- **Quick Auto Adjust:** Press `l` for quick auto-levels, `L` for auto white balance + auto-levels together, `A` for auto white balance, `-` to keep darkening the highlight/white side in 7-point steps, and `=` to deepen the shadow side in 7-point steps. These update the live in-memory edit session immediately and save once when you navigate away, start a drag, or explicitly save.
+- **Quick Auto Adjust:** Press `l` for quick auto-levels, `L` for auto white balance + auto-levels together, `A` for auto white balance, `-`/`_` to keep adjusting the highlight/white side in 14-point steps, and `=` to deepen the shadow side in 7-point steps. These update the live in-memory edit session immediately and save once when you navigate away, start a drag, or explicitly save.
 - **Photoshop / Gimp Integration:** Edit current image in Photoshop or Gimp (P key) - always uses RAW files when available.
 - **Clipboard Support:** Copy image path to clipboard (Ctrl+C)
 - **Image Filtering:** Filter images by filename
