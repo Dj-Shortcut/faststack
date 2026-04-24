@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -79,6 +80,23 @@ def test_apply_filter_uses_efficient_refresh(controller):
     assert not controller._thumbnail_model.refresh.called
     # Check that it called set_filter with refresh=False
     controller._thumbnail_model.set_filter.assert_called_with("test", refresh=False)
+
+
+def test_controller_refresh_primes_resolver_without_model_rehash(controller):
+    """Controller-driven refresh should not rehash final model rows twice."""
+    image_path = Path("image.jpg")
+    image = Mock()
+    image.path = image_path
+    controller.image_files = [image]
+    controller._thumbnail_model.refresh_from_controller.reset_mock()
+    controller._path_resolver.update_from_paths.reset_mock()
+    controller._path_resolver.update_from_model.reset_mock()
+
+    controller._refresh_thumbnail_model_from_controller()
+
+    controller._path_resolver.update_from_paths.assert_called_once()
+    controller._path_resolver.update_from_model.assert_not_called()
+    controller._thumbnail_model.refresh_from_controller.assert_called_once()
 
 
 def test_loupe_filter_handles_dirty_flag(controller):

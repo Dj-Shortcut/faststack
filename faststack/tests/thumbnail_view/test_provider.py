@@ -92,6 +92,19 @@ class TestPathResolver:
         # Old registration should be cleared
         assert resolver.resolve("oldhash") is None
 
+    def test_update_from_paths_replaces_registrations(self):
+        """Test priming resolver directly from concrete image paths."""
+        resolver = PathResolver()
+        old_path = Path("/old/path.jpg")
+        new_path = Path("/test/image.jpg")
+        resolver.register(old_path, "oldhash")
+
+        resolver.update_from_paths([new_path])
+
+        assert resolver.resolve("oldhash") is None
+        assert len(resolver._hash_to_path) == 1
+        assert next(iter(resolver._hash_to_path.values())) == new_path
+
 
 # Note: ThumbnailProvider tests are skipped because they require a running
 # Qt GUI application (QApplication). The provider creates QPixmap objects

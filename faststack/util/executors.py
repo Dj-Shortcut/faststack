@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import logging
 import queue
 import threading
@@ -190,6 +191,33 @@ class PriorityExecutor:
         except queue.Full:
             fut.set_exception(RuntimeError("PriorityQueue full"))
         return fut
+
+    def bump_priority(self, future: Future, priority: int) -> bool:
+        """Raise the priority of a queued task if it has not started yet.
+
+        Returns True when the task was still queued and its queue ordering was
+        updated. Running, done, cancelled, or already-higher-priority tasks are
+        left untouched.
+        """
+        with self._count_lock:
+            self._count += 1
+            neg_seq = -self._count
+
+        # Relies on CPython queue.Queue internals (.mutex and .queue heap);
+        # recheck this on major Python upgrades.
+        with self._queue.mutex:
+            for idx, item in enumerate(self._queue.queue):
+                current_priority, _old_neg_seq, fn, args, kwargs, fut = item
+                if fut is not future:
+                    continue
+                if fut.cancelled() or fut.running() or fut.done():
+                    return False
+                if priority >= current_priority:
+                    return False
+                self._queue.queue[idx] = (priority, neg_seq, fn, args, kwargs, fut)
+                heapq.heapify(self._queue.queue)
+                return True
+        return False
 
     def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
         """Shutdown the executor.

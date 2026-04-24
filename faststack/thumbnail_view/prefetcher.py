@@ -15,8 +15,8 @@ import numpy as np
 from PIL import Image
 
 import faststack.util.thumb_debug as thumb_debug
-from faststack.imaging.orientation import apply_orientation_to_np, get_exif_orientation
 from faststack.imaging.jpeg import _decode_with_retry
+from faststack.imaging.orientation import apply_orientation_to_np, get_exif_orientation
 from faststack.imaging.turbo import TJPF_RGB, create_turbojpeg
 from faststack.io.utils import compute_path_hash
 from faststack.util.executors import create_priority_executor
@@ -211,11 +211,17 @@ class ThumbnailPrefetcher:
                         and priority < existing_timer.prio_effective
                     ):
                         existing_timer.prio_effective = priority
+                        future = self._futures.get(job_key)
+                        priority_bumped = (
+                            future is not None
+                            and self._executor.bump_priority(future, priority)
+                        )
                         if timer:
                             thumb_debug.log_trace(
                                 "prio_bump",
                                 rid=existing_timer.rid,
                                 new_prio=priority,
+                                queue_bumped=priority_bumped,
                                 triggered_by_rid=timer.rid,
                             )
 

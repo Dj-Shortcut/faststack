@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -103,5 +104,51 @@ def test_prefetcher_lifo_behavior(cache):
             assert finished_jobs[1] == "job_3.jpg"
             assert finished_jobs[2] == "job_2.jpg"
             assert finished_jobs[3] == "job_1.jpg"
+    finally:
+        pf.shutdown()
+
+
+def test_coalesced_priority_upgrade_reorders_queued_job(cache):
+    """A duplicate high-priority submit should bump the queued original job."""
+    started = threading.Event()
+    release = threading.Event()
+    finished_jobs = []
+
+    def mock_decode(path, path_hash, mtime_ns, size, *args, **kwargs):
+        if path.name == "blocker.jpg":
+            started.set()
+            release.wait(2.0)
+        finished_jobs.append(path.name)
+        return b"fake_data"
+
+    pf = ThumbnailPrefetcher(
+        cache=cache,
+        on_ready_callback=lambda x: None,
+        max_workers=1,
+        target_size=200,
+    )
+
+    try:
+        with patch.object(pf, "_decode_worker", side_effect=mock_decode):
+            assert pf.submit(Path("blocker.jpg"), 1000, priority=pf.PRIO_MED)
+            assert started.wait(1.0)
+
+            assert pf.submit(Path("target_visible.jpg"), 1000, priority=pf.PRIO_MED)
+            assert not pf.submit(
+                Path("target_visible.jpg"), 1000, priority=pf.PRIO_HIGH
+            )
+            assert pf.submit(Path("newer_medium.jpg"), 1000, priority=pf.PRIO_MED)
+
+            release.set()
+            deadline = time.time() + 2.0
+            while len(finished_jobs) < 3 and time.time() < deadline:
+                time.sleep(0.05)
+
+            assert len(finished_jobs) == 3
+            assert finished_jobs == [
+                "blocker.jpg",
+                "target_visible.jpg",
+                "newer_medium.jpg",
+            ]
     finally:
         pf.shutdown()
